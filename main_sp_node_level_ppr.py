@@ -3,8 +3,6 @@ import torch.nn.functional as F
 import numpy as np
 from models.graphormer_dist_node_level import Graphormer
 from models.gt_dist_node_level import GT
-from utils.logger import log
-import utils.logger as logger
 from utils.lr import PolynomialDecayLR
 import argparse
 import os
@@ -24,28 +22,27 @@ from gt_sp.initialize import (
 )
 from gt_sp.reducer import sync_params_and_buffers, Reducer
 from gt_sp.evaluate import sparse_eval_gpu
-from gt_sp.utils import random_split_idx, get_batch_reorder_blockize, check_conditions,get_node_degrees,compute_graphormer_data
+from gt_sp.utils import compute_graphormer_data, get_node_degrees, random_split_idx, get_batch_reorder_blockize, check_conditions
 from utils.parser_node_level import parser_add_main_args
-from collections import deque
-
+from core.pprPartition import pagerank_partition
 from utils.vis import vis_interface
 import utils.vis as vis
+import utils.logger as logger
 
 def main():
     logger.IS_LOGGING = False
     parser = argparse.ArgumentParser(description='TorchGT node-level training arguments.')
     parser_add_main_args(parser)
     args = parser.parse_args()
-
-    vis.vis_dir = args.vis_dir
    
     # Initialize distributed 
     initialize_distributed(args)
-    device = f'cuda:{torch.cuda.current_device()}'
+    device = f'cuda:{torch.cuda.current_device()}' 
     
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
+    
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
     
@@ -53,31 +50,23 @@ def main():
         os.makedirs(args.model_dir, exist_ok=True)
     
     # Dataset 
-    # feature = torch.load(args.dataset_dir + args.dataset + '/x.pt') # [N, x_dim]
-    # y = torch.load(args.dataset_dir + args.dataset + '/y.pt') # [N]
-    # edge_index = torch.load(args.dataset_dir + args.dataset + '/edge_index.pt') # [2, num_edges]
-    
-    feature = torch.load(os.path.join(args.dataset_dir, args.dataset, 'x.pt'))
-    y = torch.load(os.path.join(args.dataset_dir, args.dataset, 'y.pt'))
-    edge_index = torch.load(os.path.join(args.dataset_dir, args.dataset, 'edge_index.pt'))
+    feature = torch.load(args.dataset_dir + args.dataset + '/x.pt') # [N, x_dim]
+    y = torch.load(args.dataset_dir + args.dataset + '/y.pt') # [N]
+    edge_index = torch.load(args.dataset_dir + args.dataset + '/edge_index.pt') # [2, num_edges]
     N = feature.shape[0]
 
     # ===== 计算centrality encoding =====
     graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
     # ==================================
-    
+
     # =====    attention bias     =====
     print("图空间结构预处理计算中...")
     global_spatial_pos, global_edge_input = compute_graphormer_data(edge_index, N, max_dist=args.max_dist)
     print("预处理完成")
     # ================================== 
-    
-    
-    
-    
+
     if args.dataset == 'pokec':
         y = torch.clamp(y, min=0) 
-    log(f"y shape:{y.shape}")
     split_idx = random_split_idx(y, frac_train=0.6, frac_valid=0.2, frac_test=0.2, seed=args.seed)
 
     if args.rank == 0:
@@ -93,6 +82,7 @@ def main():
         group = get_sequence_parallel_group()
 
     train_idx = split_idx['train']
+    
     if args.rank == 0:
         flatten_train_idx = train_idx.to('cuda')
     else:
@@ -101,16 +91,12 @@ def main():
                                 device=device,
                                 dtype=torch.int64)
     # Broadcast
-    # 将 src_rank 的训练集节点 train_id 广播到 group 所有卡上
     if seq_parallel_world_size > 1:
         dist.broadcast(flatten_train_idx, src_rank, group=group)
 
     # Initialize global token indices
     seq_len_per_rank = get_sequence_length_per_rank()
-    # 一个进程要处理的子序列的真正长度需要加上 VNode
-    sub_real_seq_len = seq_len_per_rank + args.num_global_node 
-    # 每个子序列训练时需要加上一个 global_token 作为 VNode
-    # 所有 global_token 的 node_id 就是[0 , sub_real_seq_len , 2*sub_real_seq_len]
+    sub_real_seq_len = seq_len_per_rank + args.num_global_node
     global_token_indices = list(range(0, seq_parallel_world_size * sub_real_seq_len, sub_real_seq_len))
 
     # Last batch fix sequence length
@@ -162,7 +148,7 @@ def main():
             num_in_degree = 512,
             num_out_degree = 512,
             num_spatial=512,
-            num_edges=1024,
+            num_edges=1,
             max_dist=args.max_dist,
             edge_dim=64
         ).to(device)
@@ -185,38 +171,35 @@ def main():
     
     val_acc_list, test_acc_list, epoch_t_list = [], [], []
     best_model, best_val, best_test = None, float('-inf'), float('-inf')
-
-    num_batch = flatten_train_idx.size(0) // args.seq_len + 1
-
-    compare_ldr = deque([0, 0, 0, 0, 0]) 
-    beta_coeffi_list = [0, 1, 1.5, 5, 7, 10, '1']
-    beta_max, beta_idx  = 1, 1
     
-    score_agg = None
-    mask = None
+    # 在训练开始前创建或清空CSV文件并写入表头
+    import csv
+    csv_file = "training_log.csv"
+    with open(csv_file, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Epoch', 'Loss', 'Time', 'Train acc', 'Val acc', 'Test acc'])
+    
+    # =================== ppr partition =========================
+    partitioned_results = pagerank_partition(edge_index,0.85,num_set=100,topk=100)
+    # =============================================================
+
     for epoch in range(1, args.epochs + 1):
         model.to(device)
         model.train()
         
         loss_list, iter_t_list = [], []
         
-        if args.attn_type == "hybrid":
-            percent_list  = [(i + 1) / args.switch_freq for i in range(args.switch_freq)]
-            switch_points = [int(num_batch * percentage) for percentage in percent_list]
-        iter = 1
-        
-        for i in range(num_batch):
-            idx_i = flatten_train_idx[i*args.seq_len: (i+1)*args.seq_len]
-            log(f"rank:{args.rank},idx:{idx_i}")
+        scores = []
+        for i in range(len(partitioned_results)):
+            attn_type = "full"
             
-            # == 关闭reorder  ==
-            if args.struct_enc=="True":
-                args.reorder = False
-            # == ===========  ==
-            packed_data = get_batch_reorder_blockize(args, feature, y, idx_i.to("cpu"), sub_split_seq_lens, device, edge_index, N, k=8, block_size=16, beta_coeffi=beta_coeffi_list[beta_idx])
+            t1 = time.time()
+            idx_i = torch.tensor(partitioned_results[i])
+            x_i = feature[idx_i].to(device)
+            attn_bias = None
+            edge_index_i = None
+            mask = None
 
-            x_i, y_i, edge_index_i, attn_bias,idx_i = packed_data
-            
             # == node degree in the sequnence ==
             in_degree = graph_in_degree[idx_i].to(device)
             out_degree = graph_out_degree[idx_i].to(device)
@@ -229,42 +212,12 @@ def main():
                 # edge_input 切片: [Batch, Batch, Max_Dist]
             edge_input_i = global_edge_input[idx_i.to("cpu")][:, idx_i.to("cpu"), :].to(device)
             # =================================================
-            
-            
-            
-            if attn_bias is not None:
-                x_i, y_i, edge_index_i, attn_bias,idx_i = x_i.to(device), y_i.to(device), edge_index_i.to(device), attn_bias.to(device),idx_i.to(device)
-            else:
-                x_i, y_i, edge_index_i,idx_i = x_i.to(device), y_i.to(device), edge_index_i.to(device),idx_i.to(device)
-        
-            if args.attn_type == "sparse":
-                attn_type = "sparse"
-            elif args.attn_type == "full":
-                attn_type = "full"
-            elif args.attn_type == "flash":
-                attn_type = "flash"
 
-            t1 = time.time()
-            
-            # 直接剔除一部分邻居
-            # ==================================================
-            # mask = vis.homo_node_mask(edge_index,idx_i,0.1)
-            # print(f"mask shape:{mask.shape},x shape:{x_i.shape}")
-            # ==================================================
-            
-            # 训练稳定后进行节点剔除
-            # ==================================================
-            # mask = None
-            # if epoch>100:
-            #     mask = vis.mask_high_attn(score_agg,idx_i,edge_index,epoch)
-            # ==================================================
-            
-            
-            log(f"x shape:{x_i.shape}")
-            log(f"rank:{args.rank},i:{i},x:{x_i}")
+
             out_i,score_agg,score_spe = model(x_i, attn_bias, edge_index_i,in_degree,out_degree, spatial_pos_i,edge_input_i,attn_type=attn_type,mask=mask)
-            # print(f"score:{score_spe[3].shape}")
-            loss = F.nll_loss(out_i, y_i.long())
+            scores.append(score_agg)
+
+            loss = F.nll_loss(out_i, y[partitioned_results[i]].to(device).long())
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             
@@ -275,22 +228,32 @@ def main():
                         param.grad.div_(get_sequence_parallel_world_size())
                         dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=get_sequence_parallel_group())
 
-            optimizer.step()  
-            torch.cuda.synchronize()   
+            optimizer.step()
             t2 = time.time()
-            
+             
             iter_t_list.append(t2 - t1)
-            if i==0:
-                # vis_interface(score_agg,idx_i,edge_index,epoch,args)
-                vis_interface(score_spe[3].squeeze(0)[0],idx_i,edge_index,x_i,epoch,args)
-    
-        loss_list.append(loss.item())
+            if epoch % 20 ==0 and i==0:
+                vis_interface(score_agg,score_spe,idx_i,edge_index,epoch,args)
+            
+        loss_list.append(loss.item()) 
         lr_scheduler.step()
         
-        if epoch > 4 and args.rank == 0:  
+        # 窗口调整
+        # =================================================================
+        # if (epoch+1) % 20 == 0:
+        #     partitionTree.dynamic_window_build(scores,metis_partition_nodes,remove_ratio=0.05)
+        # =================================================================
+        
+        csv_content = []
+        
+        if epoch > 4 and args.rank == 0:
             epoch_t_list.append(np.sum(iter_t_list))
             print("------------------------------------------------------------------------------------")
             print("Epoch: {:03d}, Loss: {:.4f}, Epoch Time: {:.3f}s".format(epoch, np.mean(loss_list), np.mean(epoch_t_list)))
+            # 在每个epoch结束后写入数据
+            csv_content.append(epoch)
+            csv_content.append(np.mean(loss_list))
+            csv_content.append(np.mean(epoch_t_list))
             print("------------------------------------------------------------------------------------")
 
         if args.rank == 0 and epoch % 5 == 0:   
@@ -298,18 +261,21 @@ def main():
             train_acc = sparse_eval_gpu(args, model, feature, y, split_idx['train'], attn_bias, edge_index, device,graph_in_degree, graph_out_degree,global_spatial_pos,global_edge_input) 
             val_acc = sparse_eval_gpu(args, model, feature, y, split_idx['valid'], attn_bias, edge_index, device,graph_in_degree, graph_out_degree,global_spatial_pos,global_edge_input)
             test_acc = sparse_eval_gpu(args, model, feature, y, split_idx['test'], attn_bias, edge_index, device,graph_in_degree, graph_out_degree,global_spatial_pos,global_edge_input)
-            if epoch % 50 ==0:
+            if epoch % 20 ==0 and i==0:
                 vis.train_acc.append(train_acc)
                 vis.val_acc.append(val_acc)
                 vis.test_acc.append(test_acc)
-                
+            
             t5 = time.time()
             print("------------------------------------------------------------------------------------")
             print(f'Eval time {t5-t4}s')
             print("Epoch: {:03d}, Loss: {:4f}, Train acc: {:.2%}, Val acc: {:.2%}, Test acc: {:.2%}, Epoch Time: {:.3f}s".format(
                 epoch, np.mean(loss_list), train_acc, val_acc, test_acc, np.mean(epoch_t_list)))
+            csv_content.append(train_acc)
+            csv_content.append(val_acc)
+            csv_content.append(test_acc)
             print("------------------------------------------------------------------------------------")
-            
+        
             if val_acc > best_val:
                 best_val = val_acc
                 if args.save_model:
@@ -320,49 +286,14 @@ def main():
             
             val_acc_list.append(val_acc)
             test_acc_list.append(test_acc)
-
-        # Adaptive beta
-        if args.rank == 0:
-            if epoch == 1:
-                f_loss = loss.item() 
-            else:
-                f_loss_old = f_loss
-                f_loss = 0.9 * f_loss + 0.1 * loss.item()
-                if epoch >= 5:
-                    v_loss = abs(f_loss - f_loss_old) / np.sum(iter_t_list)
-                    compare_ldr.popleft()
-                    compare_ldr.append(v_loss)
-                    if epoch >= 9:
-                        increase_beta, reduce_beta = True, True
-                        for k in range(1, len(compare_ldr)):
-                            if compare_ldr[k] > compare_ldr[k-1]:
-                                reduce_beta = False
-                                break
-                        for k in range(1, len(compare_ldr)):
-                            if compare_ldr[k] < compare_ldr[k-1]:
-                                increase_beta = False
-                                break
-                        if increase_beta:
-                            if beta_idx < len(beta_coeffi_list)-1:
-                                beta_idx = beta_idx + 1
-                        if reduce_beta:
-                            if beta_idx > 0:
-                                beta_idx = beta_idx - 1
-
-        # Notify other ranks on the beta change           
-        if args.rank == 0:
-            beta_idx_broad = torch.LongTensor([beta_idx]).to(device)
-        else:
-            beta_idx_broad = torch.empty(1, dtype=torch.int64, device=device)
-
-        dist.barrier()
-        if seq_parallel_world_size > 1:
-            dist.broadcast(beta_idx_broad, src_rank, group=group)
-        beta_idx = int(beta_idx_broad.item())
-
+            
+        with open(csv_file, 'a', newline='') as f:
+            writer = csv.writer(f)
+            if csv_content:
+                writer.writerow(csv_content)
+    
     if args.rank == 0:
         print("Best validation accuracy: {:.2%}, test accuracy: {:.2%}".format(best_val, best_test))
-            
 
 
 if __name__ == "__main__":

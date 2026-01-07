@@ -303,8 +303,8 @@ class EncoderLayer(nn.Module):
         # ==================================    
 
 
-        # y = self.FFN_layer1(y)                  # 原代码这里的输入是 y ??? 
-        y = self.FFN_layer1(x)
+        y = self.FFN_layer1(y)                  # 原代码这里的输入是 y ??? 
+        # y = self.FFN_layer1(x)
         y = F.relu(y)
         y = self.self_attention_dropout(y)
         y = self.FFN_layer2(y)
@@ -453,8 +453,10 @@ class AttnBias(nn.Module):
         edge_bias = edge_bias.permute(0, 3, 1, 2)
         
         # ================== C. 融合 ==================
-        total_bias = spatial_bias + edge_bias         
+        total_bias = spatial_bias + edge_bias
+        # total_bias = spatial_bias
         return total_bias
+        # return None 
 
 ## ==================================================================================
 
@@ -539,7 +541,6 @@ class GT(nn.Module):
             out_degree = out_degree.unsqueeze(0)
             node_feature = self.centrality_encoding(node_feature, in_degree, out_degree)
         # =====                     =====
-        output = self.input_dropout(node_feature)
         
         # =====   attention_bias    =====
         if self.args.struct_enc=="True":
@@ -552,8 +553,8 @@ class GT(nn.Module):
                 attn_bias = bias
         # =====                     =====     
         
-        
-        
+        output = self.input_dropout(node_feature)
+
         # [b, s/p+1, h]
         score_agg = None
         score_spe = []
@@ -561,7 +562,7 @@ class GT(nn.Module):
             log(f"output shape:{output.shape}")
             output,score = enc_layer(
                 output, 
-                attn_bias = attn_bias,
+                # attn_bias = attn_bias,
                 edge_index=edge_index,
                 attn_type=attn_type,
                 mask=mask

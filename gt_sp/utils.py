@@ -14,6 +14,7 @@ import contextlib
 import networkx as nx
 from torch.utils.data import DataLoader, SubsetRandomSampler
 from torch_geometric.utils import to_undirected, remove_self_loops, add_self_loops, subgraph
+from tqdm import tqdm
 from gt_sp.initialize import (
     sequence_parallel_is_initialized,
     get_sequence_parallel_group,
@@ -1005,7 +1006,7 @@ def compute_graphormer_data(edge_index, num_nodes, max_dist=5):
     G.add_edges_from(edge_list)
     
     # 3. 计算所有点对路径
-    for i in range(num_nodes):
+    for i in tqdm(range(num_nodes),desc="计算位置嵌入"):
         # 计算从节点 i 出发，距离不超过 max_dist 的所有路径
         paths = nx.single_source_shortest_path(G, i, cutoff=max_dist)
         
