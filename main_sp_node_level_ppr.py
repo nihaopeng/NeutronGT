@@ -24,7 +24,7 @@ from gt_sp.reducer import sync_params_and_buffers, Reducer
 from gt_sp.evaluate import sparse_eval_gpu
 from gt_sp.utils import compute_graphormer_data, get_node_degrees, random_split_idx, get_batch_reorder_blockize, check_conditions
 from utils.parser_node_level import parser_add_main_args
-from core.pprPartition import pagerank_partition
+from core.pprPartition import personal_pagerank,build_adj_fromat,ppr_partition,metis_partition
 from utils.vis import vis_interface
 import utils.vis as vis
 import utils.logger as logger
@@ -34,6 +34,8 @@ def main():
     parser = argparse.ArgumentParser(description='TorchGT node-level training arguments.')
     parser_add_main_args(parser)
     args = parser.parse_args()
+
+    vis.vis_dir = args.vis_dir
    
     # Initialize distributed 
     initialize_distributed(args)
@@ -54,16 +56,6 @@ def main():
     y = torch.load(args.dataset_dir + args.dataset + '/y.pt') # [N]
     edge_index = torch.load(args.dataset_dir + args.dataset + '/edge_index.pt') # [2, num_edges]
     N = feature.shape[0]
-
-    # ===== 计算centrality encoding =====
-    graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
-    # ==================================
-
-    # =====    attention bias     =====
-    print("图空间结构预处理计算中...")
-    global_spatial_pos, global_edge_input = compute_graphormer_data(edge_index, N, max_dist=args.max_dist)
-    print("预处理完成")
-    # ================================== 
 
     if args.dataset == 'pokec':
         y = torch.clamp(y, min=0) 
@@ -180,8 +172,21 @@ def main():
         writer.writerow(['Epoch', 'Loss', 'Time', 'Train acc', 'Val acc', 'Test acc'])
     
     # =================== ppr partition =========================
-    partitioned_results = pagerank_partition(edge_index,0.85,num_set=100,topk=100)
+    sorted_ppr_matrix = personal_pagerank(edge_index,0.85,topk=50)
+    # csr_adjacency,eweights = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
+    # partitioned_results = metis_partition(csr_adjacency,eweights,flatten_train_idx.cpu().numpy(),n_parts=10)
+    partitioned_results = ppr_partition(sorted_ppr_matrix,flatten_train_idx.cpu().numpy(),num_set=100)
     # =============================================================
+    
+    # ===== 计算centrality encoding =====
+    graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
+    # ==================================
+
+    # =====    attention bias     =====
+    print("图空间结构预处理计算中...")
+    global_spatial_pos, global_edge_input = compute_graphormer_data(edge_index, N, max_dist=args.max_dist)
+    print("预处理完成")
+    # ================================== 
 
     for epoch in range(1, args.epochs + 1):
         model.to(device)
@@ -194,7 +199,8 @@ def main():
             attn_type = "full"
             
             t1 = time.time()
-            idx_i = torch.tensor(partitioned_results[i])
+            # idx_i = flatten_train_idx[i*args.seq_len: (i+1)*args.seq_len]
+            idx_i = partitioned_results[i]
             x_i = feature[idx_i].to(device)
             attn_bias = None
             edge_index_i = None
@@ -216,7 +222,8 @@ def main():
 
             out_i,score_agg,score_spe = model(x_i, attn_bias, edge_index_i,in_degree,out_degree, spatial_pos_i,edge_input_i,attn_type=attn_type,mask=mask)
             scores.append(score_agg)
-
+            # print(f"out_i shape:{out_i.shape},out_i:{out_i[0]}")
+            # print(f"label:{y[partitioned_results[i]]}")
             loss = F.nll_loss(out_i, y[partitioned_results[i]].to(device).long())
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -232,8 +239,8 @@ def main():
             t2 = time.time()
              
             iter_t_list.append(t2 - t1)
-            if epoch % 20 ==0 and i==0:
-                vis_interface(score_agg,score_spe,idx_i,edge_index,epoch,args)
+            if i==0:
+                vis_interface(score_spe[3].squeeze(0)[0],idx_i,edge_index,x_i,epoch,args)
             
         loss_list.append(loss.item()) 
         lr_scheduler.step()

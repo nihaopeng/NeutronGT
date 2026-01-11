@@ -411,8 +411,6 @@ def vis_interface(score_matri,idx,edge_index,feature_i,epoch,args):
         idx = idx.cpu().detach().numpy() if isinstance(idx,torch.Tensor) else idx
         edge_index=edge_index.cpu().detach().numpy() if isinstance(edge_index,torch.Tensor) else edge_index
         feature_i=feature_i.cpu().detach().numpy() if isinstance(feature_i,torch.Tensor) else feature_i
-        if not os.path.exists(vis_dir):
-            os.makedirs(vis_dir)
         # high_attn(score_matri,epoch)
         # neighbor_high_attn(score_matri,edge_index,idx,epoch)
         # neighbor(score_matri,idx,edge_index,epoch)

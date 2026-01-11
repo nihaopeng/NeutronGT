@@ -35,6 +35,8 @@ def main():
     parser = argparse.ArgumentParser(description='TorchGT node-level training arguments.')
     parser_add_main_args(parser)
     args = parser.parse_args()
+
+    vis.vis_dir = args.vis_dir
    
     # Initialize distributed 
     initialize_distributed(args)
