@@ -18,7 +18,6 @@ from utils.logger import log
 
 # from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
 
-
 def init_params(module, n_layers):
     if isinstance(module, nn.Linear):
         module.weight.data.normal_(mean=0.0, std=0.02 / math.sqrt(n_layers))
@@ -227,9 +226,10 @@ class MultiHeadAttention(nn.Module):
         self.linear_k = nn.Linear(hidden_size, num_heads * att_size)
         self.linear_v = nn.Linear(hidden_size, num_heads * att_size)
 
-        local_attn = CoreAttention(
+        self.local_attn = CoreAttention(
             hidden_size, attention_dropout_rate, num_heads)
-        self.dist_attn = DistributedAttentionNodeLevel(local_attn, get_sequence_parallel_group())
+        # ======================================= 取消跨设备分head操作，每个设备独立计算自己的窗口。
+        self.dist_attn = DistributedAttentionNodeLevel(self.local_attn, get_sequence_parallel_group())
 
 
     def forward(self, x, attn_bias=None, edge_index=None, attn_type=None,mask = None,pruning_mask=None):
@@ -253,7 +253,9 @@ class MultiHeadAttention(nn.Module):
         # core attention computation
         # ==================================
         log(f"q:{q.shape},k:{k.shape},v:{v.shape}")
-        x,score = self.dist_attn(q, k, v, attn_bias, edge_index, attn_type,pruning_mask=pruning_mask,mask=mask)
+        # ======================================= 取消跨设备分head操作，每个设备独立计算自己的窗口。
+        x,score = self.local_attn(q, k, v, attn_bias, edge_index, attn_type, mask=mask, pruning_mask=pruning_mask)
+        # x,score = self.dist_attn(q, k, v, attn_bias, edge_index, attn_type,pruning_mask=pruning_mask,mask=mask)
 
         # =================
         # linear
@@ -275,6 +277,7 @@ class EncoderLayer(nn.Module):
         self.self_attention = MultiHeadAttention(
             hidden_size, attention_dropout_rate, num_heads
         )
+        
         self.self_attention_dropout = nn.Dropout(dropout_rate)
         self.O = nn.Linear(hidden_size, hidden_size)
         
@@ -463,7 +466,7 @@ class AttnBias(nn.Module):
 
 
 
-class GT(nn.Module):
+class GT_SW(nn.Module):
     """GT for node-level task.
     No global token.
 
@@ -561,7 +564,7 @@ class GT(nn.Module):
         for enc_layer in self.layers:
             log(f"output shape:{output.shape}")
             output,score = enc_layer(
-                output, 
+                output,
                 attn_bias = attn_bias,
                 edge_index=edge_index,
                 attn_type=attn_type,

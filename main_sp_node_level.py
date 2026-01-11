@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import numpy as np
 from models.graphormer_dist_node_level import Graphormer
 from models.gt_dist_node_level import GT
+from models.gt_dist_node_level_single_window import GT_SW
 from utils.logger import log
 import utils.logger as logger
 from utils.lr import PolynomialDecayLR
@@ -147,6 +148,27 @@ def main():
         ).to(device)
     elif args.model == "gt":
         model = GT(
+           n_layers=args.n_layers,
+            num_heads=args.num_heads,
+            input_dim=feature.shape[1],
+            hidden_dim=args.hidden_dim,
+            output_dim=y.max().item()+1,
+            attn_bias_dim=args.attn_bias_dim,
+            dropout_rate=args.dropout_rate,
+            input_dropout_rate=args.input_dropout_rate,
+            attention_dropout_rate=args.attention_dropout_rate,
+            ffn_dim=args.ffn_dim,
+            num_global_node=args.num_global_node,
+            args=args,
+            num_in_degree = 512,
+            num_out_degree = 512,
+            num_spatial=512,
+            num_edges=1024,
+            max_dist=args.max_dist,
+            edge_dim=64
+        ).to(device)
+    elif args.model == "gt_sw":
+        model = GT_SW(
            n_layers=args.n_layers,
             num_heads=args.num_heads,
             input_dim=feature.shape[1],

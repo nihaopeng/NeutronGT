@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import numpy as np
 from models.graphormer_dist_node_level import Graphormer
 from models.gt_dist_node_level import GT
+from models.gt_dist_node_level_single_window import GT_SW
 from utils.lr import PolynomialDecayLR
 import argparse
 import os
@@ -22,7 +23,7 @@ from gt_sp.initialize import (
 )
 from gt_sp.reducer import sync_params_and_buffers, Reducer
 from gt_sp.evaluate import sparse_eval_gpu
-from gt_sp.utils import compute_graphormer_data, get_node_degrees, random_split_idx, get_batch_reorder_blockize, check_conditions
+from gt_sp.utils import compute_graphormer_data,compute_graphormer_data_with_weight, get_node_degrees, random_split_idx, get_batch_reorder_blockize, check_conditions
 from utils.parser_node_level import parser_add_main_args
 from core.pprPartition import personal_pagerank,build_adj_fromat,ppr_partition,metis_partition
 from utils.vis import vis_interface
@@ -140,7 +141,28 @@ def main():
             num_in_degree = 512,
             num_out_degree = 512,
             num_spatial=512,
-            num_edges=1,
+            num_edges=1024,
+            max_dist=args.max_dist,
+            edge_dim=64
+        ).to(device)
+    elif args.model == "gt_sw":
+        model = GT_SW(
+           n_layers=args.n_layers,
+            num_heads=args.num_heads,
+            input_dim=feature.shape[1],
+            hidden_dim=args.hidden_dim,
+            output_dim=y.max().item()+1,
+            attn_bias_dim=args.attn_bias_dim,
+            dropout_rate=args.dropout_rate,
+            input_dropout_rate=args.input_dropout_rate,
+            attention_dropout_rate=args.attention_dropout_rate,
+            ffn_dim=args.ffn_dim,
+            num_global_node=args.num_global_node,
+            args=args,
+            num_in_degree = 512,
+            num_out_degree = 512,
+            num_spatial=512,
+            num_edges=1024,
             max_dist=args.max_dist,
             edge_dim=64
         ).to(device)
@@ -173,9 +195,9 @@ def main():
     
     # =================== ppr partition =========================
     sorted_ppr_matrix = personal_pagerank(edge_index,0.85,topk=50)
-    # csr_adjacency,eweights = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
-    # partitioned_results = metis_partition(csr_adjacency,eweights,flatten_train_idx.cpu().numpy(),n_parts=10)
-    partitioned_results = ppr_partition(sorted_ppr_matrix,flatten_train_idx.cpu().numpy(),num_set=100)
+    csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
+    partitioned_results = metis_partition(csr_adjacency,eweights,flatten_train_idx.cpu().numpy(),n_parts=10)
+    # partitioned_results = ppr_partition(sorted_ppr_matrix,flatten_train_idx.cpu().numpy(),num_set=100)
     # =============================================================
     
     # ===== 计算centrality encoding =====
@@ -183,15 +205,13 @@ def main():
     # ==================================
 
     # =====    attention bias     =====
-    print("图空间结构预处理计算中...")
-    global_spatial_pos, global_edge_input = compute_graphormer_data(edge_index, N, max_dist=args.max_dist)
-    print("预处理完成")
+    # global_spatial_pos, global_edge_input = compute_graphormer_data(edge_index, N, max_dist=args.max_dist)
+    global_spatial_pos, global_edge_input = compute_graphormer_data_with_weight(adj_weight,N,max_dist=args.max_dist)
     # ================================== 
 
     for epoch in range(1, args.epochs + 1):
         model.to(device)
         model.train()
-        
         loss_list, iter_t_list = [], []
         
         scores = []
@@ -214,11 +234,9 @@ def main():
             # == spatial and edge info in the sequence ==
                 # spatial_pos 切片: [Batch, Batch]
             spatial_pos_i = global_spatial_pos[idx_i.to("cpu")][:, idx_i.to("cpu")].to(device)
-            
                 # edge_input 切片: [Batch, Batch, Max_Dist]
             edge_input_i = global_edge_input[idx_i.to("cpu")][:, idx_i.to("cpu"), :].to(device)
             # =================================================
-
 
             out_i,score_agg,score_spe = model(x_i, attn_bias, edge_index_i,in_degree,out_degree, spatial_pos_i,edge_input_i,attn_type=attn_type,mask=mask)
             scores.append(score_agg)
@@ -239,8 +257,8 @@ def main():
             t2 = time.time()
              
             iter_t_list.append(t2 - t1)
-            if i==0:
-                vis_interface(score_spe[3].squeeze(0)[0],idx_i,edge_index,x_i,epoch,args)
+            # if i==0:
+            #     vis_interface(score_spe[3].squeeze(0)[0],idx_i,edge_index,x_i,epoch,args)
             
         loss_list.append(loss.item()) 
         lr_scheduler.step()

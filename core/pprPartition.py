@@ -35,8 +35,9 @@ def build_adj_fromat(sorted_ppr_matrix:dict):
     不传入所有的节点是因为完整的ppr构建边权重就相当于每条边权都是2.
     返回pymetis执行分区的数据
     """
+    all_nodes = sorted(sorted_ppr_matrix.keys())
     adj_weight = {}
-    adjacency = [[] for _ in range(len(sorted_ppr_matrix))] # [[1,2,3],[0,4],[3,4]...]
+    adjacency = [[] for _ in range(all_nodes[-1]+1)] # [[1,2,3],[0,4],[3,4]...]
     # nodes_ppr = ((0,ppr_val),(1,ppr_val1),(2,ppr_val2)...)
     for node,nodes_ppr in tqdm(sorted_ppr_matrix.items(),desc="adj_weight building"):
         for (id,val) in nodes_ppr:
@@ -69,7 +70,7 @@ def build_adj_fromat(sorted_ppr_matrix:dict):
         adj_starts=xadj,
         adjacent=adjncy
     )
-    return csr_adjacency,eweights
+    return csr_adjacency,eweights,adj_weight
     # return adjacency,None
     
 def ppr_partition(sorted_ppr_matrix:dict,flatten_train_idx,num_set:int):
@@ -98,7 +99,7 @@ def ppr_partition(sorted_ppr_matrix:dict,flatten_train_idx,num_set:int):
         if len(filtered_nodes) > 0:
             filtered_partitions.append(torch.tensor(filtered_nodes, dtype=torch.long))
         print(len(filtered_nodes),end=",")
-    return partitioned_results
+    return filtered_partitions
 
 def personal_pagerank(edge_index,alpha,topk=100,max_iter:int=100) -> np.ndarray:
     """为所有节点计算个性化PageRank"""

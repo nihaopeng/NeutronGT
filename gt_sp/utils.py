@@ -987,6 +987,71 @@ def get_node_degrees(edge_index, num_nodes):
 
     return in_degree, out_degree
 
+def compute_graphormer_data_with_weight(adj_weight, num_nodes, max_dist=5):
+    """
+    输入: 
+        adj_weight: 字典，键为边 (min(node,id), max(node,id))，值为边权重
+        num_nodes: 节点数量
+        max_dist: 最大距离（默认5）
+    输出: spatial_pos [N, N], edge_input [N, N, Max_Dist]
+    """
+    
+    # 1. 准备容器 (全 0 初始化，0 就是 Padding/不可达)
+    spatial_pos = torch.zeros((num_nodes, num_nodes), dtype=torch.long)
+    edge_input = torch.zeros((num_nodes, num_nodes, max_dist), dtype=torch.long)
+    
+    # 2. 从 adj_weight 构建带权重的图
+    G = nx.Graph()
+    G.add_nodes_from(range(num_nodes))
+    
+    # 添加带权重的边
+    for (u, v), weight in tqdm(adj_weight.items(),desc="位置编码建图"):
+        # 确保权重是正数
+        if weight > 0:
+            G.add_edge(u, v, weight=int(weight))
+        else:
+            G.add_edge(u, v, weight=1)  # 默认权重为1
+    
+    # 3. 计算所有点对的最短路径（考虑权重）
+    try:
+        # 使用 Floyd-Warshall 算法计算所有点对的最短路径
+        print("===计算节点间最短路径===")
+        all_pairs_path = dict(nx.all_pairs_dijkstra_path(G, cutoff=max_dist))
+    except:
+        # 如果 Dijkstra 失败，使用 BFS（不考虑权重）
+        print("Warning: Dijkstra failed, using BFS instead")
+        all_pairs_path = dict(nx.all_pairs_shortest_path(G, cutoff=max_dist))
+    # 4. 填充 spatial_pos 和 edge_input
+    for i in tqdm(range(num_nodes), desc="计算位置嵌入"):
+        if i not in all_pairs_path:
+            continue
+        paths = all_pairs_path[i]
+        for j, path in paths.items():
+            # path 是节点列表，例如 [i, n1, n2, j]
+            dist = len(path) - 1
+            if dist > max_dist:
+                continue
+            # --- 填 Spatial Pos ---
+            # 0保留给Padding，所以距离都要+1 (0->1, 1->2...)
+            spatial_pos[i, j] = dist + 1
+            # --- 填 Edge Input ---
+            if dist == 0: 
+                continue  # 自己到自己没有边
+            # 填充路径上的边权重
+            for k in range(dist):
+                u, v = path[k], path[k + 1]
+                # 确保边的顺序一致（小节点在前）
+                edge_key = (min(u, v), max(u, v))
+                weight = adj_weight.get(edge_key, 1)
+                # 确保权重是正整数
+                weight = int(weight)
+                if weight <= 0:
+                    weight = 1
+                if weight >= 1024:
+                    weight = 1023
+                edge_input[i, j, k] = weight
+    
+    return spatial_pos, edge_input
 
 # TIP:如果要改max_dist，模型参数的max_dist也要改
 def compute_graphormer_data(edge_index, num_nodes, max_dist=5):
