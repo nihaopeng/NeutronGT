@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from gt_sp.utils import get_batch, gen_sub_edge_index
+from gt_sp.utils import compute_graphormer_spatial_pos_only, get_batch, gen_sub_edge_index
 from gt_sp.initialize import (
     get_sequence_parallel_world_size,
     set_last_batch_global_token_indices
@@ -315,9 +315,8 @@ def sparse_eval_cpu_subset_batch_dummy_bias(args, model, x, y, sub_idx, dummy_at
     
     return acc  
 
-
 @torch.no_grad()
-def sparse_eval_gpu(args, model, x, y, sub_idx, attn_bias, edge_index, device,graph_in_degree, graph_out_degree,global_spatial_pos,global_edge_input):
+def sparse_eval_gpu_dist(args, model, x, y, sub_idx, attn_bias, edge_index, device,graph_in_degree, graph_out_degree,global_spatial_pos,global_edge_input):
     """
     Evaluate the model on train/valid/test subset of nodes in a batched way on GPU.
     lager seq_len will be slower 
@@ -370,6 +369,90 @@ def sparse_eval_gpu(args, model, x, y, sub_idx, attn_bias, edge_index, device,gr
         pred,score_agg,score_spe = model(x_i, attn_bias, edge_index_i, attn_type=attn_type,in_degree=in_degree, out_degree=out_degree,spatial_pos = spatial_pos_i,edge_input = edge_input_i)
         loss = F.nll_loss(pred, y_i)
         loss_list.append(loss.item())
+        
+        y_true.append(y_i.view(-1))
+        y_pred.append(pred.argmax(1))
+    y_pred = torch.cat(y_pred)
+    y_true = torch.cat(y_true)
+        
+    acc = calc_acc(y_true, y_pred)
+    
+    del x_i, y_i, edge_index_i
+    torch.cuda.empty_cache()
+    
+    return acc  
+
+@torch.no_grad()
+def sparse_eval_gpu(args, model, x, y, sub_idx, attn_bias, edge_index, device,**kwargs):
+    """
+    Evaluate the model on train/valid/test subset of nodes in a batched way on GPU.
+    lager seq_len will be slower 
+    """
+    model.eval()
+
+    y_true = []
+    y_pred = []
+    # loss_list = []
+    N = x.shape[0]
+    graph_in_degree = kwargs.get("graph_in_degree",None)
+    graph_out_degree = kwargs.get("graph_out_degree",None)
+    # adj_weight = kwargs.get("adj_weight",None)
+    # all_pairs_path = kwargs.get("all_pairs_path",None)
+    # global_spatial_pos = kwargs.get("global_spatial_pos",None)
+    # global_edge_input = kwargs.get("global_edge_input",None)
+    
+    # num_batch = sub_idx.size(0) // args.seq_len + 1
+    # seq_len = 128
+    num_batch = sub_idx.size(0) // args.seq_len + 1
+    
+    if args.attn_type == "full":
+        attn_type = "full"
+    elif args.attn_type == "flash":
+        attn_type = "flash"
+    else:
+        attn_type = "sparse"
+
+    # for i in tqdm(range(num_batch), desc="Iteration"):
+    for i in range(num_batch):
+        idx_i = sub_idx[i*args.seq_len:(i+1)*args.seq_len]
+        x_i = x[idx_i]
+        y_i = y[idx_i]
+        
+        # === centrality encoding ===
+        in_degree,out_degree = None,None
+        spatial_pos_i,edge_input_i = None,None
+        if args.struct_enc == "True":
+            in_degree = graph_in_degree[idx_i].to(device)
+            out_degree = graph_out_degree[idx_i].to(device)
+            spatial_pos_list,_ = compute_graphormer_spatial_pos_only([edge_index,None],[idx_i],N,max_dist=args.max_dist)
+            spatial_pos_i = spatial_pos_list[0].to(device)
+            # spatial_pos_i, edge_input_i = compute_graphormer_data_with_weight(adj_weight,N,idx_i,all_pairs_path,max_dist=args.max_dist)
+            # spatial_pos_i = spatial_pos_i.to(device)
+            # edge_input_i = edge_input_i.to(device)
+            # ===========================
+            # == spatial and edge info in the sequence ==
+            # spatial_pos 切片: [Batch, Batch]
+            # spatial_pos_i = global_spatial_pos[idx_i.to("cpu")][:, idx_i.to("cpu")].to(device)
+            # edge_input 切片: [Batch, Batch, Max_Dist]
+            # edge_input_i = global_edge_input[idx_i.to("cpu")][:, idx_i.to("cpu"), :].to(device)
+            # =================================================
+        
+        # if idx_i.shape[0] < args.seq_len:
+        #     dummy_attn_bias = torch.zeros(idx_i.shape[0], idx_i.shape[0], args.attn_bias_dim, dtype=torch.float32)
+        edge_index_i = gen_sub_edge_index(edge_index, idx_i, N) # [2, num_edges] index plused global token
+        
+        x_i, y_i, edge_index_i = x_i.to(device), y_i.to(device), edge_index_i.to(device)
+
+        pred,score_agg,score_spe = model(
+            x_i, attn_bias, edge_index_i, 
+            attn_type=attn_type,
+            in_degree=in_degree, 
+            out_degree=out_degree,
+            spatial_pos = spatial_pos_i,
+            edge_input = edge_input_i
+        )
+        # loss = F.nll_loss(pred, y_i)
+        # loss_list.append(loss.item())
         
         y_true.append(y_i.view(-1))
         y_pred.append(pred.argmax(1))

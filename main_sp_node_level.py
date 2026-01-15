@@ -73,9 +73,6 @@ def main():
     print("预处理完成")
     # ================================== 
     
-    
-    
-    
     if args.dataset == 'pokec':
         y = torch.clamp(y, min=0) 
     log(f"y shape:{y.shape}")
@@ -302,9 +299,9 @@ def main():
             t2 = time.time()
             
             iter_t_list.append(t2 - t1)
-            if i==0:
-                # vis_interface(score_agg,idx_i,edge_index,epoch,args)
-                vis_interface(score_spe[3].squeeze(0)[0],idx_i,edge_index,x_i,epoch,args)
+            # if i==0:
+            #     # vis_interface(score_agg,idx_i,edge_index,epoch,args)
+            #     vis_interface(score_spe[3].squeeze(0)[0],idx_i,edge_index,x_i,epoch,args)
     
         loss_list.append(loss.item())
         lr_scheduler.step()
@@ -317,9 +314,27 @@ def main():
 
         if args.rank == 0 and epoch % 5 == 0:   
             t4 = time.time()
-            train_acc = sparse_eval_gpu(args, model, feature, y, split_idx['train'], attn_bias, edge_index, device,graph_in_degree, graph_out_degree,global_spatial_pos,global_edge_input) 
-            val_acc = sparse_eval_gpu(args, model, feature, y, split_idx['valid'], attn_bias, edge_index, device,graph_in_degree, graph_out_degree,global_spatial_pos,global_edge_input)
-            test_acc = sparse_eval_gpu(args, model, feature, y, split_idx['test'], attn_bias, edge_index, device,graph_in_degree, graph_out_degree,global_spatial_pos,global_edge_input)
+            train_acc = sparse_eval_gpu(
+                args, model, feature, y, split_idx['train'], 
+                attn_bias, edge_index, device,
+                graph_in_degree=graph_in_degree, 
+                graph_out_degree=graph_out_degree,
+                adj_weight=None,
+                all_pairs_path=None) 
+            val_acc = sparse_eval_gpu(
+                args, model, feature, y, split_idx['valid'], 
+                attn_bias, edge_index, device,
+                graph_in_degree=graph_in_degree, 
+                graph_out_degree=graph_out_degree,
+                adj_weight=None,
+                all_pairs_path=None)
+            test_acc = sparse_eval_gpu(
+                args, model, feature, y, split_idx['test'], 
+                attn_bias, edge_index, device,
+                graph_in_degree=graph_in_degree, 
+                graph_out_degree=graph_out_degree,
+                adj_weight=None,
+                all_pairs_path=None)
             if epoch % 50 ==0:
                 vis.train_acc.append(train_acc)
                 vis.val_acc.append(val_acc)

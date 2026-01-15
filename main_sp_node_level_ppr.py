@@ -23,7 +23,7 @@ from gt_sp.initialize import (
 )
 from gt_sp.reducer import sync_params_and_buffers, Reducer
 from gt_sp.evaluate import sparse_eval_gpu
-from gt_sp.utils import compute_graphormer_data,compute_graphormer_data_with_weight, get_node_degrees, random_split_idx, get_batch_reorder_blockize, check_conditions
+from gt_sp.utils import compute_graphormer_data,compute_graphormer_spatial_pos_only, get_node_degrees, random_split_idx, get_batch_reorder_blockize, check_conditions,get_all_pairs_path
 from utils.parser_node_level import parser_add_main_args
 from core.pprPartition import personal_pagerank,build_adj_fromat,ppr_partition,metis_partition
 from utils.vis import vis_interface
@@ -110,6 +110,50 @@ def main():
     set_global_token_indices(global_token_indices)
     set_last_batch_global_token_indices(global_token_indices_last_batch)
 
+    # --------------------计算结构信息------------------------------------------------------------
+    # =================== ppr partition =========================
+    partitioned_results = []
+    # if args.rank == 0:
+    sorted_ppr_matrix = personal_pagerank(edge_index,0.85,topk=50)
+    csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
+    partitioned_results = metis_partition(csr_adjacency,eweights,flatten_train_idx.cpu().numpy(),n_parts=80)
+    # partitioned_results = ppr_partition(sorted_ppr_matrix,flatten_train_idx.cpu().numpy(),num_set=100)
+    # if seq_parallel_world_size > 1:
+    #     if args.rank == src_rank:  # src_rank 有数据
+    #         for i, partition in enumerate(partitioned_results):
+    #             # 广播每个分区
+    #             dist.broadcast(partition, src=src_rank, group=group)
+    # else:  # 其他进程
+    #     # 必须先创建相同形状的空张量来接收
+    #     for i in range(len(partitioned_results_on_src)):  # 需要知道分区数量
+    #         # 创建接收缓冲区（需要知道张量的形状和类型）
+    #         recv_tensor = torch.empty_like(partition_shape)  # 需要知道形状
+    #         dist.broadcast(recv_tensor, src=src_rank, group=group)
+    #         partitioned_results.append(recv_tensor)
+    # =============================================================
+    
+    # ===== 计算centrality encoding =====
+    graph_in_degree, graph_out_degree = None, None
+    if args.struct_enc == "True":
+        graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
+    # ==================================
+
+    # =====    all_pairs_path     =====
+    # 大图计算edge_input会爆主机内存
+    # (global_spatial_pos, global_edge_input) = compute_graphormer_data(edge_index, N, max_dist=args.max_dist)
+    # all_pairs_path = None
+    # if args.struct_enc == "True":
+    #     all_pairs_path = get_all_pairs_path(edge_index,N,max_dist=5)
+    # ================================== 
+    # --------------------------------------------------------------------------------
+        
+    # ===== 提前获取各设备idx ======
+    partitions = []
+    for i in range(args.rank,len(partitioned_results),seq_parallel_world_size):
+        partitions.append(partitioned_results[i])
+    if args.struct_enc=="True":
+        spatial_pos_list,_ = compute_graphormer_spatial_pos_only(sorted_ppr_matrix,partitions,N,max_dist=args.max_dist)
+
     if args.model == "graphormer":
         model = Graphormer(
             n_layers=args.n_layers,
@@ -138,9 +182,9 @@ def main():
             ffn_dim=args.ffn_dim,
             num_global_node=args.num_global_node,
             args=args,
-            num_in_degree = 512,
-            num_out_degree = 512,
-            num_spatial=512,
+            num_in_degree = torch.max(graph_in_degree).item(),
+            num_out_degree = torch.max(graph_out_degree).item(),
+            num_spatial=args.max_dist+1,
             num_edges=1024,
             max_dist=args.max_dist,
             edge_dim=64
@@ -159,10 +203,10 @@ def main():
             ffn_dim=args.ffn_dim,
             num_global_node=args.num_global_node,
             args=args,
-            num_in_degree = 512,
-            num_out_degree = 512,
+            num_in_degree = torch.max(graph_in_degree).item(),
+            num_out_degree = torch.max(graph_out_degree).item(),
             num_spatial=512,
-            num_edges=1024,
+            num_edges=args.max_num_edges,
             max_dist=args.max_dist,
             edge_dim=64
         ).to(device)
@@ -186,28 +230,12 @@ def main():
     val_acc_list, test_acc_list, epoch_t_list = [], [], []
     best_model, best_val, best_test = None, float('-inf'), float('-inf')
     
-    # 在训练开始前创建或清空CSV文件并写入表头
-    import csv
-    csv_file = "training_log.csv"
-    with open(csv_file, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['Epoch', 'Loss', 'Time', 'Train acc', 'Val acc', 'Test acc'])
-    
-    # =================== ppr partition =========================
-    sorted_ppr_matrix = personal_pagerank(edge_index,0.85,topk=50)
-    csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
-    partitioned_results = metis_partition(csr_adjacency,eweights,flatten_train_idx.cpu().numpy(),n_parts=10)
-    # partitioned_results = ppr_partition(sorted_ppr_matrix,flatten_train_idx.cpu().numpy(),num_set=100)
-    # =============================================================
-    
-    # ===== 计算centrality encoding =====
-    graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
-    # ==================================
-
-    # =====    attention bias     =====
-    # global_spatial_pos, global_edge_input = compute_graphormer_data(edge_index, N, max_dist=args.max_dist)
-    global_spatial_pos, global_edge_input = compute_graphormer_data_with_weight(adj_weight,N,max_dist=args.max_dist)
-    # ================================== 
+    # =================在训练开始前创建或清空CSV文件并写入表头============
+    # import csv
+    # csv_file = "training_log.csv"
+    # with open(csv_file, 'w', newline='') as f:
+    #     writer = csv.writer(f)
+    #     writer.writerow(['Epoch', 'Loss', 'Time', 'Train acc', 'Val acc', 'Test acc'])
 
     for epoch in range(1, args.epochs + 1):
         model.to(device)
@@ -215,43 +243,56 @@ def main():
         loss_list, iter_t_list = [], []
         
         scores = []
-        for i in range(len(partitioned_results)):
+        for i,idx in enumerate(partitions):
             attn_type = "full"
-            
             t1 = time.time()
             # idx_i = flatten_train_idx[i*args.seq_len: (i+1)*args.seq_len]
-            idx_i = partitioned_results[i]
+            # idx_i = partitioned_results[i]
+            idx_i = idx
             x_i = feature[idx_i].to(device)
             attn_bias = None
             edge_index_i = None
             mask = None
-
-            # == node degree in the sequnence ==
-            in_degree = graph_in_degree[idx_i].to(device)
-            out_degree = graph_out_degree[idx_i].to(device)
-            # == ========================  == 
             
-            # == spatial and edge info in the sequence ==
-                # spatial_pos 切片: [Batch, Batch]
-            spatial_pos_i = global_spatial_pos[idx_i.to("cpu")][:, idx_i.to("cpu")].to(device)
-                # edge_input 切片: [Batch, Batch, Max_Dist]
-            edge_input_i = global_edge_input[idx_i.to("cpu")][:, idx_i.to("cpu"), :].to(device)
-            # =================================================
-
+            edge_input_i = None
+            spatial_pos_i = None
+            in_degree = None
+            out_degree = None
+            if args.struct_enc=="True":
+                # == node degree in the sequnence ==
+                in_degree = graph_in_degree[idx_i].to(device)
+                out_degree = graph_out_degree[idx_i].to(device)
+                # == ========================  == 
+                # == spatial and edge info in the sequence ==
+                    # spatial_pos 切片: [Batch, Batch]
+                # spatial_pos_i = global_spatial_pos[idx_i.to("cpu")][:, idx_i.to("cpu")].to(device)
+                spatial_pos_i = spatial_pos_list[i].to(device)
+                    # edge_input 切片: [Batch, Batch, Max_Dist]
+                # edge_input_i = global_edge_input[idx_i.to("cpu")][:, idx_i.to("cpu"), :].to(device)
+                # =================================================
+            # print(f"spatial_pos_i:{spatial_pos_i.shape},x_i:{x_i.shape}")
             out_i,score_agg,score_spe = model(x_i, attn_bias, edge_index_i,in_degree,out_degree, spatial_pos_i,edge_input_i,attn_type=attn_type,mask=mask)
             scores.append(score_agg)
             # print(f"out_i shape:{out_i.shape},out_i:{out_i[0]}")
             # print(f"label:{y[partitioned_results[i]]}")
-            loss = F.nll_loss(out_i, y[partitioned_results[i]].to(device).long())
+            loss = F.nll_loss(out_i, y[idx_i].to(device).long(),reduction='none')
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            
+            mask_train = torch.isin(idx_i, split_idx["train"])
+            if mask_train.any():
+                loss = loss[mask_train].mean()
+                loss.backward()
+            else:
+                loss = torch.tensor(0.0, device=device, requires_grad=True)
+                loss.backward()
             # Sync all-reduce gradient 
             if seq_parallel_world_size > 1:
                 for name, param in model.named_parameters():
                     if param.requires_grad and param.grad is not None:
-                        param.grad.div_(get_sequence_parallel_world_size())
+                        # param.grad.div_(get_sequence_parallel_world_size())
+                        # dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=get_sequence_parallel_group())
+                        # seems that the order is reversed
                         dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=get_sequence_parallel_group())
+                        param.grad.div_(get_sequence_parallel_world_size())
 
             optimizer.step()
             t2 = time.time()
@@ -276,16 +317,43 @@ def main():
             print("------------------------------------------------------------------------------------")
             print("Epoch: {:03d}, Loss: {:.4f}, Epoch Time: {:.3f}s".format(epoch, np.mean(loss_list), np.mean(epoch_t_list)))
             # 在每个epoch结束后写入数据
-            csv_content.append(epoch)
-            csv_content.append(np.mean(loss_list))
-            csv_content.append(np.mean(epoch_t_list))
+            # csv_content.append(epoch)
+            # csv_content.append(np.mean(loss_list))
+            # csv_content.append(np.mean(epoch_t_list))
             print("------------------------------------------------------------------------------------")
 
         if args.rank == 0 and epoch % 5 == 0:   
             t4 = time.time()
-            train_acc = sparse_eval_gpu(args, model, feature, y, split_idx['train'], attn_bias, edge_index, device,graph_in_degree, graph_out_degree,global_spatial_pos,global_edge_input) 
-            val_acc = sparse_eval_gpu(args, model, feature, y, split_idx['valid'], attn_bias, edge_index, device,graph_in_degree, graph_out_degree,global_spatial_pos,global_edge_input)
-            test_acc = sparse_eval_gpu(args, model, feature, y, split_idx['test'], attn_bias, edge_index, device,graph_in_degree, graph_out_degree,global_spatial_pos,global_edge_input)
+            train_acc = sparse_eval_gpu(
+                args, model, feature, y, split_idx['train'], 
+                attn_bias, edge_index, device,
+                graph_in_degree=graph_in_degree, 
+                graph_out_degree=graph_out_degree,
+                # adj_weight=adj_weight,
+                # all_pairs_path=all_pairs_path,
+                # global_spatial_pos = global_spatial_pos,
+                # global_edge_input = global_edge_input
+                )
+            val_acc = sparse_eval_gpu(
+                args, model, feature, y, split_idx['valid'], 
+                attn_bias, edge_index, device,
+                graph_in_degree=graph_in_degree, 
+                graph_out_degree=graph_out_degree,
+                # adj_weight=adj_weight,
+                # all_pairs_path=all_pairs_path,
+                # global_spatial_pos = global_spatial_pos,
+                # global_edge_input = global_edge_input
+                )
+            test_acc = sparse_eval_gpu(
+                args, model, feature, y, split_idx['test'], 
+                attn_bias, edge_index, device,
+                graph_in_degree=graph_in_degree, 
+                graph_out_degree=graph_out_degree,
+                # adj_weight=adj_weight,
+                # all_pairs_path=all_pairs_path,
+                # global_spatial_pos = global_spatial_pos,
+                # global_edge_input = global_edge_input
+                )
             if epoch % 20 ==0 and i==0:
                 vis.train_acc.append(train_acc)
                 vis.val_acc.append(val_acc)
@@ -312,10 +380,10 @@ def main():
             val_acc_list.append(val_acc)
             test_acc_list.append(test_acc)
             
-        with open(csv_file, 'a', newline='') as f:
-            writer = csv.writer(f)
-            if csv_content:
-                writer.writerow(csv_content)
+        # with open(csv_file, 'a', newline='') as f:
+        #     writer = csv.writer(f)
+        #     if csv_content:
+        #         writer.writerow(csv_content)
     
     if args.rank == 0:
         print("Best validation accuracy: {:.2%}, test accuracy: {:.2%}".format(best_val, best_test))

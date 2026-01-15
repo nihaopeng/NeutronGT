@@ -55,6 +55,7 @@ def parser_add_main_args(parser):
                         help='TorchGT mode')
     parser.add_argument('--struct_enc', type=str, default="False", help='whether to enable structure encoding')
     parser.add_argument('--max_dist', type=int, default=5)
+    parser.add_argument('--max_num_edges', type=int, default=512)
     parser.add_argument('--vis_dir', type=str, help='path of vis')
     
     # distributed args

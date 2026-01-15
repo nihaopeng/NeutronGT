@@ -414,50 +414,50 @@ class AttnBias(nn.Module):
         spatial_bias = spatial_bias.permute(0, 3, 1, 2)               # [b, seq_len,seq_len,num_heads] -> [b,num_heads,seq_len,seq_len]
 
 
-        # ================== B. 计算 Edge Bias ==================
-        # 1. 获取边特征 x_{en}
-        # [B, N, N, K] -> [B, N, N, K, Edge_Dim]
-        edge_feat = self.edge_feature_encoder(edge_input.long())
+        # # ================== B. 计算 Edge Bias ==================
+        # # 1. 获取边特征 x_{en}
+        # # [B, N, N, K] -> [B, N, N, K, Edge_Dim]
+        # edge_feat = self.edge_feature_encoder(edge_input.long())
         
-        # 2. 获取位置权重 w_n^E
-        # 生成位置索引: 0, 1, ..., K-1
-        # [K]
-        pos_idx = torch.arange(self.max_dist, device=edge_input.device)
-        # [K, Edge_Dim * H]
-        pos_weight = self.edge_pos_encoder(pos_idx)
-        # [K, Edge_Dim, H]
-        pos_weight = pos_weight.view(self.max_dist, self.edge_dim, self.num_heads)
+        # # 2. 获取位置权重 w_n^E
+        # # 生成位置索引: 0, 1, ..., K-1
+        # # [K]
+        # pos_idx = torch.arange(self.max_dist, device=edge_input.device)
+        # # [K, Edge_Dim * H]
+        # pos_weight = self.edge_pos_encoder(pos_idx)
+        # # [K, Edge_Dim, H]
+        # pos_weight = pos_weight.view(self.max_dist, self.edge_dim, self.num_heads)
         
-        # 3. 计算点积 x * w^T 
-        # dimensions:
-        # b, n1, n2: Batch, N, N
-        # k: Max_Dist (路径长度)
-        # d: Edge_Dim
-        # h: Num_Heads
-        # 公式: sum_over_d (edge_feat * pos_weight) -> [B, N, N, K, H]
-        edge_bias_terms = torch.einsum("...kd,kdh->...kh", edge_feat, pos_weight)
+        # # 3. 计算点积 x * w^T 
+        # # dimensions:
+        # # b, n1, n2: Batch, N, N
+        # # k: Max_Dist (路径长度)
+        # # d: Edge_Dim
+        # # h: Num_Heads
+        # # 公式: sum_over_d (edge_feat * pos_weight) -> [B, N, N, K, H]
+        # edge_bias_terms = torch.einsum("...kd,kdh->...kh", edge_feat, pos_weight)
         
-        # 4. 计算平均值 (1/N * sum)
-        # 我们需要处理 padding 的部分 (padding_idx=0 的边不应该计入分母)
-        # 创建 mask: [B, N, N, K]
-        mask = (edge_input != 0).float()
-        # 路径长度 N: [B, N, N, 1]
-        path_len = mask.sum(dim=-1, keepdim=True)
-        # 避免除以 0
-        path_len = path_len.clamp(min=1.0)
+        # # 4. 计算平均值 (1/N * sum)
+        # # 我们需要处理 padding 的部分 (padding_idx=0 的边不应该计入分母)
+        # # 创建 mask: [B, N, N, K]
+        # mask = (edge_input != 0).float()
+        # # 路径长度 N: [B, N, N, 1]
+        # path_len = mask.sum(dim=-1, keepdim=True)
+        # # 避免除以 0
+        # path_len = path_len.clamp(min=1.0)
         
-        # 求和: [B, N, N, H]
-        edge_bias_sum = edge_bias_terms.sum(dim=-2)
+        # # 求和: [B, N, N, H]
+        # edge_bias_sum = edge_bias_terms.sum(dim=-2)
         
-        # 平均: [B, N, N, H]
-        edge_bias = edge_bias_sum / path_len
+        # # 平均: [B, N, N, H]
+        # edge_bias = edge_bias_sum / path_len
         
-        # 调整维度 -> [B, H, N, N]
-        edge_bias = edge_bias.permute(0, 3, 1, 2)
+        # # 调整维度 -> [B, H, N, N]
+        # edge_bias = edge_bias.permute(0, 3, 1, 2)
         
-        # ================== C. 融合 ==================
-        total_bias = spatial_bias + edge_bias
-        # total_bias = spatial_bias
+        # # ================== C. 融合 ==================
+        # total_bias = spatial_bias + edge_bias
+        total_bias = spatial_bias
         return total_bias
         # return None 
 
@@ -540,15 +540,15 @@ class GT_SW(nn.Module):
         
         # ===== centrality encoding =====
         if self.args.struct_enc=="True":
-            in_degree = in_degree.unsqueeze(0)
-            out_degree = out_degree.unsqueeze(0)
+            in_degree = in_degree.unsqueeze(0) if in_degree is not None else None
+            out_degree = out_degree.unsqueeze(0) if in_degree is not None else None
             node_feature = self.centrality_encoding(node_feature, in_degree, out_degree)
         # =====                     =====
         
         # =====   attention_bias    =====
         if self.args.struct_enc=="True":
-            spatial_pos = spatial_pos.unsqueeze(0)
-            edge_input = edge_input.unsqueeze(0)
+            spatial_pos = spatial_pos.unsqueeze(0) if spatial_pos is not None else None
+            edge_input = edge_input.unsqueeze(0) if edge_input is not None else None
             bias = self.attention_bias(spatial_pos, edge_input)
             if attn_bias is not None:
                 attn_bias = bias + attn_bias
@@ -570,7 +570,7 @@ class GT_SW(nn.Module):
                 attn_type=attn_type,
                 mask=mask
             )
-            score_agg = score if score_agg==None else score_agg+torch.sum(score,dim=1).squeeze(0) # 返回的score已经是绝对值了
+            # score_agg = score if score_agg==None else score_agg+torch.sum(score,dim=1).squeeze(0) # 返回的score已经是绝对值了
             score_spe.append(score)
         # Output part
         log(f"final output:{output.shape}")

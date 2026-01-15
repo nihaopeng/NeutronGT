@@ -1,3 +1,4 @@
+from collections import deque
 import torch
 import torch.nn.functional as F
 import torch.distributed as dist
@@ -28,6 +29,8 @@ from gt_sp.initialize import (
     last_batch_flag,
     get_last_batch_flag,
 )
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import shortest_path
 
 
 def fix_edge_index(x, num_node):
@@ -987,74 +990,92 @@ def get_node_degrees(edge_index, num_nodes):
 
     return in_degree, out_degree
 
-def compute_graphormer_data_with_weight(adj_weight, num_nodes, max_dist=5):
-    """
-    输入: 
-        adj_weight: 字典，键为边 (min(node,id), max(node,id))，值为边权重
-        num_nodes: 节点数量
-        max_dist: 最大距离（默认5）
-    输出: spatial_pos [N, N], edge_input [N, N, Max_Dist]
-    """
-    
-    # 1. 准备容器 (全 0 初始化，0 就是 Padding/不可达)
-    spatial_pos = torch.zeros((num_nodes, num_nodes), dtype=torch.long)
-    edge_input = torch.zeros((num_nodes, num_nodes, max_dist), dtype=torch.long)
-    
-    # 2. 从 adj_weight 构建带权重的图
-    G = nx.Graph()
-    G.add_nodes_from(range(num_nodes))
-    
-    # 添加带权重的边
-    for (u, v), weight in tqdm(adj_weight.items(),desc="位置编码建图"):
-        # 确保权重是正数
-        if weight > 0:
-            G.add_edge(u, v, weight=int(weight))
-        else:
-            G.add_edge(u, v, weight=1)  # 默认权重为1
-    
-    # 3. 计算所有点对的最短路径（考虑权重）
-    try:
-        # 使用 Floyd-Warshall 算法计算所有点对的最短路径
-        print("===计算节点间最短路径===")
-        all_pairs_path = dict(nx.all_pairs_dijkstra_path(G, cutoff=max_dist))
-    except:
-        # 如果 Dijkstra 失败，使用 BFS（不考虑权重）
-        print("Warning: Dijkstra failed, using BFS instead")
-        all_pairs_path = dict(nx.all_pairs_shortest_path(G, cutoff=max_dist))
-    # 4. 填充 spatial_pos 和 edge_input
-    for i in tqdm(range(num_nodes), desc="计算位置嵌入"):
-        if i not in all_pairs_path:
-            continue
-        paths = all_pairs_path[i]
-        for j, path in paths.items():
-            # path 是节点列表，例如 [i, n1, n2, j]
-            dist = len(path) - 1
-            if dist > max_dist:
+def get_all_pairs_path(edge_index, num_nodes, max_dist=5):
+    # 构建邻接表（CPU 上操作，节省显存）
+    edge_index = edge_index.cpu()
+    adj = [[] for _ in range(num_nodes)]
+    srcs, dsts = edge_index[0].tolist(), edge_index[1].tolist()
+    for u, v in zip(srcs, dsts):
+        adj[u].append(v)
+        adj[v].append(u)  # 无向图
+    all_pairs_path = {}
+    for src in tqdm(range(num_nodes),desc="pairs path building"):
+        # BFS from src
+        paths = {src: [src]}
+        queue = deque([(src, [src])])
+        visited = {src}
+        while queue:
+            node, path = queue.popleft()
+            if len(path) - 1 >= max_dist:
                 continue
-            # --- 填 Spatial Pos ---
-            # 0保留给Padding，所以距离都要+1 (0->1, 1->2...)
-            spatial_pos[i, j] = dist + 1
-            # --- 填 Edge Input ---
-            if dist == 0: 
-                continue  # 自己到自己没有边
-            # 填充路径上的边权重
-            for k in range(dist):
-                u, v = path[k], path[k + 1]
-                # 确保边的顺序一致（小节点在前）
-                edge_key = (min(u, v), max(u, v))
-                weight = adj_weight.get(edge_key, 1)
-                # 确保权重是正整数
-                weight = int(weight)
-                if weight <= 0:
-                    weight = 1
-                if weight >= 1024:
-                    weight = 1023
-                edge_input[i, j, k] = weight
-    
-    return spatial_pos, edge_input
+            for nei in adj[node]:
+                if nei not in visited:
+                    visited.add(nei)
+                    new_path = path + [nei]
+                    paths[nei] = new_path
+                    queue.append((nei, new_path))
+        all_pairs_path[src] = paths
+    return all_pairs_path
+
+def compute_graphormer_spatial_pos_only(ppr:tuple[list[torch.Tensor,torch.Tensor],torch.Tensor], partitions:list[torch.Tensor], num_nodes:int, max_dist:int=5):
+    # === Step 1: 构建全局邻接表（仅用于快速提取子图）===
+    edge_index_global = ppr[0]  # shape [2, E]
+    row, col = edge_index_global[0].cpu().numpy(), edge_index_global[1].cpu().numpy()
+    # 这里我们按无向处理：即如果 (u,v) 存在，则 u 和 v 互为邻居
+    adj_global = [[] for _ in range(num_nodes)]
+    for u, v in zip(row, col):
+        adj_global[u].append(v)
+    spatial_pos_list = []
+    for partition in tqdm(partitions, desc="Computing spatial pos on induced subgraphs"):
+        partition = partition.cpu().tolist()
+        L = len(partition)
+        if L == 0:
+            spatial_pos_list.append(torch.zeros(0, 0, dtype=torch.long))
+            continue
+        # === Step 2: 构建 induced subgraph 的邻接表（仅 partition 内部）===
+        # 映射 global node id -> local index
+        global_to_local = {node: i for i, node in enumerate(partition)}
+        # 初始化子图邻接表
+        adj_sub = [[] for _ in range(L)]
+        # 遍历 partition 中每个节点，收集其在全局图中的邻居，
+        # 且该邻居也在 partition 中
+        for local_u, global_u in enumerate(partition):
+            for global_v in adj_global[global_u]:
+                if global_v in global_to_local:
+                    local_v = global_to_local[global_v]
+                    adj_sub[local_u].append(local_v)
+        # === Step 3: 在子图上运行 APSP（via BFS from each node）===
+        dist_mat = np.full((L, L), max_dist + 1, dtype=np.int8)
+        for src in range(L):
+            dist_mat[src, src] = 0
+            if max_dist == 0:
+                continue
+            q = deque([src])
+            visited = [False] * L
+            visited[src] = True
+            dist = [0] * L
+            while q:
+                u = q.popleft()
+                if dist[u] >= max_dist:
+                    continue
+                for v in adj_sub[u]:
+                    if not visited[v]:
+                        visited[v] = True
+                        dist[v] = dist[u] + 1
+                        dist_mat[src, v] = dist[v]
+                        q.append(v)
+        # === Step 4: 编码距离矩阵 ===
+        # dist=0 → 1, ..., dist=max_dist → max_dist+1; >max_dist → 0
+        spatial_pos_np = np.where(
+            dist_mat <= max_dist,
+            dist_mat + 1,
+            0
+        )
+        spatial_pos_list.append(torch.from_numpy(spatial_pos_np).long())
+    return spatial_pos_list, None
 
 # TIP:如果要改max_dist，模型参数的max_dist也要改
-def compute_graphormer_data(edge_index, num_nodes, max_dist=5):
+def compute_graphormer_data(edge_index, num_nodes, max_dist=5) -> tuple[torch.tensor,torch.tensor]:
     """
     输入: edge_index [2, E]
     输出: spatial_pos [N, N], edge_input [N, N, Max_Dist]
@@ -1062,7 +1083,8 @@ def compute_graphormer_data(edge_index, num_nodes, max_dist=5):
   
     # 1. 准备容器 (全 0 初始化，0 就是 Padding/不可达)
     spatial_pos = torch.zeros((num_nodes, num_nodes), dtype=torch.long)
-    edge_input = torch.zeros((num_nodes, num_nodes, max_dist), dtype=torch.long)
+    edge_input = None
+    # edge_input = torch.zeros((num_nodes, num_nodes, max_dist), dtype=torch.long)
     
     # 2. 建图 (只用 edge_index)
     edge_list = edge_index.t().tolist()
@@ -1083,12 +1105,16 @@ def compute_graphormer_data(edge_index, num_nodes, max_dist=5):
             # 0保留给Padding，所以距离都要+1 (0->1, 1->2...)
             spatial_pos[i, j] = dist + 1
             
-            # --- 填 Edge Input ---
-            if dist == 0: continue # 自己到自己没有边
+            # # --- 填 Edge Input ---
+            # if dist == 0: continue # 自己到自己没有边
             
-            # 填充路径上的边类型
-            # 因为你没有提供 edge_attr，我们默认所有边类型都是 1
-            for k in range(dist):
-                edge_input[i, j, k] = 1 
+            # # 填充路径上的边类型
+            # # 因为你没有提供 edge_attr，我们默认所有边类型都是 1
+            # for k in range(dist):
+            #     edge_input[i, j, k] = 1 
 
-    return spatial_pos, edge_input
+    return (spatial_pos, edge_input)
+
+if __name__ == "__main__":
+    edge_index = torch.load('./dataset/ogbn-arxiv/edge_index.pt') # [2, num_edges]
+

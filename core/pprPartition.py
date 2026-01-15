@@ -1,79 +1,96 @@
 import os
 import networkx as nx
 import torch
+from torch_geometric.utils import ppr
 from tqdm import tqdm
 import numpy as np
 import pymetis
 
 def metis_partition(csr_adjacency:pymetis.CSRAdjacency,eweights:list[list],flatten_train_idx:np.ndarray,n_parts):
     # 将训练索引转换为集合，用于快速查找
-    train_set = set(flatten_train_idx)
-    n_cuts, membership = pymetis.part_graph(
-        nparts=n_parts,
-        adjacency=csr_adjacency,
-        eweights=eweights
-    ) # !!too large n_parts will cause the error "double free or corruption (!prev)"!!
-    # 构建分区列表：每个分区包含该分区的所有节点
+    train_set = set(flatten_train_idx.tolist())  # 更快
+    try:
+        n_cuts, membership = pymetis.part_graph(
+            nparts=n_parts,
+            adjacency=csr_adjacency,
+            eweights=eweights
+        )
+    except Exception as e:
+        print(f"Metis failed: {e}")
+        raise
     partitions = [[] for _ in range(n_parts)]
-    partitioned_results = []
-    # 遍历每个节点的分区归属
-    for node_idx, partition_id in tqdm(enumerate(membership),desc="building partition"):
-        partitions[partition_id].append(node_idx)
+    for node_idx, part_id in enumerate(membership):
+        partitions[part_id].append(node_idx)
     filtered_partitions = []
-    for partition in partitions:
-        # 过滤：只保留在训练集中的节点
-        filtered_nodes = [node for node in partition if node in train_set]
-        # 如果分区还有训练节点，则保留
-        if len(filtered_nodes) > 0:
-            filtered_partitions.append(torch.tensor(filtered_nodes, dtype=torch.long))
-        print(len(filtered_nodes),end=",")
+    for part in partitions:
+        # =====================筛选训练节点全部输入
+        # filtered = [n for n in part if n in train_set]
+        # if filtered:
+        #     filtered_partitions.append(torch.tensor(filtered, dtype=torch.long))
+        # =====================不筛选训练节点全部输入
+        filtered_partitions.append(torch.tensor(part, dtype=torch.long))
+        # 可选：移除 print，避免 I/O 瓶颈
     return filtered_partitions
 
-def build_adj_fromat(sorted_ppr_matrix:dict):
-    """
-    传入的ppr只有所有节点的前topk ppr
-    不传入所有的节点是因为完整的ppr构建边权重就相当于每条边权都是2.
-    返回pymetis执行分区的数据
-    """
-    all_nodes = sorted(sorted_ppr_matrix.keys())
-    adj_weight = {}
-    adjacency = [[] for _ in range(all_nodes[-1]+1)] # [[1,2,3],[0,4],[3,4]...]
-    # nodes_ppr = ((0,ppr_val),(1,ppr_val1),(2,ppr_val2)...)
-    for node,nodes_ppr in tqdm(sorted_ppr_matrix.items(),desc="adj_weight building"):
-        for (id,val) in nodes_ppr:
-            # edge = (min(node,id),max(node,id))
-            edge = (node,id)
-            adj_weight[edge] = adj_weight.get(edge, 1) + int(val*1000)
-            # adj_weight[edge] = adj_weight.get(edge, 1) + val
-            # adj = {(src,dst):weight,...}
-            # if edge[1] not in adjacency[edge[0]]:
-            #     adjacency[edge[0]].append(edge[1])
-            adjacency[edge[0]].append(edge[1])
-    xadj = [0]  # 顶点指针数组
-    adjncy = []  # 邻接数组
-    eweights = []  # 边权重数组
-    # 遍历每个顶点
-    for i in tqdm(range(len(adjacency)),desc="building adj"):
-        neighbors = sorted(adjacency[i])
-        adjncy.extend(neighbors)
-        xadj.append(xadj[-1] + len(neighbors))
-        # 添加对应的边权重到 eweights
-        for neighbor in neighbors:
-            edge = (min(i, neighbor), max(i, neighbor))
-            weight = adj_weight.get(edge, 1)  # 默认权重为1
-            # 确保权重是整数且大于0
-            if weight <= 0:
-                weight = 1
-            eweights.append(int(weight))
-    assert len(eweights)==len(adjncy)
-    csr_adjacency = pymetis.CSRAdjacency(
-        adj_starts=xadj,
-        adjacent=adjncy
+def build_adj_fromat(sorted_ppr_matrix):
+    print("======start adj format building===========")
+    edge_index, ppr_val = sorted_ppr_matrix
+    edge_index, ppr_val = edge_index.to('cpu'),ppr_val.to('cpu')
+    assert edge_index.shape[0] == 2
+    num_nodes = int(edge_index.max().item()) + 1
+    # === Step 1: 规范化边并聚合 PPR 权重 ===
+    src, dst = edge_index[0], edge_index[1]
+    u = torch.min(src, dst)
+    v = torch.max(src, dst)
+    # edges = torch.stack([u, v], dim=0).t()  # [E, 2]
+    # 合并重复边：使用 unique + scatter_add
+    edge_key = u * num_nodes + v  # 唯一键
+    _, inverse_indices, counts = torch.unique(
+        edge_key, return_inverse=True, return_counts=True
     )
-    return csr_adjacency,eweights,adj_weight
+    unique_edges = torch.stack([
+        torch.div(_, num_nodes, rounding_mode='floor'),
+        _ % num_nodes
+    ], dim=1)  # [U, 2]
+    summed_ppr = torch.zeros(inverse_indices.max() + 1, device=ppr_val.device)
+    summed_ppr.scatter_add_(0, inverse_indices, ppr_val)
+    weights = (summed_ppr * 1000).clamp_min(1).long().cpu()
+    print("======构建无向连接===========")
+    # === Step 2: 构建无向邻接（每条边存两次）===
+    u_all = torch.cat([unique_edges[:, 0], unique_edges[:, 1]])
+    v_all = torch.cat([unique_edges[:, 1], unique_edges[:, 0]])
+    weights_all = torch.cat([weights, weights])
+    # 按源节点排序
+    sort_idx = torch.argsort(u_all)
+    u_all = u_all[sort_idx].cpu().numpy()
+    v_all = v_all[sort_idx].cpu().numpy()
+    weights_all_np = weights_all[sort_idx].numpy()
+    print("======csr format building===========")
+    # === Step 3: 构建 CSR ===
+    xadj = np.zeros(num_nodes + 1, dtype=np.int32)
+    degrees = np.bincount(u_all, minlength=num_nodes)
+    xadj[1:] = np.cumsum(degrees)
+    adjncy = v_all.astype(np.int32)
+    eweights = weights_all_np.astype(np.int32)
+    assert len(adjncy) == len(eweights)
+    assert xadj[-1] == len(adjncy)
+    csr_adj = pymetis.CSRAdjacency(
+        adj_starts=xadj.tolist(),
+        adjacent=adjncy.tolist()
+    )
+    # === Step 4: 构建 adj_weight 字典（仅唯一无向边）===
+    # 注意：只存 (min, max) -> weight
+    print("======adj weight building===========")
+    adj_weight = {}
+    unique_u = unique_edges[:, 0].cpu().numpy()
+    unique_v = unique_edges[:, 1].cpu().numpy()
+    unique_w = weights.numpy()
+    for i in tqdm(range(len(unique_u)),desc="adj weight"):
+        adj_weight[(int(unique_u[i]), int(unique_v[i]))] = int(unique_w[i])
+    return csr_adj, eweights.tolist(), adj_weight
     # return adjacency,None
     
-def ppr_partition(sorted_ppr_matrix:dict,flatten_train_idx,num_set:int):
+def ppr_partition(sorted_ppr_matrix:list[torch.tensor,torch.tensor],flatten_train_idx,num_set:int):
     # 将训练索引转换为集合，用于快速查找
     train_set = set(flatten_train_idx)
     # sorted_ppr_matrix[node] = ((12,ppr_val0),(1,ppr_val1),(22,ppr_val2)...)
@@ -94,38 +111,47 @@ def ppr_partition(sorted_ppr_matrix:dict,flatten_train_idx,num_set:int):
     filtered_partitions = []
     for partition in partitioned_results:
         # 过滤：只保留在训练集中的节点
-        filtered_nodes = [node for node in partition if node in train_set]
-        # 如果分区还有训练节点，则保留
-        if len(filtered_nodes) > 0:
-            filtered_partitions.append(torch.tensor(filtered_nodes, dtype=torch.long))
-        print(len(filtered_nodes),end=",")
+        # =====================筛选训练节点全部输入
+        # filtered_nodes = [node for node in partition if node in train_set]
+        # # 如果分区还有训练节点，则保留
+        # if len(filtered_nodes) > 0:
+        #     filtered_partitions.append(torch.tensor(filtered_nodes, dtype=torch.long))
+        # print(len(filtered_nodes),end=",")
+        # =====================不筛选训练节点全部输入
+        filtered_partitions.append(torch.tensor(partition, dtype=torch.long))
     return filtered_partitions
 
-def personal_pagerank(edge_index,alpha,topk=100,max_iter:int=100) -> np.ndarray:
+def personal_pagerank(edge_index,alpha,topk=100,max_iter:int=100,device="cuda") -> np.ndarray:
     """为所有节点计算个性化PageRank"""
-    G = nx.DiGraph()
-    G.add_edges_from(edge_index.T.tolist())
-    nodes = list(G.nodes())
-    ppr_matrix = {}
-    for target_node in tqdm(nodes,desc="running pagerank"):
-        personalization = {node: 0 for node in nodes}
-        personalization[target_node] = 1
-        ppr = nx.pagerank(
-            G,
-            alpha=alpha,
-            personalization=personalization,
-            max_iter=100,
-            tol=1.0e-6
-        )# {0:ppr_val,1:ppr_val1,2:ppr_val2...}
-        ppr_matrix[target_node] = ppr
-    # 查看节点5的个性化PageRank（从节点5出发的随机游走）
-    # ppr_matrix = sorted(ppr_matrix.items(), key=lambda x: x[0], reverse=True)
-    sorted_ppr_matrix = {}
-    for node,nodes_ppr in ppr_matrix.items():
-        # nodes_ppr = {0:ppr_val,1:ppr_val1,2:ppr_val2...}
-        sorted_ppr_matrix[node] = sorted(nodes_ppr.items(), key=lambda x: x[1], reverse=True)[:topk]
-        # sorted_ppr_matrix[node] = ((12,ppr_val0),(1,ppr_val1),(22,ppr_val2)...)
-    return sorted_ppr_matrix
+    edge_indices, edge_values = ppr.get_ppr(
+        edge_index, 
+        alpha=alpha, 
+        eps=1e-6
+    )# ppr_matrix shape: (tensor[2,edge_num], edge_num)
+    edge_indices,edge_values = edge_indices.to(device),edge_values.to(device)
+    source_nodes = edge_indices[0]
+    unique_sources = torch.unique(source_nodes)
+    topk_indices_list = []
+    topk_values_list = []
+    for src in tqdm(unique_sources,desc="sorting ppr"):
+        # 获取当前源节点的所有边
+        mask = source_nodes == src
+        src_edges = edge_indices[:, mask]
+        src_values = edge_values[mask]
+        # 如果当前节点的边数量小于等于 k，全部保留
+        if src_values.shape[0] <= topk:
+            topk_indices_list.append(src_edges)
+            topk_values_list.append(src_values)
+        else:
+            # 获取 top-k 个最大值的索引
+            topk_idx = torch.topk(src_values, topk, largest=True)[1]
+            # 保留 top-k 个边
+            topk_indices_list.append(src_edges[:, topk_idx])
+            topk_values_list.append(src_values[topk_idx])
+    # 拼接所有结果
+    topk_indices = torch.cat(topk_indices_list, dim=1)
+    topk_values = torch.cat(topk_values_list)
+    return (topk_indices, topk_values)
 
 if __name__ == "__main__":
     dataset_dir = "./dataset"
