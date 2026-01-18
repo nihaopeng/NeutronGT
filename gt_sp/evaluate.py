@@ -332,7 +332,6 @@ def sparse_eval_gpu(args, model, x, y, sub_idx, attn_bias, edge_index, device):
     # num_batch = sub_idx.size(0) // args.seq_len + 1
     # seq_len = 128
     num_batch = sub_idx.size(0) // args.seq_len + 1
-    print(f"seq_len:{args.seq_len},attn_type:{args.attn_type}")
     if args.attn_type == "full":
         attn_type = "full"
     elif args.attn_type == "flash":

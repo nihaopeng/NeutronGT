@@ -28,12 +28,11 @@ from gt_sp.utils import (
     check_conditions,
     partition_nodes_metis, 
     dynamic_window_build,
-    PartitionTreeNode,
-    SCORES_COLLECTOR
+    PartitionTreeNode
 )
 from utils.parser_node_level import parser_add_main_args
 from collections import deque
-os.environ['CUDA_VISIBLE_DEVICES'] = '1'
+
 def main():
     parser = argparse.ArgumentParser(description='TorchGT node-level training arguments.')
     parser_add_main_args(parser)
@@ -189,26 +188,26 @@ def main():
             percent_list  = [(i + 1) / args.switch_freq for i in range(args.switch_freq)]
             switch_points = [int(num_batch * percentage) for percentage in percent_list]
         iter = 1
-        print(f"batch num {num_batch},batch size {args.seq_len}")
+        # print(f"batch num {num_batch},batch size {args.seq_len}")
 
         for i in range(num_batch):
 
-            # idx_i = flatten_train_idx[i*args.seq_len: (i+1)*args.seq_len]
-            # packed_data = get_batch_reorder_blockize(args, feature, y, idx_i.to("cpu"), sub_split_seq_lens, device, edge_index, N, k=8, block_size=16, beta_coeffi=beta_coeffi_list[beta_idx])
+            idx_i = flatten_train_idx[i*args.seq_len: (i+1)*args.seq_len]
+            packed_data = get_batch_reorder_blockize(args, feature, y, idx_i.to("cpu"), sub_split_seq_lens, device, edge_index, N, k=8, block_size=16, beta_coeffi=beta_coeffi_list[beta_idx])
 
-            # x_i, y_i, edge_index_i, attn_bias = packed_data
+            x_i, y_i, edge_index_i, attn_bias = packed_data
             
             #---------------------------------modified-------------------------------------
-            idx_i = flatten_train_idx[i*args.seq_len: (i+1)*args.seq_len].to("cpu")
-            x_i = feature[idx_i].to(device)
-            y_i = y[idx_i].to(device)
-            mapping = torch.full((N,), -1, dtype=torch.long)
-            mapping[idx_i] = torch.arange(len(idx_i), dtype=torch.long)
-            source_nodes = edge_index[0]
-            target_nodes = edge_index[1]
-            mask = (mapping[source_nodes] != -1) & (mapping[target_nodes] != -1)
-            edge_index_i = mapping[edge_index[:, mask]].to(device)
-            attn_bias = None
+            # idx_i = flatten_train_idx[i*args.seq_len: (i+1)*args.seq_len].to("cpu")
+            # x_i = feature[idx_i].to(device)
+            # y_i = y[idx_i].to(device)
+            # mapping = torch.full((N,), -1, dtype=torch.long)
+            # mapping[idx_i] = torch.arange(len(idx_i), dtype=torch.long)
+            # source_nodes = edge_index[0]
+            # target_nodes = edge_index[1]
+            # mask = (mapping[source_nodes] != -1) & (mapping[target_nodes] != -1)
+            # edge_index_i = mapping[edge_index[:, mask]].to(device)
+            # attn_bias = None
             #------------------------------------------------------------------------------
             
             if attn_bias is not None:
@@ -237,7 +236,7 @@ def main():
             loss = F.nll_loss(out_i, y_i.long())
             optimizer.zero_grad(set_to_none=True) 
             loss.backward()
-            SCORES_COLLECTOR.clear()
+
             # Sync all-reduce gradient 
             if seq_parallel_world_size > 1:
                 for name, param in model.named_parameters():

@@ -16,8 +16,6 @@ from torch_scatter import scatter
 from flash_attn import flash_attn_qkvpacked_func, flash_attn_func
 
 
-from gt_sp.utils import SCORES_COLLECTOR
-
 def init_params(module, n_layers):
     if isinstance(module, nn.Linear):
         module.weight.data.normal_(mean=0.0, std=0.02 / math.sqrt(n_layers))
@@ -65,19 +63,6 @@ class CoreAttention(nn.Module):
         # Attention(Q, K, V) = softmax((QK^T)/sqrt(d_k))V
         q = q * self.scale
         x = torch.matmul(q, k)  # [b, h, q_len, k_len]
-        
-        
-        # =======================================================
-        # [新增] 复用内部数据：保存 Full Attention 分数
-        # =======================================================
-        if self.training:
-            with torch.no_grad():
-                # 多头求和
-                # [Batch, Heads, s+1, s+1] -> [Batch, s+1, s+1]
-                score_sum = x.sum(dim=1)
-                SCORES_COLLECTOR.append(score_sum.squeeze(0).detach())
-        # =======================================================
-        
         
         if attn_bias is not None:
             # attn_bias = attn_bias.repeat(1, self.num_heads, 1, 1)
