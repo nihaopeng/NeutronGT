@@ -1,7 +1,7 @@
 TorchGT/
 model_ckpt/
 dataset/
-dataset
+./dataset
 __pycache__/
 exps/
 training_logs/
