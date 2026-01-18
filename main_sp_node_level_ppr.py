@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
+from tqdm import tqdm
 from models.graphormer_dist_node_level import Graphormer
 from models.gt_dist_node_level import GT
 from models.gt_dist_node_level_single_window import GT_SW
@@ -22,13 +23,226 @@ from gt_sp.initialize import (
     set_last_batch_global_token_indices,
 )
 from gt_sp.reducer import sync_params_and_buffers, Reducer
-from gt_sp.evaluate import sparse_eval_gpu
-from gt_sp.utils import compute_graphormer_data,compute_graphormer_spatial_pos_only, get_node_degrees, random_split_idx, get_batch_reorder_blockize, check_conditions,get_all_pairs_path
+from gt_sp.evaluate import calc_acc
+from gt_sp.utils import compute_graphormer_spatial_pos_only, get_node_degrees, random_split_idx
 from utils.parser_node_level import parser_add_main_args
 from core.pprPartition import personal_pagerank,build_adj_fromat,ppr_partition,metis_partition
 from utils.vis import vis_interface
 import utils.vis as vis
 import utils.logger as logger
+
+def build_graph_struct_info(args,N,edge_index,world_size,topk=50,n_parts=50):
+    # --------------------计算结构信息------------------------------------------------------------
+    # =================== ppr partition =========================
+    partitioned_results = []
+    # if args.rank == 0:
+    sorted_ppr_matrix = personal_pagerank(edge_index,0.85,topk=topk)
+    csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
+    partitioned_results = metis_partition(csr_adjacency,eweights,n_parts=n_parts)
+    # partitioned_results = ppr_partition(sorted_ppr_matrix,flatten_train_idx.cpu().numpy(),num_set=100)
+    
+    # ===== 计算centrality encoding =====
+    graph_in_degree, graph_out_degree = None, None
+    if args.struct_enc == "True":
+        graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
+    # ==================================
+        
+    # ===== 提前获取各设备idx ======
+    partitions = []
+    # for i in range(0,len(partitioned_results)): # 全都计算，一般使用gt模型，以支持注意力交换。
+    for i in range(args.rank,len(partitioned_results),world_size):
+        partitions.append(partitioned_results[i])
+
+    # ---------------------------------------------------------
+    print("len:",end="")
+    sum_nodes_in_compute = 0 
+    for p in partitions:
+        print(len(p),end="|")
+        sum_nodes_in_compute += len(p)
+    print(f"\nsum nodes in compute:{sum_nodes_in_compute}")
+    # ---------------------------------------------------------
+    spatial_pos_list = None
+    if args.struct_enc=="True":
+        spatial_pos_list,_ = compute_graphormer_spatial_pos_only(sorted_ppr_matrix,partitions,N,max_dist=args.max_dist)
+        
+    return partitions,spatial_pos_list,graph_in_degree,graph_out_degree
+
+def build_model(model,args,feature,device,y,**kwargs):
+    graph_in_degree = kwargs["graph_in_degree"]
+    graph_out_degree = kwargs["graph_out_degree"]
+    if model is not None:
+        pass
+    elif args.model == "graphormer":
+        model = Graphormer(
+            n_layers=args.n_layers,
+            num_heads=args.num_heads,
+            input_dim=feature.shape[1],
+            hidden_dim=args.hidden_dim,
+            output_dim=y.max().item()+1,
+            attn_bias_dim=args.attn_bias_dim,
+            dropout_rate=args.dropout_rate,
+            input_dropout_rate=args.input_dropout_rate,
+            attention_dropout_rate=args.attention_dropout_rate,
+            ffn_dim=args.ffn_dim,
+            num_global_node=args.num_global_node
+        ).to(device)
+    elif args.model == "gt":
+        model = GT(
+           n_layers=args.n_layers,
+            num_heads=args.num_heads,
+            input_dim=feature.shape[1],
+            hidden_dim=args.hidden_dim,
+            output_dim=y.max().item()+1,
+            attn_bias_dim=args.attn_bias_dim,
+            dropout_rate=args.dropout_rate,
+            input_dropout_rate=args.input_dropout_rate,
+            attention_dropout_rate=args.attention_dropout_rate,
+            ffn_dim=args.ffn_dim,
+            num_global_node=args.num_global_node,
+            args=args,
+            num_in_degree = torch.max(graph_in_degree).item() if graph_in_degree is not None else 0,
+            num_out_degree = torch.max(graph_out_degree).item() if graph_out_degree is not None else 0,
+            num_spatial=args.max_dist+2,
+            num_edges=args.max_num_edges,
+            max_dist=args.max_dist,
+            edge_dim=64
+        ).to(device)
+    elif args.model == "gt_sw": # only use in ppr
+        model = GT_SW(
+           n_layers=args.n_layers,
+            num_heads=args.num_heads,
+            input_dim=feature.shape[1],
+            hidden_dim=args.hidden_dim,
+            output_dim=y.max().item()+1,
+            attn_bias_dim=args.attn_bias_dim,
+            dropout_rate=args.dropout_rate,
+            input_dropout_rate=args.input_dropout_rate,
+            attention_dropout_rate=args.attention_dropout_rate,
+            ffn_dim=args.ffn_dim,
+            num_global_node=args.num_global_node,
+            args=args,
+            num_in_degree = torch.max(graph_in_degree).item() if graph_in_degree is not None else 0,
+            num_out_degree = torch.max(graph_out_degree).item() if graph_out_degree is not None else 0,
+            num_spatial=args.max_dist+2,
+            num_edges=args.max_num_edges,
+            max_dist=args.max_dist,
+            edge_dim=64
+        ).to(device)
+    return model
+
+@torch.no_grad()
+def eval_epoch(args,model,partitions,feature,y,split_idx,device,**kwargs):
+    graph_in_degree = kwargs["graph_in_degree"]
+    graph_out_degree = kwargs["graph_out_degree"]
+    spatial_pos_list = kwargs["spatial_pos_list"]
+    epoch = kwargs["epoch"]
+    model.eval()
+    y_train_true,y_valid_true,y_test_true = [], [], []
+    y_train_pred,y_valid_pred,y_test_pred = [], [], []
+    
+    for i,idx in enumerate(partitions):
+        attn_type = "full"
+        # idx_i = flatten_train_idx[i*args.seq_len: (i+1)*args.seq_len]
+        # idx_i = partitioned_results[i]
+        idx_i = idx
+        x_i = feature[idx_i].to(device)
+        attn_bias = None
+        edge_index_i = None
+        mask = None
+        edge_input_i = None
+        spatial_pos_i = None
+        in_degree = None
+        out_degree = None
+        if args.struct_enc=="True":
+            # == node degree in the sequnence ==
+            in_degree = graph_in_degree[idx_i].to(device)
+            out_degree = graph_out_degree[idx_i].to(device)
+            spatial_pos_i = spatial_pos_list[i].to(device)
+        out_i,_,_ = model(x_i, attn_bias, edge_index_i,in_degree,out_degree, spatial_pos_i,edge_input_i,attn_type=attn_type,mask=mask)
+        mask_train = torch.isin(idx.to(device), split_idx["train"].to(device)).to('cpu')
+        mask_valid = torch.isin(idx.to(device), split_idx["valid"].to(device)).to('cpu')
+        mask_test = torch.isin(idx.to(device), split_idx["test"].to(device)).to('cpu')
+        y_train_true.append(y[idx][mask_train])
+        y_valid_true.append(y[idx][mask_valid])
+        y_test_true.append(y[idx][mask_test])
+        y_train_pred.append(out_i.argmax(1)[mask_train])
+        y_valid_pred.append(out_i.argmax(1)[mask_valid])
+        y_test_pred.append(out_i.argmax(1)[mask_test])
+    y_train_true = torch.cat(y_train_true)
+    y_valid_true = torch.cat(y_valid_true)
+    y_test_true = torch.cat(y_test_true)
+    y_train_pred = torch.cat(y_train_pred)
+    y_valid_pred = torch.cat(y_valid_pred)
+    y_test_pred = torch.cat(y_test_pred)
+    train_acc = calc_acc(y_train_true,y_train_pred)
+    valid_acc = calc_acc(y_valid_true,y_valid_pred)
+    test_acc = calc_acc(y_test_true,y_test_pred)
+    print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+    print("Epoch: {:03d}, train_acc: {:.5f}%, valid_acc: {:.5f}%, test_acc: {:.5f}%,".format(epoch, train_acc*100, valid_acc*100, test_acc*100))
+    print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+
+def train_epoch(args,model:torch.nn.Module,partitions,feature,y,optimizer,lr_scheduler,world_size,split_idx,device,**kwargs):
+    graph_in_degree = kwargs["graph_in_degree"]
+    graph_out_degree = kwargs["graph_out_degree"]
+    spatial_pos_list = kwargs["spatial_pos_list"]
+    epoch = kwargs["epoch"]
+    model.train()
+    loss_list, iter_t_list,iter_cpu2gpu_t_list,epoch_t_list,epoch_cpu2gpu_t_list = [], [], [], [], []
+    
+    scores = []
+    for i,idx in enumerate(partitions):
+        attn_type = "full"
+        # idx_i = flatten_train_idx[i*args.seq_len: (i+1)*args.seq_len]
+        # idx_i = partitioned_results[i]
+        idx_i = idx
+        t0 = time.time()
+        x_i = feature[idx_i].to(device)
+        attn_bias = None
+        edge_index_i = None
+        mask = None
+        edge_input_i = None
+        spatial_pos_i = None
+        in_degree = None
+        out_degree = None
+        if args.struct_enc=="True":
+            # == node degree in the sequnence ==
+            in_degree = graph_in_degree[idx_i].to(device)
+            out_degree = graph_out_degree[idx_i].to(device)
+            spatial_pos_i = spatial_pos_list[i].to(device)
+        t1 = time.time()
+        out_i,score_agg,score_spe = model(x_i, attn_bias, edge_index_i,in_degree,out_degree, spatial_pos_i,edge_input_i,attn_type=attn_type,mask=mask)
+        scores.append(score_agg)
+        loss = F.nll_loss(out_i, y[idx].to(device).long(),reduction='none')
+        optimizer.zero_grad(set_to_none=True)
+        mask_train = torch.isin(idx.to(device), split_idx["train"].to(device))
+        if mask_train.any():
+            loss = loss[mask_train].mean()
+            loss.backward()
+        else:
+            loss = torch.tensor(0.0, device=device, requires_grad=True)
+        # Sync all-reduce gradient
+        if world_size > 1:
+            for name, param in model.named_parameters():
+                if param.requires_grad and param.grad is not None:
+                    # param.grad.div_(get_sequence_parallel_world_size())
+                    # dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=get_sequence_parallel_group())
+                    # seems that the order is reversed
+                    dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=get_sequence_parallel_group())
+                    param.grad.div_(get_sequence_parallel_world_size())
+        optimizer.step()
+        t2 = time.time()
+        iter_t_list.append(t2 - t1)
+        iter_cpu2gpu_t_list.append(t1-t0)
+        # if i==0:
+        #     vis_interface(score_spe[3].squeeze(0)[0],idx_i,edge_index,x_i,epoch,args)
+        loss_list.append(loss.item())
+    lr_scheduler.step()
+    if args.rank == 0:
+        epoch_t_list.append(np.sum(iter_t_list))
+        epoch_cpu2gpu_t_list.append(np.sum(iter_cpu2gpu_t_list))
+        print("------------------------------------------------------------------------------------")
+        print("Epoch: {:03d}, Loss: {:.4f}, Epoch Time: {:.3f}s, Trans Time: {:.3f}s".format(epoch, np.mean(loss_list), np.mean(epoch_t_list),np.mean(epoch_cpu2gpu_t_list)))
+        print("------------------------------------------------------------------------------------")
 
 def main():
     logger.IS_LOGGING = False
@@ -110,114 +324,10 @@ def main():
     set_global_token_indices(global_token_indices)
     set_last_batch_global_token_indices(global_token_indices_last_batch)
 
-    # --------------------计算结构信息------------------------------------------------------------
-    # =================== ppr partition =========================
-    partitioned_results = []
-    # if args.rank == 0:
-    sorted_ppr_matrix = personal_pagerank(edge_index,0.85,topk=50)
-    csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
-    partitioned_results = metis_partition(csr_adjacency,eweights,flatten_train_idx.cpu().numpy(),n_parts=80)
-    # partitioned_results = ppr_partition(sorted_ppr_matrix,flatten_train_idx.cpu().numpy(),num_set=100)
-    # if seq_parallel_world_size > 1:
-    #     if args.rank == src_rank:  # src_rank 有数据
-    #         for i, partition in enumerate(partitioned_results):
-    #             # 广播每个分区
-    #             dist.broadcast(partition, src=src_rank, group=group)
-    # else:  # 其他进程
-    #     # 必须先创建相同形状的空张量来接收
-    #     for i in range(len(partitioned_results_on_src)):  # 需要知道分区数量
-    #         # 创建接收缓冲区（需要知道张量的形状和类型）
-    #         recv_tensor = torch.empty_like(partition_shape)  # 需要知道形状
-    #         dist.broadcast(recv_tensor, src=src_rank, group=group)
-    #         partitioned_results.append(recv_tensor)
-    # =============================================================
-    
-    # ===== 计算centrality encoding =====
-    graph_in_degree, graph_out_degree = None, None
-    if args.struct_enc == "True":
-        graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
-    # ==================================
+    partitions,spatial_pos_list,graph_in_degree,graph_out_degree = build_graph_struct_info(args,N,edge_index,seq_parallel_world_size,topk=50,n_parts=40)
 
-    # =====    all_pairs_path     =====
-    # 大图计算edge_input会爆主机内存
-    # (global_spatial_pos, global_edge_input) = compute_graphormer_data(edge_index, N, max_dist=args.max_dist)
-    # all_pairs_path = None
-    # if args.struct_enc == "True":
-    #     all_pairs_path = get_all_pairs_path(edge_index,N,max_dist=5)
-    # ================================== 
-    # --------------------------------------------------------------------------------
-        
-    # ===== 提前获取各设备idx ======
-    partitions = []
-    for i in range(args.rank,len(partitioned_results),seq_parallel_world_size):
-        partitions.append(partitioned_results[i])
-    if args.struct_enc=="True":
-        spatial_pos_list,_ = compute_graphormer_spatial_pos_only(sorted_ppr_matrix,partitions,N,max_dist=args.max_dist)
+    model = build_model(None,args,feature,device,y,graph_in_degree=graph_in_degree,graph_out_degree=graph_out_degree)
 
-    if args.model == "graphormer":
-        model = Graphormer(
-            n_layers=args.n_layers,
-            num_heads=args.num_heads,
-            input_dim=feature.shape[1],
-            hidden_dim=args.hidden_dim,
-            output_dim=y.max().item()+1,
-            attn_bias_dim=args.attn_bias_dim,
-            dropout_rate=args.dropout_rate,
-            input_dropout_rate=args.input_dropout_rate,
-            attention_dropout_rate=args.attention_dropout_rate,
-            ffn_dim=args.ffn_dim,
-            num_global_node=args.num_global_node
-        ).to(device)
-    elif args.model == "gt":
-        model = GT(
-           n_layers=args.n_layers,
-            num_heads=args.num_heads,
-            input_dim=feature.shape[1],
-            hidden_dim=args.hidden_dim,
-            output_dim=y.max().item()+1,
-            attn_bias_dim=args.attn_bias_dim,
-            dropout_rate=args.dropout_rate,
-            input_dropout_rate=args.input_dropout_rate,
-            attention_dropout_rate=args.attention_dropout_rate,
-            ffn_dim=args.ffn_dim,
-            num_global_node=args.num_global_node,
-            args=args,
-            num_in_degree = torch.max(graph_in_degree).item(),
-            num_out_degree = torch.max(graph_out_degree).item(),
-            num_spatial=args.max_dist+1,
-            num_edges=1024,
-            max_dist=args.max_dist,
-            edge_dim=64
-        ).to(device)
-    elif args.model == "gt_sw":
-        model = GT_SW(
-           n_layers=args.n_layers,
-            num_heads=args.num_heads,
-            input_dim=feature.shape[1],
-            hidden_dim=args.hidden_dim,
-            output_dim=y.max().item()+1,
-            attn_bias_dim=args.attn_bias_dim,
-            dropout_rate=args.dropout_rate,
-            input_dropout_rate=args.input_dropout_rate,
-            attention_dropout_rate=args.attention_dropout_rate,
-            ffn_dim=args.ffn_dim,
-            num_global_node=args.num_global_node,
-            args=args,
-            num_in_degree = torch.max(graph_in_degree).item(),
-            num_out_degree = torch.max(graph_out_degree).item(),
-            num_spatial=512,
-            num_edges=args.max_num_edges,
-            max_dist=args.max_dist,
-            edge_dim=64
-        ).to(device)
-        
-    if args.rank == 0:
-        print('Model params:', sum(p.numel() for p in model.parameters()))
-
-    # Sync params and buffers. Ensures all rank models start off at the same value
-    if seq_parallel_world_size > 1:
-        sync_params_and_buffers(model)
-    
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.peak_lr, weight_decay=args.weight_decay)
     lr_scheduler = PolynomialDecayLR(
             optimizer,
@@ -227,167 +337,32 @@ def main():
             end_lr=args.end_lr,
             power=1.0)
     
-    val_acc_list, test_acc_list, epoch_t_list = [], [], []
-    best_model, best_val, best_test = None, float('-inf'), float('-inf')
-    
-    # =================在训练开始前创建或清空CSV文件并写入表头============
-    # import csv
-    # csv_file = "training_log.csv"
-    # with open(csv_file, 'w', newline='') as f:
-    #     writer = csv.writer(f)
-    #     writer.writerow(['Epoch', 'Loss', 'Time', 'Train acc', 'Val acc', 'Test acc'])
+    if args.rank == 0:
+        print('Model params:', sum(p.numel() for p in model.parameters()))
 
-    for epoch in range(1, args.epochs + 1):
-        model.to(device)
-        model.train()
-        loss_list, iter_t_list = [], []
-        
-        scores = []
-        for i,idx in enumerate(partitions):
-            attn_type = "full"
-            t1 = time.time()
-            # idx_i = flatten_train_idx[i*args.seq_len: (i+1)*args.seq_len]
-            # idx_i = partitioned_results[i]
-            idx_i = idx
-            x_i = feature[idx_i].to(device)
-            attn_bias = None
-            edge_index_i = None
-            mask = None
-            
-            edge_input_i = None
-            spatial_pos_i = None
-            in_degree = None
-            out_degree = None
-            if args.struct_enc=="True":
-                # == node degree in the sequnence ==
-                in_degree = graph_in_degree[idx_i].to(device)
-                out_degree = graph_out_degree[idx_i].to(device)
-                # == ========================  == 
-                # == spatial and edge info in the sequence ==
-                    # spatial_pos 切片: [Batch, Batch]
-                # spatial_pos_i = global_spatial_pos[idx_i.to("cpu")][:, idx_i.to("cpu")].to(device)
-                spatial_pos_i = spatial_pos_list[i].to(device)
-                    # edge_input 切片: [Batch, Batch, Max_Dist]
-                # edge_input_i = global_edge_input[idx_i.to("cpu")][:, idx_i.to("cpu"), :].to(device)
-                # =================================================
-            # print(f"spatial_pos_i:{spatial_pos_i.shape},x_i:{x_i.shape}")
-            out_i,score_agg,score_spe = model(x_i, attn_bias, edge_index_i,in_degree,out_degree, spatial_pos_i,edge_input_i,attn_type=attn_type,mask=mask)
-            scores.append(score_agg)
-            # print(f"out_i shape:{out_i.shape},out_i:{out_i[0]}")
-            # print(f"label:{y[partitioned_results[i]]}")
-            loss = F.nll_loss(out_i, y[idx_i].to(device).long(),reduction='none')
-            optimizer.zero_grad(set_to_none=True)
-            mask_train = torch.isin(idx_i, split_idx["train"])
-            if mask_train.any():
-                loss = loss[mask_train].mean()
-                loss.backward()
-            else:
-                loss = torch.tensor(0.0, device=device, requires_grad=True)
-                loss.backward()
-            # Sync all-reduce gradient 
-            if seq_parallel_world_size > 1:
-                for name, param in model.named_parameters():
-                    if param.requires_grad and param.grad is not None:
-                        # param.grad.div_(get_sequence_parallel_world_size())
-                        # dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=get_sequence_parallel_group())
-                        # seems that the order is reversed
-                        dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=get_sequence_parallel_group())
-                        param.grad.div_(get_sequence_parallel_world_size())
+    # Sync params and buffers. Ensures all rank models start off at the same value
+    if seq_parallel_world_size > 1:
+        sync_params_and_buffers(model)
 
-            optimizer.step()
-            t2 = time.time()
-             
-            iter_t_list.append(t2 - t1)
-            # if i==0:
-            #     vis_interface(score_spe[3].squeeze(0)[0],idx_i,edge_index,x_i,epoch,args)
-            
-        loss_list.append(loss.item()) 
-        lr_scheduler.step()
+    for epoch in range(0, args.epochs):
+        train_epoch(args,model,partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
+                    graph_in_degree=graph_in_degree,
+                    graph_out_degree=graph_out_degree,
+                    spatial_pos_list=spatial_pos_list,
+                    epoch=epoch)
+        if args.rank == 0 and epoch % 20 == 0:
+            print(f"epoch {epoch}: lr = {lr_scheduler.get_last_lr()[0]:.2e}")
+            eval_epoch(args,model,partitions,feature,y,split_idx,device,
+                    graph_in_degree=graph_in_degree,
+                    graph_out_degree=graph_out_degree,
+                    spatial_pos_list=spatial_pos_list,
+                    epoch=epoch)
         
         # 窗口调整
         # =================================================================
         # if (epoch+1) % 20 == 0:
         #     partitionTree.dynamic_window_build(scores,metis_partition_nodes,remove_ratio=0.05)
-        # =================================================================
-        
-        csv_content = []
-        
-        if epoch > 4 and args.rank == 0:
-            epoch_t_list.append(np.sum(iter_t_list))
-            print("------------------------------------------------------------------------------------")
-            print("Epoch: {:03d}, Loss: {:.4f}, Epoch Time: {:.3f}s".format(epoch, np.mean(loss_list), np.mean(epoch_t_list)))
-            # 在每个epoch结束后写入数据
-            # csv_content.append(epoch)
-            # csv_content.append(np.mean(loss_list))
-            # csv_content.append(np.mean(epoch_t_list))
-            print("------------------------------------------------------------------------------------")
-
-        if args.rank == 0 and epoch % 5 == 0:   
-            t4 = time.time()
-            train_acc = sparse_eval_gpu(
-                args, model, feature, y, split_idx['train'], 
-                attn_bias, edge_index, device,
-                graph_in_degree=graph_in_degree, 
-                graph_out_degree=graph_out_degree,
-                # adj_weight=adj_weight,
-                # all_pairs_path=all_pairs_path,
-                # global_spatial_pos = global_spatial_pos,
-                # global_edge_input = global_edge_input
-                )
-            val_acc = sparse_eval_gpu(
-                args, model, feature, y, split_idx['valid'], 
-                attn_bias, edge_index, device,
-                graph_in_degree=graph_in_degree, 
-                graph_out_degree=graph_out_degree,
-                # adj_weight=adj_weight,
-                # all_pairs_path=all_pairs_path,
-                # global_spatial_pos = global_spatial_pos,
-                # global_edge_input = global_edge_input
-                )
-            test_acc = sparse_eval_gpu(
-                args, model, feature, y, split_idx['test'], 
-                attn_bias, edge_index, device,
-                graph_in_degree=graph_in_degree, 
-                graph_out_degree=graph_out_degree,
-                # adj_weight=adj_weight,
-                # all_pairs_path=all_pairs_path,
-                # global_spatial_pos = global_spatial_pos,
-                # global_edge_input = global_edge_input
-                )
-            if epoch % 20 ==0 and i==0:
-                vis.train_acc.append(train_acc)
-                vis.val_acc.append(val_acc)
-                vis.test_acc.append(test_acc)
-            
-            t5 = time.time()
-            print("------------------------------------------------------------------------------------")
-            print(f'Eval time {t5-t4}s')
-            print("Epoch: {:03d}, Loss: {:4f}, Train acc: {:.2%}, Val acc: {:.2%}, Test acc: {:.2%}, Epoch Time: {:.3f}s".format(
-                epoch, np.mean(loss_list), train_acc, val_acc, test_acc, np.mean(epoch_t_list)))
-            csv_content.append(train_acc)
-            csv_content.append(val_acc)
-            csv_content.append(test_acc)
-            print("------------------------------------------------------------------------------------")
-        
-            if val_acc > best_val:
-                best_val = val_acc
-                if args.save_model:
-                    torch.save(model.state_dict(), args.model_dir + f'{args.dataset}.pkl')
-            
-            if test_acc > best_test:
-                best_test = test_acc
-            
-            val_acc_list.append(val_acc)
-            test_acc_list.append(test_acc)
-            
-        # with open(csv_file, 'a', newline='') as f:
-        #     writer = csv.writer(f)
-        #     if csv_content:
-        #         writer.writerow(csv_content)
-    
-    if args.rank == 0:
-        print("Best validation accuracy: {:.2%}, test accuracy: {:.2%}".format(best_val, best_test))
-
+        # =================================================================   
 
 if __name__ == "__main__":
     main()

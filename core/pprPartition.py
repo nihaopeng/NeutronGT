@@ -6,9 +6,8 @@ from tqdm import tqdm
 import numpy as np
 import pymetis
 
-def metis_partition(csr_adjacency:pymetis.CSRAdjacency,eweights:list[list],flatten_train_idx:np.ndarray,n_parts):
+def metis_partition(csr_adjacency:pymetis.CSRAdjacency,eweights:list[list],n_parts):
     # 将训练索引转换为集合，用于快速查找
-    train_set = set(flatten_train_idx.tolist())  # 更快
     try:
         n_cuts, membership = pymetis.part_graph(
             nparts=n_parts,

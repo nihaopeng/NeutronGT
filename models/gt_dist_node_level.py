@@ -303,8 +303,8 @@ class EncoderLayer(nn.Module):
         # ==================================    
 
 
-        y = self.FFN_layer1(y)                  # 原代码这里的输入是 y ??? 
-        # y = self.FFN_layer1(x)
+        # y = self.FFN_layer1(y)                  # 原代码这里的输入是 y ??? 
+        y = self.FFN_layer1(x)
         y = F.relu(y)
         y = self.self_attention_dropout(y)
         y = self.FFN_layer2(y)
@@ -537,15 +537,15 @@ class GT(nn.Module):
         
         # ===== centrality encoding =====
         if self.args.struct_enc=="True":
-            in_degree = in_degree.unsqueeze(0)
-            out_degree = out_degree.unsqueeze(0)
+            in_degree = in_degree.unsqueeze(0) if in_degree is not None else None
+            out_degree = out_degree.unsqueeze(0) if out_degree is not None else None
             node_feature = self.centrality_encoding(node_feature, in_degree, out_degree)
         # =====                     =====
         
         # =====   attention_bias    =====
         if self.args.struct_enc=="True":
-            spatial_pos = spatial_pos.unsqueeze(0)
-            edge_input = edge_input.unsqueeze(0)
+            spatial_pos = spatial_pos.unsqueeze(0) if spatial_pos is not None else None
+            edge_input = edge_input.unsqueeze(0) if edge_input is not None else None
             bias = self.attention_bias(spatial_pos, edge_input)
             if attn_bias is not None:
                 attn_bias = bias + attn_bias
@@ -567,7 +567,7 @@ class GT(nn.Module):
                 attn_type=attn_type,
                 mask=mask
             )
-            score_agg = score if score_agg==None else score_agg+torch.sum(score,dim=1).squeeze(0) # 返回的score已经是绝对值了
+            # score_agg = score if score_agg==None else score_agg+torch.sum(score,dim=1).squeeze(0) # 返回的score已经是绝对值了
             score_spe.append(score)
         # Output part
         log(f"final output:{output.shape}")

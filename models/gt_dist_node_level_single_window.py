@@ -1,3 +1,4 @@
+import time
 import torch
 import math
 import torch.nn as nn
@@ -536,15 +537,18 @@ class GT_SW(nn.Module):
         n_graph = x.shape[0] 
         
         # [bs, s/p, x_d] -> [bs, s/p, h]
-        node_feature = self.node_encoder(x)            
-        
+        # t1 = time.time()
+        node_feature = self.node_encoder(x)
+        # t2 = time.time()
+        # print(f"cost time2:{t2-t1:.3f}")
         # ===== centrality encoding =====
         if self.args.struct_enc=="True":
             in_degree = in_degree.unsqueeze(0) if in_degree is not None else None
-            out_degree = out_degree.unsqueeze(0) if in_degree is not None else None
+            out_degree = out_degree.unsqueeze(0) if out_degree is not None else None
             node_feature = self.centrality_encoding(node_feature, in_degree, out_degree)
         # =====                     =====
-        
+        # t3 = time.time()
+        # print(f"cost time3:{t3-t2:.3f}")
         # =====   attention_bias    =====
         if self.args.struct_enc=="True":
             spatial_pos = spatial_pos.unsqueeze(0) if spatial_pos is not None else None
@@ -555,9 +559,11 @@ class GT_SW(nn.Module):
             else:
                 attn_bias = bias
         # =====                     =====     
-        
+        # t4 = time.time()
+        # print(f"cost time4:{t4-t3:.3f}")
         output = self.input_dropout(node_feature)
-
+        # t5 = time.time()
+        # print(f"cost time5:{t5-t4:.3f}")
         # [b, s/p+1, h]
         score_agg = None
         score_spe = []
@@ -573,6 +579,9 @@ class GT_SW(nn.Module):
             # score_agg = score if score_agg==None else score_agg+torch.sum(score,dim=1).squeeze(0) # 返回的score已经是绝对值了
             score_spe.append(score)
         # Output part
+        # t6 = time.time()
+        # print(f"cost time6:{t6-t5:.3f}")
+        
         log(f"final output:{output.shape}")
         output = self.MLP_layer(output[0, :, :])
         log(f"final output:{output.shape}")
