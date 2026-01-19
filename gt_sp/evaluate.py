@@ -8,14 +8,13 @@ from gt_sp.initialize import (
 )
 
 def calc_acc(y_true, y_pred):
-    acc_list = []
     y_true = y_true.detach().cpu().numpy()
     y_pred = y_pred.detach().cpu().numpy()
-    is_labeled = y_true[:] == y_true[:]
-    correct = y_true[is_labeled] == y_pred[is_labeled]
-    acc_list.append(float(np.sum(correct)) / len(correct))
-
-    return sum(acc_list) / len(acc_list)
+    is_labeled = (y_true != -1)  # 假设 -1 表示未标注
+    if np.sum(is_labeled) == 0:
+        return 0.0  # 或 float('nan')
+    correct = (y_true[is_labeled] == y_pred[is_labeled])
+    return float(np.mean(correct))
 
 
 @torch.no_grad()

@@ -67,12 +67,10 @@ def build_graph_struct_info(args,N,edge_index,world_size,topk=50,n_parts=50):
         
     return partitions,spatial_pos_list,graph_in_degree,graph_out_degree
 
-def build_model(model,args,feature,device,y,**kwargs):
+def build_model(args,feature,device,y,**kwargs):
     graph_in_degree = kwargs["graph_in_degree"]
     graph_out_degree = kwargs["graph_out_degree"]
-    if model is not None:
-        pass
-    elif args.model == "graphormer":
+    if args.model == "graphormer":
         model = Graphormer(
             n_layers=args.n_layers,
             num_heads=args.num_heads,
@@ -132,6 +130,15 @@ def build_model(model,args,feature,device,y,**kwargs):
 
 @torch.no_grad()
 def eval_epoch(args,model,partitions,feature,y,split_idx,device,**kwargs):
+    # ---verify that whether the param was changed---
+    # curr_param = None
+    # for param in model.parameters():
+    #     if param.requires_grad:
+    #         curr_param = param
+    #         break
+    # print(f"{curr_param}")
+    # -----------------------------------------------
+
     graph_in_degree = kwargs["graph_in_degree"]
     graph_out_degree = kwargs["graph_out_degree"]
     spatial_pos_list = kwargs["spatial_pos_list"]
@@ -142,23 +149,16 @@ def eval_epoch(args,model,partitions,feature,y,split_idx,device,**kwargs):
     
     for i,idx in enumerate(partitions):
         attn_type = "full"
-        # idx_i = flatten_train_idx[i*args.seq_len: (i+1)*args.seq_len]
-        # idx_i = partitioned_results[i]
-        idx_i = idx
-        x_i = feature[idx_i].to(device)
-        attn_bias = None
-        edge_index_i = None
-        mask = None
-        edge_input_i = None
-        spatial_pos_i = None
-        in_degree = None
-        out_degree = None
+        x_i = feature[idx].to(device)
+        attn_bias,in_degree,out_degree = None,None,None
+        edge_index_i,edge_input_i,mask,spatial_pos_i = None,None,None,None
         if args.struct_enc=="True":
             # == node degree in the sequnence ==
-            in_degree = graph_in_degree[idx_i].to(device)
-            out_degree = graph_out_degree[idx_i].to(device)
+            in_degree = graph_in_degree[idx].to(device)
+            out_degree = graph_out_degree[idx].to(device)
             spatial_pos_i = spatial_pos_list[i].to(device)
         out_i,_,_ = model(x_i, attn_bias, edge_index_i,in_degree,out_degree, spatial_pos_i,edge_input_i,attn_type=attn_type,mask=mask)
+        # print(f"out i:{out_i}")
         mask_train = torch.isin(idx.to(device), split_idx["train"].to(device)).to('cpu')
         mask_valid = torch.isin(idx.to(device), split_idx["valid"].to(device)).to('cpu')
         mask_test = torch.isin(idx.to(device), split_idx["test"].to(device)).to('cpu')
@@ -168,6 +168,8 @@ def eval_epoch(args,model,partitions,feature,y,split_idx,device,**kwargs):
         y_train_pred.append(out_i.argmax(1)[mask_train])
         y_valid_pred.append(out_i.argmax(1)[mask_valid])
         y_test_pred.append(out_i.argmax(1)[mask_test])
+        if args.rank == 0 and i == 0:
+            print(f"y test pred:{y_test_pred}")
     y_train_true = torch.cat(y_train_true)
     y_valid_true = torch.cat(y_valid_true)
     y_test_true = torch.cat(y_test_true)
@@ -197,13 +199,8 @@ def train_epoch(args,model:torch.nn.Module,partitions,feature,y,optimizer,lr_sch
         idx_i = idx
         t0 = time.time()
         x_i = feature[idx_i].to(device)
-        attn_bias = None
-        edge_index_i = None
-        mask = None
-        edge_input_i = None
-        spatial_pos_i = None
-        in_degree = None
-        out_degree = None
+        attn_bias,in_degree,out_degree = None,None,None
+        edge_index_i,edge_input_i,mask,spatial_pos_i = None,None,None,None
         if args.struct_enc=="True":
             # == node degree in the sequnence ==
             in_degree = graph_in_degree[idx_i].to(device)
@@ -215,20 +212,19 @@ def train_epoch(args,model:torch.nn.Module,partitions,feature,y,optimizer,lr_sch
         loss = F.nll_loss(out_i, y[idx].to(device).long(),reduction='none')
         optimizer.zero_grad(set_to_none=True)
         mask_train = torch.isin(idx.to(device), split_idx["train"].to(device))
+        # print(f"mask sum:{mask_train.sum().item()}")
         if mask_train.any():
             loss = loss[mask_train].mean()
-            loss.backward()
         else:
+            print(f"rank:{args.rank},epoch:{epoch},no train nodes!")
             loss = torch.tensor(0.0, device=device, requires_grad=True)
+        loss.backward()
         # Sync all-reduce gradient
         if world_size > 1:
             for name, param in model.named_parameters():
                 if param.requires_grad and param.grad is not None:
-                    # param.grad.div_(get_sequence_parallel_world_size())
-                    # dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=get_sequence_parallel_group())
-                    # seems that the order is reversed
-                    dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=get_sequence_parallel_group())
                     param.grad.div_(get_sequence_parallel_world_size())
+                    dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=get_sequence_parallel_group())
         optimizer.step()
         t2 = time.time()
         iter_t_list.append(t2 - t1)
@@ -284,9 +280,9 @@ def main():
     
     # Broadcast train indexes to all ranks 
     seq_parallel_world_size = get_sequence_parallel_world_size() if sequence_parallel_is_initialized() else 1
-    if seq_parallel_world_size > 1:
-        src_rank = get_sequence_parallel_src_rank()
-        group = get_sequence_parallel_group()
+    # if seq_parallel_world_size > 1:
+    #     src_rank = get_sequence_parallel_src_rank()
+    #     group = get_sequence_parallel_group()
 
     train_idx = split_idx['train']
     
@@ -298,8 +294,8 @@ def main():
                                 device=device,
                                 dtype=torch.int64)
     # Broadcast
-    if seq_parallel_world_size > 1:
-        dist.broadcast(flatten_train_idx, src_rank, group=group)
+    # if seq_parallel_world_size > 1:
+    #     dist.broadcast(flatten_train_idx, src_rank, group=group)
 
     # Initialize global token indices
     seq_len_per_rank = get_sequence_length_per_rank()
@@ -326,7 +322,7 @@ def main():
 
     partitions,spatial_pos_list,graph_in_degree,graph_out_degree = build_graph_struct_info(args,N,edge_index,seq_parallel_world_size,topk=50,n_parts=40)
 
-    model = build_model(None,args,feature,device,y,graph_in_degree=graph_in_degree,graph_out_degree=graph_out_degree)
+    model = build_model(args,feature,device,y,graph_in_degree=graph_in_degree,graph_out_degree=graph_out_degree)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.peak_lr, weight_decay=args.weight_decay)
     lr_scheduler = PolynomialDecayLR(
