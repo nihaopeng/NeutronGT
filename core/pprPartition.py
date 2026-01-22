@@ -52,18 +52,18 @@ def build_adj_fromat(sorted_ppr_matrix):
         _ % num_nodes
     ], dim=1)  # [U, 2]
     summed_ppr = torch.zeros(inverse_indices.max() + 1, device=ppr_val.device)
-    summed_ppr.scatter_add_(0, inverse_indices, ppr_val)
+    summed_ppr.scatter_add_(0, inverse_indices, ppr_val) #若原边中有 (0→1, ppr=0.2) 和 (1→0, ppr=0.3)，则合并后该无向边 (0,1) 的 PPR 总和为 0.5
     weights = (summed_ppr * 1000).clamp_min(1).long().cpu()
     print("======构建无向连接===========")
     # === Step 2: 构建无向邻接（每条边存两次）===
     u_all = torch.cat([unique_edges[:, 0], unique_edges[:, 1]])
     v_all = torch.cat([unique_edges[:, 1], unique_edges[:, 0]])
-    weights_all = torch.cat([weights, weights])
+    weights_all = torch.cat([weights, weights]) # 无向边存了两次，权重也存两次
     # 按源节点排序
     sort_idx = torch.argsort(u_all)
     u_all = u_all[sort_idx].cpu().numpy()
     v_all = v_all[sort_idx].cpu().numpy()
-    weights_all_np = weights_all[sort_idx].numpy()
+    weights_all_np = weights_all[sort_idx].numpy() # 
     print("======csr format building===========")
     # === Step 3: 构建 CSR ===
     xadj = np.zeros(num_nodes + 1, dtype=np.int32)

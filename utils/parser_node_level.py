@@ -43,7 +43,7 @@ def parser_add_main_args(parser):
     parser.add_argument('--epochs', type=int, default=100) # larger seq len more training epochs
     parser.add_argument('--patience', type=int, default=50, 
                         help='Patience for early stopping')
-    parser.add_argument('--peak_lr', type=float, default=2e-4)
+    parser.add_argument('--peak_lr', type=float, default=1e-4)
     parser.add_argument('--end_lr', type=float, default=1e-9)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--perturb_feature', action='store_true', default=False)

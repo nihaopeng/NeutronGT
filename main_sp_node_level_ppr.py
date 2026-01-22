@@ -168,8 +168,8 @@ def eval_epoch(args,model,partitions,feature,y,split_idx,device,**kwargs):
         y_train_pred.append(out_i.argmax(1)[mask_train])
         y_valid_pred.append(out_i.argmax(1)[mask_valid])
         y_test_pred.append(out_i.argmax(1)[mask_test])
-        if args.rank == 0 and i == 0:
-            print(f"y test pred:{y_test_pred}")
+        # if args.rank == 0 and i == 0:
+        #     print(f"y test pred:{y_test_pred}")
     y_train_true = torch.cat(y_train_true)
     y_valid_true = torch.cat(y_valid_true)
     y_test_true = torch.cat(y_test_true)
