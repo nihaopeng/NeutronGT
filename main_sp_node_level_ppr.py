@@ -32,14 +32,14 @@ from utils.vis import vis_interface
 import utils.vis as vis
 import utils.logger as logger
 
-def build_graph_struct_info(args,N,edge_index,feature,world_size,topk=50,n_parts=50):
+def build_graph_struct_info(args,N,edge_index,feature,world_size,topk=50,n_parts=50,related_nodes_topk_rate=5):
     # --------------------计算结构信息------------------------------------------------------------
     # =================== ppr partition =========================
     partitioned_results = []
     # if args.rank == 0:
     sorted_ppr_matrix = personal_pagerank(edge_index,0.85,topk=topk)
     csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
-    wm = weightMetis_keepParent(csr_adjacency=csr_adjacency, eweights=eweights, n_parts=n_parts,feature=feature,edge_index=edge_index,related_nodes_topk_rate=5)
+    wm = weightMetis_keepParent(csr_adjacency=csr_adjacency, eweights=eweights, n_parts=n_parts,feature=feature,edge_index=edge_index,related_nodes_topk_rate=related_nodes_topk_rate)
     partitioned_results = wm.partitioned_results
     sub_edge_index_list = wm.sub_edge_index_for_partitioned_results
     # partitioned_results = metis_partition(csr_adjacency,eweights,n_parts=n_parts)
@@ -58,12 +58,17 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,topk=50,n_parts
         partitions.append(partitioned_results[i])
 
     # ---------------------------------------------------------
-    print("len:",end="")
+    print("node len:",end="")
     sum_nodes_in_compute = 0 
     for p in partitions:
         print(len(p),end="|")
         sum_nodes_in_compute += len(p)
-    print(f"\nsum nodes in compute:{sum_nodes_in_compute}")
+    print("\nedge len:",end="")
+    sum_edges_in_compute = 0 
+    for p in sub_edge_index_list:
+        print(len(p[0]),end="|")
+        sum_edges_in_compute += len(p)
+    print(f"\nsum nodes in compute:{sum_nodes_in_compute},sum edges in compute:{sum_edges_in_compute}")
     # ---------------------------------------------------------
     spatial_pos_list = None
     if args.struct_enc=="True":
@@ -322,7 +327,13 @@ def main():
     set_global_token_indices(global_token_indices)
     set_last_batch_global_token_indices(global_token_indices_last_batch)
 
-    partitions,spatial_pos_list,graph_in_degree,graph_out_degree,sub_edge_index_list = build_graph_struct_info(args,N,edge_index,feature,seq_parallel_world_size,topk=50,n_parts=40)
+    partitions,spatial_pos_list,graph_in_degree,graph_out_degree,sub_edge_index_list \
+        = build_graph_struct_info(
+            args,N,edge_index,feature,seq_parallel_world_size,
+            topk=50,
+            n_parts=60,
+            related_nodes_topk_rate=5
+        )
 
     model = build_model(args,feature,device,y,graph_in_degree=graph_in_degree,graph_out_degree=graph_out_degree)
 

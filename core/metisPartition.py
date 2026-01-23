@@ -94,11 +94,12 @@ class weightMetis_keepParent:
 
     def node_out(self,partition_global_idx:int,score_of_partition:torch.Tensor):
         """
-        剔除节点，一定要更新global_edge_index!!!
+        根据注意力分数剔除节点，一定要更新global_edge_index!!!
         """
         idx_parent = partition_global_idx // (self.n_parts // 2)
         idx_child = partition_global_idx % (self.n_parts // 2)
         assert self.child_partitions[idx_parent][idx_child].shape[0] == score_of_partition.shape[0]
+
 
     def _get_sub_edge_index(self, node_set: torch.Tensor) -> torch.Tensor:
         sub_edge_index, _ = subgraph(
