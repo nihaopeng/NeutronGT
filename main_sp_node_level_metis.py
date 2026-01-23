@@ -25,7 +25,7 @@ from gt_sp.evaluate import sparse_eval_gpu
 from gt_sp.utils import compute_graphormer_data, get_node_degrees, random_split_idx, get_batch_reorder_blockize, check_conditions
 from utils.parser_node_level import parser_add_main_args
 from collections import deque
-from core.metisPartition import PartitionTree
+from core.metisPartition_old import PartitionTree
 from utils.vis import vis_interface
 import utils.vis as vis
 import utils.logger as logger

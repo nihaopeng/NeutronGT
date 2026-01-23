@@ -119,15 +119,16 @@ class CoreAttention(nn.Module):
         # Reshaping into [total_s, np, hn] to
         # get projections for multi-head attention
         # kqv: [total_s, np, hn],  e: [total_edges, np, hn]
+        # 这里的b恒为1，bs=s，所以索引不会出问题。
         q = q.view(-1, num_heads, self.hidden_size_per_attention_head)
         k = k.view(-1, num_heads, self.hidden_size_per_attention_head)
         v = v.view(-1, num_heads, self.hidden_size_per_attention_head)
 
         # -> [total_edges, np, hn]
         src = k[edge_index[0].to(torch.long)] 
-        dest = q[edge_index[1].to(torch.long)] 
+        dest = q[edge_index[1].to(torch.long)]
         score = torch.mul(src, dest)  # element-wise multiplication
-            
+        
         # Scale scores by sqrt(d)
         score = score / self.scale
 
@@ -137,10 +138,14 @@ class CoreAttention(nn.Module):
 
         # [b, np, s+1, s+1] -> [b, s+1, s+1, np] -> [b, s+1, b, s+1, np]
         if attn_bias is not None:
-            attn_bias = attn_bias.permute(0, 2, 3, 1).contiguous().unsqueeze(2).repeat(1, 1, batch_size, 1, 1)  
+            # print(f"attnbias:{attn_bias.shape}")
+            attn_bias = attn_bias.permute(0, 2, 3, 1).contiguous().unsqueeze(2).repeat(1, 1, batch_size, 1, 1) 
+            # print(f"attnbias:{attn_bias.shape}")
             attn_bias = attn_bias.view(batch_size*node_num, batch_size*node_num, num_heads)
-            attn_bias = attn_bias.repeat(1, 1, 1, num_heads)
-
+            # print(f"attnbias:{attn_bias.shape}")
+            # attn_bias = attn_bias.repeat(1, 1, 1, num_heads)
+            # print(f"score:{score.shape},attn_bias:{attn_bias.shape},index:{edge_index[0].to(torch.long).shape, edge_index[1].to(torch.long).shape}")
+            # print(f"score:{score.shape},attn_bias:{attn_bias.shape},index:{attn_bias[edge_index[0].to(torch.long), edge_index[1].to(torch.long), :].unsqueeze(2) }")
             score = score + \
                     attn_bias[edge_index[0].to(torch.long), edge_index[1].to(torch.long), :].unsqueeze(2) 
 
@@ -167,7 +172,7 @@ class CoreAttention(nn.Module):
 
         x = wV / (Z + 1e-6)
         
-        return x,None
+        return x,score
 
     def naive_attention(self, q, k, v, dropout_p=0.0):
         # q, k, v: [batch, n_heads, seq_len, head_dim]
@@ -198,7 +203,7 @@ class CoreAttention(nn.Module):
         elif attn_type == "sparse":
             # 这个sparse的score还不清楚是否可以
             # x,score = self.sparse_attention_bias(q, k, v, edge_index, attn_bias)
-            x = self.sparse_attention_bias(q, k, v, edge_index, attn_bias)
+            x,score = self.sparse_attention_bias(q, k, v, edge_index, attn_bias)
         elif attn_type == "flash":
             q = q.half()
             k = k.half()

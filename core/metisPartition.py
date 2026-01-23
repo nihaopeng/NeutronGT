@@ -1,8 +1,8 @@
 import pymetis
 import torch
 from tqdm import tqdm
-
-from pprPartition import build_adj_fromat, personal_pagerank
+from torch_geometric.utils import subgraph
+from core.pprPartition import build_adj_fromat, personal_pagerank
 
 
 class weightMetis_keepParent:
@@ -19,33 +19,40 @@ class weightMetis_keepParent:
     * 迭代：训练过程中通过node_out,node_in调整各分区节点，同时自动重计算重复节点。
     * tip：所有的操作的节点都使用他在数据集中的全局索引。
     """
-    def __init__(self,csr_adjacency:pymetis.CSRAdjacency,eweights:list[list],feature:torch.Tensor,n_parts:int,related_nodes_topk_rate:int) -> None:
+    def __init__(
+            self,
+            csr_adjacency:pymetis.CSRAdjacency,
+            eweights:list[list],
+            feature:torch.Tensor,
+            edge_index:list[torch.Tensor,torch.Tensor],
+            n_parts:int,
+            related_nodes_topk_rate:int
+        ) -> None:
         self.csr_adjacency = csr_adjacency
         self.eweights = eweights
         self.feature = feature
         self.n_parts = n_parts
+        self.global_edge_index = edge_index
         self.parent_per_partition_num = n_parts // 2
         self.parent_partition = self.partition(torch.range(0,len(csr_adjacency.adj_starts)),self.csr_adjacency,self.eweights,2)
         self.child_partitions = []
+        self.partitioned_results = []
+        self.sub_edge_index_for_partitioned_results = []
         self.expanded_edge = [[],[]] # format follow the edge index [2,edge_num]
         for parent_id,parent_partition in enumerate(self.parent_partition):
             csr_adjacency,eweight = self._extract_subgraph_csr_eweight(parent_partition)
             # 从两个父分区再进行分区。
-            self.child_partitions.append(self.partition(parent_partition,csr_adjacency,eweight,self.parent_per_partition_num,is_child=True))
+            self.child_partitions.append(self.partition(parent_partition,csr_adjacency,eweight,self.parent_per_partition_num))
             # self.child_partition = [[tensor,tensor,...],[tensor,tensor,...]]
-            # TODO:将另一个父分区中特征相似的并入。
-            # TODO:将对外有联系的对端节点合并入分区。
+            # TODO:将另一个父分区中特征相似的并入。√
+            # TODO:将对外有联系的对端节点合并入分区。√
             expanded_child_partitions = []
             for parent_group in self.child_partitions:
                 expanded_group = []
                 for part in parent_group:
-                    # 1. 基于原始分区做 halo 扩展
                     halo_extended = torch.tensor([])
                     halo_extended = self._merge_related_nodes(part,related_nodes_topk_rate)
-                    # 2. 基于原始分区做特征相似性扩展
-                    # print(part.long())
                     feature_extended,expanded_edge_p = self._merge_feature_sim(part.long(), n_nodes=1, current_parent_id=parent_id)
-                    # 3. 合并两者并去重
                     merged = torch.cat([halo_extended, feature_extended], dim=0)
                     merged = torch.unique(merged)  # 自动排序 + 去重
                     expanded_group.append(merged)
@@ -53,9 +60,14 @@ class weightMetis_keepParent:
                     self.expanded_edge[1].extend(expanded_edge_p[1])
                 expanded_child_partitions.append(expanded_group)
             self.child_partitions = expanded_child_partitions
+            self.global_edge_index = torch.cat([self.global_edge_index,torch.tensor(self.expanded_edge)],dim=1)
+            for parent_group in self.child_partitions:
+                for part in parent_group:
+                    self.partitioned_results.append(part)
+                    self.sub_edge_index_for_partitioned_results.append(self._get_sub_edge_index(part))
         self.duplicated_nodes = self._find_duplicate_nodes()
 
-    def partition(self,partition:torch.Tensor,csr_adjacency:pymetis.CSRAdjacency,eweights:list[list],n_parts:int,is_child:bool=False):
+    def partition(self,partition:torch.Tensor,csr_adjacency:pymetis.CSRAdjacency,eweights:list[list],n_parts:int):
         try:
             n_cuts, membership = pymetis.part_graph(
                 nparts=n_parts,
@@ -73,6 +85,30 @@ class weightMetis_keepParent:
             filtered_partitions.append(torch.tensor(part, dtype=torch.long))
         return filtered_partitions
     
+    def node_in(self,partition_global_idx,):
+        """
+        指定partition的id，然后从父分区中补充高权的顶点，<补充的数量需要和剔除的数量相同>
+        一定要更新global_edge_index!!!
+        """
+        pass
+
+    def node_out(self,partition_global_idx:int,score_of_partition:torch.Tensor):
+        """
+        剔除节点，一定要更新global_edge_index!!!
+        """
+        idx_parent = partition_global_idx // (self.n_parts // 2)
+        idx_child = partition_global_idx % (self.n_parts // 2)
+        assert self.child_partitions[idx_parent][idx_child].shape[0] == score_of_partition.shape[0]
+
+    def _get_sub_edge_index(self, node_set: torch.Tensor) -> torch.Tensor:
+        sub_edge_index, _ = subgraph(
+            node_set,
+            self.global_edge_index,
+            relabel_nodes=True,
+            num_nodes=len(self.csr_adjacency.adj_starts) - 1
+        )
+        return sub_edge_index
+
     def _extract_subgraph_csr_eweight(self, parent_nodes: list[int]) -> tuple[pymetis.CSRAdjacency, list[int]]:
         """
         从原始图中提取由parent_nodes构成的子图，并返回CSR邻接结构和对应的边权列表。
