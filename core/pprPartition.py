@@ -37,6 +37,9 @@ def build_adj_fromat(sorted_ppr_matrix):
     edge_index, ppr_val = edge_index.to('cpu'),ppr_val.to('cpu')
     assert edge_index.shape[0] == 2
     num_nodes = int(edge_index.max().item()) + 1
+    # BUG: 如果一个图中的最大编号节点是一个孤立点,也就不在 edge_index 中,那么取max自然不是最大编号，反应不了节点数量
+
+
     # === Step 1: 规范化边并聚合 PPR 权重 ===
     src, dst = edge_index[0], edge_index[1]
     u = torch.min(src, dst)
@@ -66,6 +69,8 @@ def build_adj_fromat(sorted_ppr_matrix):
     weights_all_np = weights_all[sort_idx].numpy() # 
     print("======csr format building===========")
     # === Step 3: 构建 CSR ===
+
+
     xadj = np.zeros(num_nodes + 1, dtype=np.int32)
     degrees = np.bincount(u_all, minlength=num_nodes)
     xadj[1:] = np.cumsum(degrees)
@@ -77,6 +82,9 @@ def build_adj_fromat(sorted_ppr_matrix):
         adj_starts=xadj.tolist(),
         adjacent=adjncy.tolist()
     )
+
+
+
     # === Step 4: 构建 adj_weight 字典（仅唯一无向边）===
     # 注意：只存 (min, max) -> weight
     print("======adj weight building===========")
