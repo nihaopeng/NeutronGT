@@ -3,7 +3,7 @@ import torch
 from tqdm import tqdm
 from torch_geometric.utils import subgraph
 from pprPartition import build_adj_fromat, personal_pagerank
-
+from collections import Counter
 
 class weightMetis_keepParent:
     """
@@ -26,28 +26,44 @@ class weightMetis_keepParent:
             feature:torch.Tensor,
             edge_index:list[torch.Tensor,torch.Tensor],
             n_parts:int,
-            related_nodes_topk_rate:int
+            related_nodes_topk_rate:int,
+            attn_type:str,
+            sorted_ppr_matrix:list[torch.Tensor]                   
         ) -> None:
+        self.attn_type = attn_type
         self.csr_adjacency = csr_adjacency
         self.eweights = eweights
         self.feature = feature
         self.n_parts = n_parts
         self.global_edge_index = edge_index
-        self.parent_per_partition_num = n_parts // 2
+        self.partition_num_per_parent = n_parts // 2
         self.parent_partition = self.partition(torch.arange(0,len(csr_adjacency.adj_starts)-1),self.csr_adjacency,self.eweights,2)
         print(len(torch.arange(0,len(csr_adjacency.adj_starts)-1)))
         # BUG:假设 n 个节点，csr_adjaceny.adj_starts 长度为 num_node + 1，则第一个参数是tensor: [0,1,2,...,num_node]
         # torch.range 已被弃用，改为torch.arange(0,len(csr_adjacency.adj_starts)-1)
 
+        #
+        # global_expired_node_buffer：全局节点淘汰池
+        # partition_expired_node_num：记录每个分区淘汰了多少节点
+        #
+        self.global_expired_node_buffer = []
+        self.partition_expired_node_num = {}
+
+
+        #
+        # sorted_ppr_matrix
+        #
+        self.ppr_edge_index, self.ppr_val = sorted_ppr_matrix
+
         self.child_partitions = []
-        self.partitioned_results = []
-        self.sub_edge_index_for_partitioned_results = []
+        self.partition_results = []
+        self.sub_edge_index_for_partition_results = []
         self.expanded_edge = [[],[]] # format follow the edge index [2,edge_num]
 
         # 对父分区进行再次metis
         for parent_id,parent_partition in enumerate(self.parent_partition):
             csr_adjacency,eweight = self._extract_subgraph_csr_eweight(parent_partition)
-            self.child_partitions.append(self.partition(parent_partition,csr_adjacency,eweight,self.parent_per_partition_num))
+            self.child_partitions.append(self.partition(parent_partition,csr_adjacency,eweight,self.partition_num_per_parent))
             # self.child_partitions = [[tensor,tensor,...],[tensor,tensor,...]]
             # TODO:将另一个父分区中特征相似的并入。√
             # TODO:将对外有联系的对端节点合并入分区。√
@@ -77,8 +93,8 @@ class weightMetis_keepParent:
         self.global_edge_index = torch.cat([self.global_edge_index,torch.tensor(self.expanded_edge)],dim=1)
         for parent_group in self.child_partitions:
             for part in parent_group:
-                self.partitioned_results.append(part)
-                self.sub_edge_index_for_partitioned_results.append(self._get_sub_edge_index(part))
+                self.partition_results.append(part)
+                self.sub_edge_index_for_partition_results.append(self._get_sub_edge_index(part))
         self.duplicated_nodes = self._find_duplicate_nodes()
         self.duplicated_edges = self._find_duplicate_edges()
 
@@ -95,9 +111,11 @@ class weightMetis_keepParent:
             raise
         partitions = [[] for _ in range(n_parts)]
 
+        #
         # 子分区的邻接矩阵adjacency的节点编号是对这个分区内的节点从0开始重新编号
         # 实际传入的partition变量是全局的节点id
         # 这里根据partitions[part_id].append(partition[node_idx].item())把分区内的id转换为全局id
+        #
         for node_idx, part_id in enumerate(membership):
             partitions[part_id].append(partition[node_idx].item())
 
@@ -109,22 +127,167 @@ class weightMetis_keepParent:
     
 
 
-    def node_in(self,partition_global_idx,):
+    def node_in(self,result_partition_global_idx:int):
         """
         指定partition的id，然后从父分区中补充高权的顶点，<补充的数量需要和剔除的数量相同>
-        一定要更新global_edge_index!!!
+        一定要更新global_edge_index，使用_get_sub_edge_index重新构建分区edge!!!
         """
-        pass
+        # 回补数量
+        num_to_recover = self.partition_expired_node_num.get(result_partition_global_idx, 0)
+        
+        # 如果不需要补，或者 buffer 是空的，直接返回当前状态
+        if num_to_recover <= 0 or not self.global_expired_node_buffer:
+            self.partition_expired_node_num[result_partition_global_idx] = 0
+            return self.partition_results[result_partition_global_idx], \
+                   self.sub_edge_index_for_partition_results[result_partition_global_idx]
+
+        current_nodes_global_id = self.partition_results[result_partition_global_idx]
+        device = current_nodes_global_id.device
+        
+        # 去重，转为 tensor
+        unique_candidates = torch.tensor(list(set(self.global_expired_node_buffer)), dtype=torch.long, device=device)
+        
+        # 排除掉已经在当前分区里的节点
+        is_in_current = torch.isin(unique_candidates, current_nodes_global_id)
+        valid_candidates = unique_candidates[~is_in_current]
+        
+        if valid_candidates.numel() == 0:
+            return self.partition_results[result_partition_global_idx], self.sub_edge_index_for_partition_results[result_partition_global_idx]
+
+        # 实际能补的数量
+        real_add_num = min(num_to_recover, valid_candidates.size(0))
+        # 计算 valid_candidates 中每个节点收到的 PPR 总分
+        # Score(candidate) = Sum( PPR(u -> candidate) ) for u in current_global_nodes
+        
+        # 找出 PPR 矩阵中，起点是"当前分区节点"的边
+        # self.ppr_edge_index[0] 是 Source
+        mask_src = torch.isin(self.ppr_edge_index[0], current_nodes_global_id)
+        # 目标节点
+        dest = self.ppr_edge_index[1][mask_src]
+        edge_ppr_values = self.ppr_val[mask_src]
+        
+        # 我们只关心那些"在 Buffer 候选集里"的
+        mask_dst = torch.isin(dest, valid_candidates)
+        
+        final_dest = dest[mask_dst] # 这些是既被当前分区关注，又在 buffer 里的节点
+        final_edge_ppr_values = edge_ppr_values[mask_dst]   # 对应的 PPR 值
+        
+        # 聚合分数,把 final_edge_ppr_values 加到 valid_candidates 对应的位置上
+        scores = torch.zeros(valid_candidates.size(0), device=device)
+        if final_dest.numel() > 0:
+            valid_candidates, _ = torch.sort(valid_candidates)
+            candidates_indices = torch.searchsorted(valid_candidates, final_dest)
+            scores.index_add_(0, candidates_indices, final_edge_ppr_values)
+            
+        # 选 PPR 分数最高的 TopK
+        _, topk_indices = torch.topk(scores, real_add_num, largest=True)
+        selected_new_nodes = valid_candidates[topk_indices]
+
+        # 使用 Counter 进行多重集减法，确保 Buffer 中相同 ID 的数量正确减少
+        selected_list = selected_new_nodes.tolist()
+        buffer_counter = Counter(self.global_expired_node_buffer)
+        selected_counter = Counter(selected_list)
+        remaining_counter = buffer_counter - selected_counter
+        self.global_expired_node_buffer = list(remaining_counter.elements())
+        self.partition_expired_node_num[result_partition_global_idx] = 0
+      
+        # 添加节点
+        new_global_nodes_combined = torch.cat([current_nodes_global_id, selected_new_nodes])
+        new_global_nodes_combined, _ = torch.sort(new_global_nodes_combined)
+        self.partition_results[result_partition_global_idx] = new_global_nodes_combined
+        new_sub_edge_index = self._get_sub_edge_index(new_global_nodes_combined)
+        self.sub_edge_index_for_partition_results[result_partition_global_idx] = new_sub_edge_index
+
+        return new_global_nodes_combined, new_sub_edge_index
+
+    def node_out(self,result_partition_global_idx:int,score_of_partition:torch.Tensor):
+        """
+        根据注意力分数剔除节点，一定要更新global_edge_index，使用_get_sub_edge_index重新构建分区edge!!!
+        """
+        #
+        #
+        # result_partition_global_idx : 0 ~ number of total children_partition 
+        #       idx_parent: which means belongs to which parent_partition (0 or 1)
+        #       idx_child : the children id within a parent_partition    
+        #
+        #
+
+        idx_parent = result_partition_global_idx // self.partition_num_per_parent
+        idx_child = result_partition_global_idx % self.partition_num_per_parent
+
+        current_nodes_global_id = self.partition_results[result_partition_global_idx] #[N,]
+        current_edges_local_id = self.sub_edge_index_for_partition_results[result_partition_global_idx] #[2,E]
+        current_node_num = current_nodes_global_id.size(0)
+
+        #
+        #
+        # self.partition_results: list[torch.Tensor],                           [n_part,  partition_node_num]
+        # self.sub_edge_index_for_partition_results: list[list[torch.Tensor]],  [n_part,  2,  E]
+        #
+        #
+        # full attention case:  score :[b or 1,num_heads,seq_len,seq_len] 
+        # sparse attention case: score :[edge_num,num_head,1]
+        #         
+        #       
+
+        device = score_of_partition.device
+        node_scores = torch.zeros(current_node_num, device=device)
+        if self.attn_type == "full":
+            assert self.partition_results[result_partition_global_idx].shape[0] == score_of_partition.shape[3], \
+                f"Full Attn dim mismatch: partition_results[{result_partition_global_idx}]={self.partition_results[result_partition_global_idx].shape}, score={score_of_partition.shape}"
+            assert current_node_num == score_of_partition.shape[3], \
+                f"Full Attn dim mismatch: nodes={current_node_num}, score={score_of_partition.shape}"
+            # [1, H, N, N] -> mean heads -> [1, N, N] -> squeeze -> [N, N]
+            avg_attn = score_of_partition.mean(dim=1).squeeze(0)
+            # [N, N] -> sum -> [N]
+            node_scores = avg_attn.sum(dim=0)
+        
+        
+        elif self.attn_type == "sparse":
+            assert  self.sub_edge_index_for_partition_results[result_partition_global_idx].shape[1] == score_of_partition.shape[0],\
+                f"Sparse Attn dim mismatch: edges={current_edges_local_id.shape[1]}, score={score_of_partition.shape}"
+            # [E, H, 1] -> mean heads -> [E]
+            edge_scores = score_of_partition.mean(dim=1).squeeze(-1)
+            # 将边权重聚合到 Target 节点 (index 1)
+            target_nodes = current_edges_local_id[1]   
+            assert target_nodes.shape == edge_scores.shape,\
+                f"target_nodes.shape={target_nodes.shape}, edge_scores.shape={edge_scores.shape}"
+            node_scores.scatter_add_(0, target_nodes, edge_scores)
+       
+
+        ratio = 0.9 # 保留率
+        num_keep = int(current_node_num * ratio)
+        num_keep = max(num_keep, 1) 
+        
+        sorted_indices = torch.argsort(node_scores, descending=True)
+        keep_node_indices = sorted_indices[:num_keep]
+        expire_node_indices = sorted_indices[num_keep:]
+        keep_node_indices, _ = torch.sort(keep_node_indices)
+        expire_node_indices, _ = torch.sort(expire_node_indices)
+
+        # add them to expired node buffer
+        if expire_node_indices.numel() > 0:
+            expired_global_nodes_id = current_nodes_global_id[expire_node_indices].tolist()
+            self.partition_expired_node_num[result_partition_global_idx] = len(expired_global_nodes_id)
+            self.global_expired_node_buffer.extend(expired_global_nodes_id)
+        
+        # new partition nodes global id
+        new_partition_global_nodes_id = current_nodes_global_id[keep_node_indices]
+        self.partition_results[result_partition_global_idx] = new_partition_global_nodes_id
+
+        # new partition edges 
+        new_sub_edge_index, _ = subgraph(
+            subset=keep_node_indices,
+            edge_index=current_edges_local_id, 
+            relabel_nodes=True,
+            num_nodes=current_node_num
+        )
+        self.sub_edge_index_for_partition_results[result_partition_global_idx] = new_sub_edge_index
+
+        return new_partition_global_nodes_id, new_sub_edge_index
 
 
 
-    def node_out(self,partition_global_idx:int,score_of_partition:torch.Tensor):
-        """
-        根据注意力分数剔除节点，一定要更新global_edge_index!!!
-        """
-        idx_parent = partition_global_idx // (self.n_parts // 2)
-        idx_child = partition_global_idx % (self.n_parts // 2)
-        assert self.child_partitions[idx_parent][idx_child].shape[0] == score_of_partition.shape[0]
 
     def _get_sub_edge_index(self, node_set: torch.Tensor) -> torch.Tensor:
         sub_edge_index, _ = subgraph(
@@ -195,8 +358,9 @@ class weightMetis_keepParent:
         
         global_node_num = len(self.csr_adjacency.adj_starts) - 1
         
-        all_global_edges_index_for_partitioned_results = []
-        iterator = zip(self.partitioned_results,self.sub_edge_index_for_partitioned_results)
+        all_global_edges_index_for_partition_results = []
+
+        iterator = zip(self.partition_results,self.sub_edge_index_for_partition_results)
         for partition_idx,(global_nodes,local_edge_index) in enumerate(iterator):
             if local_edge_index.numel() == 0:
                 continue
@@ -205,12 +369,12 @@ class weightMetis_keepParent:
             global_dst_node = global_nodes[local_edge_index[1]]
 
             global_partition_sub_edges_index = torch.stack([global_src_node,global_dst_node],dim = 0)  # [2,partition_edges_num]
-            all_global_edges_index_for_partitioned_results.append(global_partition_sub_edges_index)   
+            all_global_edges_index_for_partition_results.append(global_partition_sub_edges_index)   
        
-        if not all_global_edges_index_for_partitioned_results:
+        if not all_global_edges_index_for_partition_results:
             return torch.empty((0, 2), dtype=torch.long)
         
-        total_edges = torch.cat(all_global_edges_index_for_partitioned_results, dim=1)
+        total_edges = torch.cat(all_global_edges_index_for_partition_results, dim=1)
         u = total_edges[0].long()
         v = total_edges[1].long()
         edge_keys = u * global_node_num + v
@@ -304,9 +468,15 @@ class weightMetis_keepParent:
 
 
 if __name__ == "__main__":
+
+    # x = torch.tensor([[1, 2, 3], [4, 5, 6]])
+    # print(x.shape)
+    # print(x.shape[0])
+    # print(x.shape[1])
+
     # ---------------------cora test------------------------
-    dataset = "ogbn-arxiv"
-    # dataset = "cora"
+    # dataset = "ogbn-arxiv"
+    dataset = "cora"
     feature = torch.load(f'./dataset/{dataset}/x.pt') # [N, x_dim]
     y = torch.load(f'./dataset/{dataset}/y.pt') # [N]
     edge_index = torch.load(f'./dataset/{dataset}/edge_index.pt') # [2, num_edges]
@@ -327,11 +497,12 @@ if __name__ == "__main__":
 
 
     sorted_ppr_matrix = personal_pagerank(edge_index,0.85,topk=100)
+    
     csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
     # print(csr_adjacency)
     # ------------------ 初始化 weightMetis_keepParent ------------------
     n_parts = 10  # 划分为4个子分区
-    wm = weightMetis_keepParent(csr_adjacency=csr_adjacency, eweights=eweights, feature=feature,n_parts=n_parts,edge_index = edge_index,related_nodes_topk_rate=5)
+    wm = weightMetis_keepParent(csr_adjacency=csr_adjacency, eweights=eweights, feature=feature,n_parts=n_parts,edge_index = edge_index,related_nodes_topk_rate=5,attn_type="full",sorted_ppr_matrix=sorted_ppr_matrix)
     # ------------------ 输出结果 ------------------
     # 构造 CSRAdjacency 对象
     print("node_num:",N)
@@ -346,6 +517,10 @@ if __name__ == "__main__":
         print(f"From Parent {i}:")
         for j, part in enumerate(child_parts):
             print(f"  Child {j} num: {len(part.tolist())}")
+
+    for i,res_partition in enumerate(wm.partition_results):
+        print(f"res_partition {i} num: {len(res_partition.tolist())}")
+
     print("\n=== 重复节点（全局ID） ===")
     print("Duplicate nodes num:", len(wm.duplicated_nodes.tolist()))
     print("\n=== 重复边（全局ID） ===")

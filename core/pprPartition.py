@@ -128,7 +128,7 @@ def ppr_partition(sorted_ppr_matrix:list[torch.tensor,torch.tensor],flatten_trai
         filtered_partitions.append(torch.tensor(partition, dtype=torch.long))
     return filtered_partitions
 
-def personal_pagerank(edge_index,alpha,topk=100,max_iter:int=100,device="cuda") -> np.ndarray:
+def personal_pagerank(edge_index,alpha,topk=100,max_iter:int=100,device="cuda") -> tuple[torch.Tensor, torch.Tensor]:
     """为所有节点计算个性化PageRank"""
     edge_indices, edge_values = ppr.get_ppr(
         edge_index, 
