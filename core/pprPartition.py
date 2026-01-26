@@ -32,14 +32,15 @@ def metis_partition(csr_adjacency:pymetis.CSRAdjacency,eweights:list[list],n_par
     return filtered_partitions
 
 def build_adj_fromat(sorted_ppr_matrix):
+    """FROM QWEN
+    
+    """
     print("======start adj format building===========")
     edge_index, ppr_val = sorted_ppr_matrix
     edge_index, ppr_val = edge_index.to('cpu'),ppr_val.to('cpu')
     assert edge_index.shape[0] == 2
     num_nodes = int(edge_index.max().item()) + 1
     # BUG: 如果一个图中的最大编号节点是一个孤立点,也就不在 edge_index 中,那么取max自然不是最大编号，反应不了节点数量
-
-
     # === Step 1: 规范化边并聚合 PPR 权重 ===
     src, dst = edge_index[0], edge_index[1]
     u = torch.min(src, dst)
@@ -69,8 +70,6 @@ def build_adj_fromat(sorted_ppr_matrix):
     weights_all_np = weights_all[sort_idx].numpy() # 
     print("======csr format building===========")
     # === Step 3: 构建 CSR ===
-
-
     xadj = np.zeros(num_nodes + 1, dtype=np.int32)
     degrees = np.bincount(u_all, minlength=num_nodes)
     xadj[1:] = np.cumsum(degrees)
@@ -82,9 +81,6 @@ def build_adj_fromat(sorted_ppr_matrix):
         adj_starts=xadj.tolist(),
         adjacent=adjncy.tolist()
     )
-
-
-
     # === Step 4: 构建 adj_weight 字典（仅唯一无向边）===
     # 注意：只存 (min, max) -> weight
     print("======adj weight building===========")
@@ -128,7 +124,63 @@ def ppr_partition(sorted_ppr_matrix:list[torch.tensor,torch.tensor],flatten_trai
         filtered_partitions.append(torch.tensor(partition, dtype=torch.long))
     return filtered_partitions
 
-def personal_pagerank(edge_index,alpha,topk=100,max_iter:int=100,device="cuda") -> np.ndarray:
+def add_isolated_connections(
+    ppr_result,
+    num_nodes: int,
+    connect_prob: float = 0.01,
+    ppr_fill_value: float = 0.001,
+    device="cuda"
+) -> tuple:
+    """FROM QWEN
+    向 PPR 结果中添加孤立节点与其他节点的随机连接。
+    Args:
+        ppr_result: (edge_index, edge_values) from personal_pagerank
+        num_nodes: 总节点数（必须显式提供，因为 edge_index 可能不包含最大编号节点）
+        connect_prob: 每个孤立节点与每个其他节点连接的概率
+        ppr_fill_value: 新增边的 PPR 值
+        device: 张量设备
+    Returns:
+        (new_edge_index, new_edge_values)
+    """
+    edge_index, edge_values = ppr_result
+    edge_index = edge_index.to(device)
+    edge_values = edge_values.to(device)
+    # Step 1: 找出所有出现过的节点（源或目标）
+    appeared_nodes = torch.unique(edge_index)
+    all_nodes = torch.arange(num_nodes, device=device)
+    is_isolated = ~torch.isin(all_nodes, appeared_nodes)
+    isolated_nodes = all_nodes[is_isolated]  # [I]
+    if isolated_nodes.numel() == 0:
+        return edge_index, edge_values  # 无孤立节点，直接返回
+    # Step 2: 对每个孤立节点，以 connect_prob 概率连接到所有非孤立节点（或所有节点）
+    # 这里我们连接到所有其他节点（包括其他孤立节点），但你可以按需修改
+    non_isolated_mask = ~is_isolated  # [N]
+    non_isolated_nodes = all_nodes[non_isolated_mask]  # [M]
+    if non_isolated_nodes.numel() == 0:
+        # 所有节点都是孤立的 → 随机两两连接？或跳过？
+        # 简单处理：不添加边（或可改为全连接）
+        return edge_index, edge_values
+    # 为每个孤立节点生成 Bernoulli 掩码决定是否连接到每个非孤立节点
+    # shape: [I, M]
+    rand_probs = torch.rand(len(isolated_nodes), len(non_isolated_nodes), device=device)
+    connect_mask = rand_probs < connect_prob  # [I, M]
+    # 获取需要添加的边
+    i_idx, j_idx = torch.where(connect_mask)  # i_idx in [0, I), j_idx in [0, M)
+    if i_idx.numel() == 0:
+        return edge_index, edge_values  # 无新增边
+    srcs = isolated_nodes[i_idx]           # [E_new]
+    dsts = non_isolated_nodes[j_idx]       # [E_new]
+    # 构造双向边（PPR 通常是有向的，但如果你后续要转无向，这里可只加单向）
+    # 根据你的 pipeline，personal_pagerank 输出的是有向边（src -> dst）
+    # 所以我们只添加 src -> dst 即可
+    new_edges = torch.stack([srcs, dsts], dim=0)  # [2, E_new]
+    new_values = torch.full((new_edges.shape[1],), ppr_fill_value, device=device, dtype=edge_values.dtype)
+    # Step 3: 拼接到原始结果
+    final_edge_index = torch.cat([edge_index, new_edges], dim=1)
+    final_edge_values = torch.cat([edge_values, new_values], dim=0)
+    return (final_edge_index, final_edge_values)
+
+def personal_pagerank(edge_index,alpha,topk=100,max_iter:int=100,device="cuda") -> tuple:
     """为所有节点计算个性化PageRank"""
     edge_indices, edge_values = ppr.get_ppr(
         edge_index, 

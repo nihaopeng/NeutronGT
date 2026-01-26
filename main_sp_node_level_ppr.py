@@ -27,21 +27,30 @@ from gt_sp.reducer import sync_params_and_buffers, Reducer
 from gt_sp.evaluate import calc_acc
 from gt_sp.utils import compute_graphormer_spatial_pos_only, get_node_degrees, random_split_idx
 from utils.parser_node_level import parser_add_main_args
-from core.pprPartition import personal_pagerank,build_adj_fromat,metis_partition
+from core.pprPartition import add_isolated_connections, personal_pagerank,build_adj_fromat,metis_partition
 from utils.vis import vis_interface
 import utils.vis as vis
 import utils.logger as logger
 
-def build_graph_struct_info(args,N,edge_index,feature,world_size,topk=50,n_parts=50,related_nodes_topk_rate=5):
+def build_graph_struct_info(args,N,edge_index,feature,world_size,topk=50,n_parts=50,related_nodes_topk_rate=5,connect_prob=0.01):
     # --------------------计算结构信息------------------------------------------------------------
     # =================== ppr partition =========================
     partitioned_results = []
     # if args.rank == 0:
     sorted_ppr_matrix = personal_pagerank(edge_index,0.85,topk=topk)
+    sorted_ppr_matrix = add_isolated_connections(sorted_ppr_matrix,N,connect_prob=connect_prob)
     csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
-    wm = weightMetis_keepParent(csr_adjacency=csr_adjacency, eweights=eweights, n_parts=n_parts,feature=feature,edge_index=edge_index,related_nodes_topk_rate=related_nodes_topk_rate)
+    wm = weightMetis_keepParent(
+        csr_adjacency=csr_adjacency, 
+        eweights=eweights,
+        n_parts=n_parts,
+        feature=feature,
+        edge_index=edge_index,
+        related_nodes_topk_rate=related_nodes_topk_rate,
+        attn_type=args.attn_type)
     partitioned_results = wm.partitioned_results
     sub_edge_index_list = wm.sub_edge_index_for_partitioned_results
+    duplicated_nodes = wm.duplicated_nodes
     # partitioned_results = metis_partition(csr_adjacency,eweights,n_parts=n_parts)
     # partitioned_results = ppr_partition(sorted_ppr_matrix,flatten_train_idx.cpu().numpy(),num_set=100)
     
@@ -67,14 +76,14 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,topk=50,n_parts
     sum_edges_in_compute = 0 
     for p in sub_edge_index_list:
         print(len(p[0]),end="|")
-        sum_edges_in_compute += len(p)
+        sum_edges_in_compute += len(p[0])
     print(f"\nsum nodes in compute:{sum_nodes_in_compute},sum edges in compute:{sum_edges_in_compute}")
     # ---------------------------------------------------------
     spatial_pos_list = None
     if args.struct_enc=="True":
         spatial_pos_list,_ = compute_graphormer_spatial_pos_only(sorted_ppr_matrix,partitions,N,max_dist=args.max_dist)
     
-    return partitions,spatial_pos_list,graph_in_degree,graph_out_degree,sub_edge_index_list
+    return partitions,spatial_pos_list,graph_in_degree,graph_out_degree,sub_edge_index_list,duplicated_nodes
 
 def build_model(args,feature,device,y,**kwargs):
     graph_in_degree = kwargs["graph_in_degree"]
@@ -198,6 +207,7 @@ def train_epoch(args,model:torch.nn.Module,partitions,feature,y,optimizer,lr_sch
     spatial_pos_list = kwargs["spatial_pos_list"]
     epoch = kwargs["epoch"]
     sub_edge_index_list = kwargs["sub_edge_index_list"]
+    duplicated_nodes = kwargs["duplicated_nodes"]
     model.train()
     loss_list, iter_t_list,iter_cpu2gpu_t_list,epoch_t_list,epoch_cpu2gpu_t_list = [], [], [], [], []
     
@@ -214,7 +224,19 @@ def train_epoch(args,model:torch.nn.Module,partitions,feature,y,optimizer,lr_sch
             out_degree = graph_out_degree[idx_i].to(device)
             spatial_pos_i = spatial_pos_list[i].to(device)
         t1 = time.time()
-        out_i,score_agg,score_spe = model(x_i, attn_bias, edge_index_i,in_degree,out_degree, spatial_pos_i,edge_input_i,attn_type=args.attn_type,mask=mask)
+        out_i,score_agg,score_spe = model(
+            x_i, 
+            attn_bias, 
+            edge_index_i,
+            in_degree,
+            out_degree, 
+            spatial_pos_i,
+            edge_input_i,
+            attn_type=args.attn_type,
+            mask=mask,
+            duplicated_nodes=duplicated_nodes
+        )
+        # print(f"score shape:{score_spe[3].shape}")
         scores.append(score_agg)
         loss = F.nll_loss(out_i, y[idx].to(device).long(),reduction='none')
         optimizer.zero_grad(set_to_none=True)
@@ -327,7 +349,7 @@ def main():
     set_global_token_indices(global_token_indices)
     set_last_batch_global_token_indices(global_token_indices_last_batch)
 
-    partitions,spatial_pos_list,graph_in_degree,graph_out_degree,sub_edge_index_list \
+    partitions,spatial_pos_list,graph_in_degree,graph_out_degree,sub_edge_index_list,duplicated_nodes \
         = build_graph_struct_info(
             args,N,edge_index,feature,seq_parallel_world_size,
             topk=50,
@@ -359,7 +381,8 @@ def main():
                     graph_out_degree=graph_out_degree,
                     spatial_pos_list=spatial_pos_list,
                     epoch=epoch,
-                    sub_edge_index_list=sub_edge_index_list)
+                    sub_edge_index_list=sub_edge_index_list,
+                    duplicated_nodes=duplicated_nodes)
         if args.rank == 0 and epoch % 20 == 0:
             print(f"epoch {epoch}: lr = {lr_scheduler.get_last_lr()[0]:.2e}")
             eval_epoch(args,model,partitions,feature,y,split_idx,device,
@@ -367,7 +390,8 @@ def main():
                     graph_out_degree=graph_out_degree,
                     spatial_pos_list=spatial_pos_list,
                     epoch=epoch,
-                    sub_edge_index_list=sub_edge_index_list)
+                    sub_edge_index_list=sub_edge_index_list,
+                    duplicated_nodes=duplicated_nodes)
         
         # 窗口调整
         # =================================================================

@@ -2,7 +2,7 @@ import pymetis
 import torch
 from tqdm import tqdm
 from torch_geometric.utils import subgraph
-from pprPartition import build_adj_fromat, personal_pagerank
+from core.pprPartition import build_adj_fromat, personal_pagerank
 
 
 class weightMetis_keepParent:
@@ -26,24 +26,24 @@ class weightMetis_keepParent:
             feature:torch.Tensor,
             edge_index:list[torch.Tensor,torch.Tensor],
             n_parts:int,
-            related_nodes_topk_rate:int
+            related_nodes_topk_rate:int,
+            attn_type:str
         ) -> None:
         self.csr_adjacency = csr_adjacency
         self.eweights = eweights
         self.feature = feature
         self.n_parts = n_parts
         self.global_edge_index = edge_index
+        self.attn_type = attn_type
         self.parent_per_partition_num = n_parts // 2
         self.parent_partition = self.partition(torch.arange(0,len(csr_adjacency.adj_starts)-1),self.csr_adjacency,self.eweights,2)
         print(len(torch.arange(0,len(csr_adjacency.adj_starts)-1)))
         # BUG:假设 n 个节点，csr_adjaceny.adj_starts 长度为 num_node + 1，则第一个参数是tensor: [0,1,2,...,num_node]
         # torch.range 已被弃用，改为torch.arange(0,len(csr_adjacency.adj_starts)-1)
-
         self.child_partitions = []
         self.partitioned_results = []
         self.sub_edge_index_for_partitioned_results = []
         self.expanded_edge = [[],[]] # format follow the edge index [2,edge_num]
-
         # 对父分区进行再次metis
         for parent_id,parent_partition in enumerate(self.parent_partition):
             csr_adjacency,eweight = self._extract_subgraph_csr_eweight(parent_partition)
@@ -51,11 +51,6 @@ class weightMetis_keepParent:
             # self.child_partitions = [[tensor,tensor,...],[tensor,tensor,...]]
             # TODO:将另一个父分区中特征相似的并入。√
             # TODO:将对外有联系的对端节点合并入分区。√
-
-            # BUG: 最外层循环在第一次循环时child_partitions只有第一个parent分区的所有child分区
-            # 进行第二次循环时 child_partition 同时有第一个和第二个parent分区的所有child分区
-            # 改为少一个缩进
-
         expanded_child_partitions = []
         for parent_group in self.child_partitions:
             expanded_group = []
@@ -72,16 +67,14 @@ class weightMetis_keepParent:
                 self.expanded_edge[1].extend(expanded_edge_p[1])
             expanded_child_partitions.append(expanded_group)
         self.child_partitions = expanded_child_partitions
-
-
         self.global_edge_index = torch.cat([self.global_edge_index,torch.tensor(self.expanded_edge)],dim=1)
+        self.duplicated_nodes = self._find_duplicate_nodes()
+        self.duplicated_edges = self._find_duplicate_edges()
+        
         for parent_group in self.child_partitions:
             for part in parent_group:
                 self.partitioned_results.append(part)
                 self.sub_edge_index_for_partitioned_results.append(self._get_sub_edge_index(part))
-        self.duplicated_nodes = self._find_duplicate_nodes()
-        self.duplicated_edges = self._find_duplicate_edges()
-
 
     def partition(self,partition:torch.Tensor,csr_adjacency:pymetis.CSRAdjacency,eweights:list[list],n_parts:int):
         try:
@@ -94,37 +87,37 @@ class weightMetis_keepParent:
             print(f"Metis failed: {e}")
             raise
         partitions = [[] for _ in range(n_parts)]
-
         # 子分区的邻接矩阵adjacency的节点编号是对这个分区内的节点从0开始重新编号
         # 实际传入的partition变量是全局的节点id
         # 这里根据partitions[part_id].append(partition[node_idx].item())把分区内的id转换为全局id
         for node_idx, part_id in enumerate(membership):
             partitions[part_id].append(partition[node_idx].item())
-
         # list to Tensor
         partitions_tensor = []
         for part in partitions:
             partitions_tensor.append(torch.tensor(part, dtype=torch.long))
         return partitions_tensor
-    
-
 
     def node_in(self,partition_global_idx,):
         """
         指定partition的id，然后从父分区中补充高权的顶点，<补充的数量需要和剔除的数量相同>
-        一定要更新global_edge_index!!!
+        一定要更新global_edge_index，使用_get_sub_edge_index重新构建分区edge!!!
         """
         pass
-
-
+        
 
     def node_out(self,partition_global_idx:int,score_of_partition:torch.Tensor):
         """
-        根据注意力分数剔除节点，一定要更新global_edge_index!!!
+        根据注意力分数剔除节点，一定要更新global_edge_index，使用_get_sub_edge_index重新构建分区edge!!!
         """
-        idx_parent = partition_global_idx // (self.n_parts // 2)
-        idx_child = partition_global_idx % (self.n_parts // 2)
-        assert self.child_partitions[idx_parent][idx_child].shape[0] == score_of_partition.shape[0]
+        if self.attn_type == "full":
+            idx_parent = partition_global_idx // (self.n_parts // 2)
+            idx_child = partition_global_idx % (self.n_parts // 2)
+            assert self.child_partitions[idx_parent][idx_child].shape[0] == score_of_partition.shape[0]
+        elif self.attn_type == "sparse":
+            pass
+        else:
+            pass
 
     def _get_sub_edge_index(self, node_set: torch.Tensor) -> torch.Tensor:
         sub_edge_index, _ = subgraph(
@@ -137,7 +130,7 @@ class weightMetis_keepParent:
 
 
     def _extract_subgraph_csr_eweight(self, parent_nodes: list[int]) -> tuple[pymetis.CSRAdjacency, list[int]]:
-        """
+        """FROM QWEN
         从原始图中提取由parent_nodes构成的子图，并返回CSR邻接结构和对应的边权列表。
         """
         if len(parent_nodes) == 0:
@@ -171,7 +164,7 @@ class weightMetis_keepParent:
         return pymetis.CSRAdjacency(adj_starts=sub_xadj, adjacent=sub_adjncy), sub_eweights
 
     def _find_duplicate_nodes(self) -> torch.Tensor:
-        """
+        """FROM QWEN
         找出重复节点。
         """
         if not hasattr(self, 'child_partitions') or not self.child_partitions:
@@ -190,40 +183,34 @@ class weightMetis_keepParent:
     
 
     def _find_duplicate_edges(self) -> torch.Tensor:
+        """FROM QWEN
+        
+        """
         if not hasattr(self, 'child_partitions') or not self.child_partitions:
             return torch.empty((0,2), dtype=torch.long)
-        
         global_node_num = len(self.csr_adjacency.adj_starts) - 1
-        
         all_global_edges_index_for_partitioned_results = []
         iterator = zip(self.partitioned_results,self.sub_edge_index_for_partitioned_results)
         for partition_idx,(global_nodes,local_edge_index) in enumerate(iterator):
             if local_edge_index.numel() == 0:
                 continue
-
             global_src_node = global_nodes[local_edge_index[0]]
             global_dst_node = global_nodes[local_edge_index[1]]
-
             global_partition_sub_edges_index = torch.stack([global_src_node,global_dst_node],dim = 0)  # [2,partition_edges_num]
             all_global_edges_index_for_partitioned_results.append(global_partition_sub_edges_index)   
-       
         if not all_global_edges_index_for_partitioned_results:
             return torch.empty((0, 2), dtype=torch.long)
-        
         total_edges = torch.cat(all_global_edges_index_for_partitioned_results, dim=1)
         u = total_edges[0].long()
         v = total_edges[1].long()
         edge_keys = u * global_node_num + v
         unique_edge_keys, counts = torch.unique(edge_keys, return_counts=True)
         duplicate_edges_keys = unique_edge_keys[counts >= 2]
-
         if duplicate_edges_keys.numel() == 0:
             return torch.empty((0, 2), dtype=torch.long)
-        
         dup_u = torch.div(duplicate_edges_keys, global_node_num, rounding_mode='floor')
         dup_v = duplicate_edges_keys % global_node_num
         duplicate_edges_tensor = torch.stack([dup_u, dup_v], dim=1) # [N_dup, 2]
-
         return duplicate_edges_tensor
 
 
@@ -250,7 +237,6 @@ class weightMetis_keepParent:
             for nb, w in zip(neighbors, weights):
                 if nb not in partition_set:
                     external_neighbors[nb] = external_neighbors.get(nb, 0) + w
-
         # 排序并选 topk%
         sorted_items = sorted(external_neighbors.items(), key=lambda x: x[1], reverse=True)
         n_select = len(sorted_items) * topk_percent // 100 if topk_percent > 0 else 0
@@ -259,8 +245,6 @@ class weightMetis_keepParent:
         expanded_nodes.sort()
         return torch.tensor(expanded_nodes, dtype=torch.long)
     
-
-
     def _merge_feature_sim(
         self,
         partition: torch.Tensor,
@@ -268,7 +252,6 @@ class weightMetis_keepParent:
         current_parent_id: int,
         connect_prob: float = 0.01
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        
         print("==正在合并特征相似节点==")
         assert current_parent_id in (0, 1), "Only two parent partitions supported."
         other_parent_id = 1 - current_parent_id
@@ -282,7 +265,6 @@ class weightMetis_keepParent:
         num_to_select = min(n_nodes, len(other_parent_nodes))
         _, top_indices = torch.topk(distances, num_to_select, largest=False)# 距离前 num_to_select近的向量的索引
         selected_nodes = other_parent_nodes[top_indices]  # 全局索引
-        
         # 合并节点
         merged = torch.unique(torch.cat([partition, selected_nodes], dim=0))
         # Step 2: 生成虚拟边（仅新边，无向）
@@ -299,7 +281,6 @@ class weightMetis_keepParent:
         else:
             virtual_edge_index = torch.empty((2, 0), dtype=torch.long)
         return merged, virtual_edge_index
-
 
 
 

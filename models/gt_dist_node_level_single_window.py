@@ -238,7 +238,7 @@ class MultiHeadAttention(nn.Module):
         self.dist_attn = DistributedAttentionNodeLevel(self.local_attn, get_sequence_parallel_group())
 
 
-    def forward(self, x, attn_bias=None, edge_index=None, attn_type=None,mask = None,pruning_mask=None):
+    def forward(self, x, attn_bias=None, edge_index=None, attn_type=None,mask = None,pruning_mask=None,duplicated_nodes=None):
         # x: [b, seq_len, hidden_dim],    attn_bias: [b, num_head, seq_len, seq_len]
 
         orig_q_size = x.size()
@@ -247,9 +247,10 @@ class MultiHeadAttention(nn.Module):
         # =====================
 
         # x:[b,seq_len,hidden_dim] -> q, k, v: [b, seq_len, hidden_dim] -> multi_head qkv:[b, seq_len, n_head, att_size]
-        batch_size = x.size(0) # number of sequences to train a time 
+        batch_size = x.size(0) # number of sequences to train a time
+        # TODO:kv cache
         q = self.linear_q(x).view(batch_size, -1, self.num_heads, self.att_size)
-        k = self.linear_k(x).view(batch_size, -1, self.num_heads, self.att_size) 
+        k = self.linear_k(x).view(batch_size, -1, self.num_heads, self.att_size)
         v = self.linear_v(x).view(batch_size, -1, self.num_heads, self.att_size)
         # print(f'rank {get_sequence_parallel_rank()} q: {q[:, 0, :, :]}')
         # exit(0)
@@ -296,12 +297,14 @@ class EncoderLayer(nn.Module):
         self.layer_norm2 = nn.LayerNorm(hidden_size)
             
             
-    def forward(self, x, attn_bias=None, edge_index=None, attn_type=None,mask= None,pruning_mask=None):
+    def forward(self, x, attn_bias=None, edge_index=None, attn_type=None,mask= None,pruning_mask=None,duplicated_nodes=None):
         # ==================================
         # MHA
-        # ==================================     
+        # ==================================
         # x: [b, seq_len, hidden_dim]
-        y,score = self.self_attention(x, attn_bias, edge_index=edge_index, attn_type=attn_type,pruning_mask=pruning_mask,mask=mask)
+        y,score = self.self_attention(x, attn_bias, edge_index=edge_index, 
+                                      attn_type=attn_type,pruning_mask=pruning_mask,mask=mask,duplicated_nodes=duplicated_nodes
+        )
         y = self.self_attention_dropout(y)
         y = self.O(y)
         x = x + y
@@ -309,8 +312,7 @@ class EncoderLayer(nn.Module):
 
         # ==================================
         # MLP
-        # ==================================    
-
+        # ==================================
 
         y = self.FFN_layer1(y)                  # 原代码这里的输入是 y ??? 
         # y = self.FFN_layer1(x)
@@ -536,7 +538,9 @@ class GT_SW(nn.Module):
         self.apply(lambda module: init_params(module, n_layers=n_layers))
         
         
-    def forward(self, x, attn_bias, edge_index, in_degree, out_degree,spatial_pos, edge_input,perturb=None, attn_type=None, mask= None, pruning_mask=None):
+    def forward(self, x, attn_bias, edge_index, in_degree, out_degree,spatial_pos, 
+                edge_input,perturb=None, attn_type=None, mask= None, pruning_mask=None,duplicated_nodes=None
+        ):
         # x -> [bs=1, s/p, x_d]
         x = x.unsqueeze(0) 
         n_graph = x.shape[0] 
