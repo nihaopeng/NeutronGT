@@ -32,6 +32,58 @@ from gt_sp.initialize import (
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import shortest_path
 
+class LossStagnationDetector:
+    def __init__(self, window_size=10, min_delta=1e-4, patience=3, cooldown=5, mode='min'):
+        """
+        Args:
+            cooldown (int): 触发一次后，至少等待多少轮才允许再次触发
+        """
+        self.window_size = window_size
+        self.min_delta = min_delta
+        self.patience = patience
+        self.cooldown = cooldown
+        self.mode = mode
+        
+        self._triggered = False      # 是否已触发
+        self._cooldown_counter = 0   # 冷却计数器
+
+    def __call__(self, loss_list):
+        # 冷却期内直接返回 False
+        if self._triggered:
+            self._cooldown_counter += 1
+            if self._cooldown_counter < self.cooldown:
+                return False
+            else:
+                # 冷却结束，重置状态，重新开始检测
+                self._triggered = False
+                self._cooldown_counter = 0
+
+        # 执行原始检测逻辑
+        if len(loss_list) < self.window_size * (self.patience + 1):
+            return False
+
+        import numpy as np
+        losses = np.array(loss_list)
+        window_means = np.convolve(losses, np.ones(self.window_size)/self.window_size, mode='valid')
+        recent_means = window_means[-(self.patience + 1):]
+
+        stagnant = True
+        if self.mode == 'min':
+            for i in range(1, len(recent_means)):
+                if recent_means[i] < recent_means[i-1] - self.min_delta:
+                    stagnant = False
+                    break
+        else:
+            for i in range(1, len(recent_means)):
+                if recent_means[i] > recent_means[i-1] + self.min_delta:
+                    stagnant = False
+                    break
+
+        if stagnant:
+            self._triggered = True
+            self._cooldown_counter = 0  # 立即进入冷却
+            return True
+        return False
 
 def fix_edge_index(x, num_node):
     # Add new edges of virtual nodes

@@ -25,9 +25,9 @@ from gt_sp.initialize import (
 )
 from gt_sp.reducer import sync_params_and_buffers, Reducer
 from gt_sp.evaluate import calc_acc
-from gt_sp.utils import compute_graphormer_spatial_pos_only, get_node_degrees, random_split_idx
+from gt_sp.utils import LossStagnationDetector, compute_graphormer_spatial_pos_only, get_node_degrees, random_split_idx
 from utils.parser_node_level import parser_add_main_args
-from core.pprPartition import add_isolated_connections, personal_pagerank,build_adj_fromat,metis_partition
+from core.pprPartition import add_isolated_connections, personal_pagerank,build_adj_fromat
 from utils.vis import vis_interface
 import utils.vis as vis
 import utils.logger as logger
@@ -47,10 +47,11 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,topk=50,n_parts
         feature=feature,
         edge_index=edge_index,
         related_nodes_topk_rate=related_nodes_topk_rate,
-        attn_type=args.attn_type)
-    partitioned_results = wm.partitioned_results
-    sub_edge_index_list = wm.sub_edge_index_for_partitioned_results
-    duplicated_nodes = wm.duplicated_nodes
+        attn_type=args.attn_type,
+        sorted_ppr_matrix=sorted_ppr_matrix)
+    # partitioned_results = wm.partitioned_results
+    # sub_edge_index_list = wm.sub_edge_index_for_partitioned_results
+    # duplicated_nodes = wm.duplicated_nodes
     # partitioned_results = metis_partition(csr_adjacency,eweights,n_parts=n_parts)
     # partitioned_results = ppr_partition(sorted_ppr_matrix,flatten_train_idx.cpu().numpy(),num_set=100)
     
@@ -59,31 +60,21 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,topk=50,n_parts
     if args.struct_enc == "True":
         graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
     # ==================================
-    
-    # ===== 提前获取各设备idx ======
-    partitions = []
-    # for i in range(0,len(partitioned_results)): # 全都计算，一般使用gt模型，以支持注意力交换。
-    for i in range(args.rank,len(partitioned_results),world_size):
-        partitions.append(partitioned_results[i])
 
     # ---------------------------------------------------------
     print("node len:",end="")
     sum_nodes_in_compute = 0 
-    for p in partitions:
+    for p in partitioned_results:
         print(len(p),end="|")
         sum_nodes_in_compute += len(p)
     print("\nedge len:",end="")
     sum_edges_in_compute = 0 
-    for p in sub_edge_index_list:
+    for p in wm.sub_edge_index_for_partition_results:
         print(len(p[0]),end="|")
         sum_edges_in_compute += len(p[0])
     print(f"\nsum nodes in compute:{sum_nodes_in_compute},sum edges in compute:{sum_edges_in_compute}")
-    # ---------------------------------------------------------
-    spatial_pos_list = None
-    if args.struct_enc=="True":
-        spatial_pos_list,_ = compute_graphormer_spatial_pos_only(sorted_ppr_matrix,partitions,N,max_dist=args.max_dist)
     
-    return partitions,spatial_pos_list,graph_in_degree,graph_out_degree,sub_edge_index_list,duplicated_nodes
+    return graph_in_degree,graph_out_degree,sorted_ppr_matrix,wm
 
 def build_model(args,feature,device,y,**kwargs):
     graph_in_degree = kwargs["graph_in_degree"]
@@ -200,6 +191,7 @@ def eval_epoch(args,model,partitions,feature,y,split_idx,device,**kwargs):
     print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
     print("Epoch: {:03d}, train_acc: {:.5f}%, valid_acc: {:.5f}%, test_acc: {:.5f}%,".format(epoch, train_acc*100, valid_acc*100, test_acc*100))
     print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
+    return train_acc*100, valid_acc*100, test_acc*100
 
 def train_epoch(args,model:torch.nn.Module,partitions,feature,y,optimizer,lr_scheduler,world_size,split_idx,device,**kwargs):
     graph_in_degree = kwargs["graph_in_degree"]
@@ -236,8 +228,8 @@ def train_epoch(args,model:torch.nn.Module,partitions,feature,y,optimizer,lr_sch
             mask=mask,
             duplicated_nodes=duplicated_nodes
         )
-        # print(f"score shape:{score_spe[3].shape}")
-        scores.append(score_agg)
+        # 取最后一层
+        scores.append(score_spe[args.n_layers-1])
         loss = F.nll_loss(out_i, y[idx].to(device).long(),reduction='none')
         optimizer.zero_grad(set_to_none=True)
         mask_train = torch.isin(idx.to(device), split_idx["train"].to(device))
@@ -268,6 +260,7 @@ def train_epoch(args,model:torch.nn.Module,partitions,feature,y,optimizer,lr_sch
         print("------------------------------------------------------------------------------------")
         print("Epoch: {:03d}, Loss: {:.4f}, Epoch Time: {:.3f}s, Trans Time: {:.3f}s".format(epoch, np.mean(loss_list), np.mean(epoch_t_list),np.mean(epoch_cpu2gpu_t_list)))
         print("------------------------------------------------------------------------------------")
+    return np.mean(loss_list),scores
 
 def main():
     logger.IS_LOGGING = False
@@ -349,13 +342,14 @@ def main():
     set_global_token_indices(global_token_indices)
     set_last_batch_global_token_indices(global_token_indices_last_batch)
 
-    partitions,spatial_pos_list,graph_in_degree,graph_out_degree,sub_edge_index_list,duplicated_nodes \
+    graph_in_degree,graph_out_degree,sorted_ppr_matrix,wm \
         = build_graph_struct_info(
             args,N,edge_index,feature,seq_parallel_world_size,
             topk=50,
             n_parts=60,
             related_nodes_topk_rate=5
         )
+    wm:weightMetis_keepParent = wm
 
     model = build_model(args,feature,device,y,graph_in_degree=graph_in_degree,graph_out_degree=graph_out_degree)
 
@@ -375,28 +369,52 @@ def main():
     if seq_parallel_world_size > 1:
         sync_params_and_buffers(model)
 
+    # ===== 提前获取各设备idx ======
+    partitions = []
+    # for i in range(0,len(partitioned_results)): # 全都计算，一般使用gt模型，以支持注意力交换。
+    for i in range(args.rank,len(wm.partitioned_results),seq_parallel_world_size):
+        partitions.append(wm.partitioned_results[i])
+    spatial_pos_list = None
+    if args.struct_enc=="True":
+        spatial_pos_list,_ = compute_graphormer_spatial_pos_only(sorted_ppr_matrix,partitions,N,max_dist=args.max_dist)
+    loss_mean_list = []
+    detector = LossStagnationDetector(cooldown=0)
     for epoch in range(0, args.epochs):
-        train_epoch(args,model,partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
+        sub_edge_index_list = wm.sub_edge_index_for_partition_results
+        loss_mean,scores_list = train_epoch(args,model,partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
                     graph_in_degree=graph_in_degree,
                     graph_out_degree=graph_out_degree,
                     spatial_pos_list=spatial_pos_list,
                     epoch=epoch,
                     sub_edge_index_list=sub_edge_index_list,
-                    duplicated_nodes=duplicated_nodes)
+                    duplicated_nodes=None)
         if args.rank == 0 and epoch % 20 == 0:
             print(f"epoch {epoch}: lr = {lr_scheduler.get_last_lr()[0]:.2e}")
-            eval_epoch(args,model,partitions,feature,y,split_idx,device,
+            train_acc,valid_test,test_acc = eval_epoch(args,model,partitions,feature,y,split_idx,device,
                     graph_in_degree=graph_in_degree,
                     graph_out_degree=graph_out_degree,
                     spatial_pos_list=spatial_pos_list,
                     epoch=epoch,
                     sub_edge_index_list=sub_edge_index_list,
-                    duplicated_nodes=duplicated_nodes)
+                    duplicated_nodes=None)
         
         # 窗口调整
         # =================================================================
         # if (epoch+1) % 20 == 0:
         #     partitionTree.dynamic_window_build(scores,metis_partition_nodes,remove_ratio=0.05)
+        loss_mean_list.append(loss_mean)
+        # if True:
+        if detector(loss_mean_list):
+            print("!node in and out!")
+            wm.node_out(scores_list,remove_ratio=0.3)
+            wm.node_in()
+            partitions = []
+            # for i in range(0,len(partitioned_results)): # 全都计算，一般使用gt模型，以支持注意力交换。
+            for i in range(args.rank,len(wm.partitioned_results),seq_parallel_world_size):
+                partitions.append(wm.partitioned_results[i])
+            spatial_pos_list = None
+            if args.struct_enc=="True":
+                spatial_pos_list,_ = compute_graphormer_spatial_pos_only(sorted_ppr_matrix,partitions,N,max_dist=args.max_dist)
         # =================================================================   
 
 if __name__ == "__main__":
