@@ -227,10 +227,10 @@ class MultiHeadAttention(nn.Module):
         super(MultiHeadAttention, self).__init__()
 
         self.num_heads = num_heads
-        self.att_size = att_size = hidden_size // num_heads # hn
-        self.linear_q = nn.Linear(hidden_size, num_heads * att_size)
-        self.linear_k = nn.Linear(hidden_size, num_heads * att_size)
-        self.linear_v = nn.Linear(hidden_size, num_heads * att_size)
+        self.att_size = hidden_size // num_heads # hn
+        self.linear_q = nn.Linear(hidden_size, num_heads * self.att_size)
+        self.linear_k = nn.Linear(hidden_size, num_heads * self.att_size)
+        self.linear_v = nn.Linear(hidden_size, num_heads * self.att_size)
 
         self.local_attn = CoreAttention(
             hidden_size, attention_dropout_rate, num_heads)
@@ -238,23 +238,44 @@ class MultiHeadAttention(nn.Module):
         self.dist_attn = DistributedAttentionNodeLevel(self.local_attn, get_sequence_parallel_group())
 
 
-    def forward(self, x, attn_bias=None, edge_index=None, attn_type=None,mask = None,pruning_mask=None,duplicated_nodes=None):
+    def forward(self, x, attn_bias=None, edge_index=None, attn_type=None,mask = None,pruning_mask=None,dup_nodes_kv_cache=None,layer:int=0):
         # x: [b, seq_len, hidden_dim],    attn_bias: [b, num_head, seq_len, seq_len]
 
         orig_q_size = x.size()
+        batch_size, seq_len, hidden_dim = x.shape
         # =====================
         # Query, Key, and Value
         # =====================
 
         # x:[b,seq_len,hidden_dim] -> q, k, v: [b, seq_len, hidden_dim] -> multi_head qkv:[b, seq_len, n_head, att_size]
         batch_size = x.size(0) # number of sequences to train a time
-        # TODO:kv cache
+        k,v= None,None
+        compute_cache_k,compute_cache_v = None,None
         q = self.linear_q(x).view(batch_size, -1, self.num_heads, self.att_size)
-        k = self.linear_k(x).view(batch_size, -1, self.num_heads, self.att_size)
-        v = self.linear_v(x).view(batch_size, -1, self.num_heads, self.att_size)
+        dup_nodes_kv_cache = dup_nodes_kv_cache[layer]
+        if dup_nodes_kv_cache is None:
+            k = compute_cache_k = self.linear_k(x).view(batch_size, -1, self.num_heads, self.att_size)
+            v = compute_cache_v = self.linear_v(x).view(batch_size, -1, self.num_heads, self.att_size)
+        else:
+            # dup_nodes_kv_cache -> [n_layer,2,dup_nodes_num,feature_dim]
+            # TODO:use kv cache
+            layer_cache = dup_nodes_kv_cache[layer]  # [2, dup_nodes_num, feature_dim]
+            k_cache, v_cache = layer_cache  # each: [dup_nodes_num, feature_dim]
+            dup_nodes_num = k_cache.size(0)
+            assert dup_nodes_num < seq_len, f"Cache size {dup_nodes_num} > input seq_len {seq_len}"
+            # 1. Compute K/V for the non-cached part (from x[:, dup_nodes_num:, :])
+            x_dynamic = x[:, dup_nodes_num:, :]  # [b, dynamic_len, hidden_dim]
+            k_dynamic = self.linear_k(x_dynamic).view(batch_size, -1, self.num_heads, self.att_size)
+            v_dynamic = self.linear_v(x_dynamic).view(batch_size, -1, self.num_heads, self.att_size)
+            # 2. Reshape cached K/V to multi-head format
+            # [dup_nodes_num, feature_dim] -> [1, dup_nodes_num, num_heads, att_size]
+            k_cached = k_cache.view(1, dup_nodes_num, self.num_heads, self.att_size).expand(batch_size, -1, -1, -1)
+            v_cached = v_cache.view(1, dup_nodes_num, self.num_heads, self.att_size).expand(batch_size, -1, -1, -1)
+            # 3. Concatenate cached and dynamic parts along sequence dimension
+            k = torch.cat([k_cached, k_dynamic], dim=1)  # [b, seq_len, n_head, att_size]
+            v = torch.cat([v_cached, v_dynamic], dim=1)
         # print(f'rank {get_sequence_parallel_rank()} q: {q[:, 0, :, :]}')
         # exit(0)
-        
 
         # ==================================
         # core attention computation
@@ -271,7 +292,7 @@ class MultiHeadAttention(nn.Module):
         # [b, seq_len, h]
         log(f"x shape:{x.shape}")
         assert x.size() == orig_q_size
-        return x,score# 对分数的绝对值求和，考虑正负数都起作用
+        return x,score,[compute_cache_k,compute_cache_v]# 对分数的绝对值求和，考虑正负数都起作用
 
 
 class EncoderLayer(nn.Module):
@@ -297,13 +318,13 @@ class EncoderLayer(nn.Module):
         self.layer_norm2 = nn.LayerNorm(hidden_size)
             
             
-    def forward(self, x, attn_bias=None, edge_index=None, attn_type=None,mask= None,pruning_mask=None,duplicated_nodes=None):
+    def forward(self, x, attn_bias=None, edge_index=None, attn_type=None,mask= None,pruning_mask=None,dup_nodes_kv_cache=None,layer:int=0):
         # ==================================
         # MHA
         # ==================================
         # x: [b, seq_len, hidden_dim]
-        y,score = self.self_attention(x, attn_bias, edge_index=edge_index, 
-                                      attn_type=attn_type,pruning_mask=pruning_mask,mask=mask,duplicated_nodes=duplicated_nodes
+        y,score,[compute_cache_k,compute_cache_v] = self.self_attention(x, attn_bias, edge_index=edge_index, 
+                                      attn_type=attn_type,pruning_mask=pruning_mask,mask=mask,duplicated_nodes=dup_nodes_kv_cache,layer=layer
         )
         y = self.self_attention_dropout(y)
         y = self.O(y)
@@ -322,7 +343,7 @@ class EncoderLayer(nn.Module):
         x = x + y
         x = self.layer_norm2(x)
 
-        return x,score
+        return x,score,[compute_cache_k,compute_cache_v]
         
         
 class MLPReadout(nn.Module):
@@ -539,8 +560,12 @@ class GT_SW(nn.Module):
         
         
     def forward(self, x, attn_bias, edge_index, in_degree, out_degree,spatial_pos, 
-                edge_input,perturb=None, attn_type=None, mask= None, pruning_mask=None,duplicated_nodes=None
+                edge_input,perturb=None, attn_type=None, mask= None, pruning_mask=None,dup_nodes_kv_cache=None,part_id:int=None
         ):
+        if self.args.use_cache == 1:
+            assert dup_nodes_kv_cache is not None
+            assert dup_nodes_kv_cache[0].shape == (self.args.n_layers,2,x.shape[0],self.args.hidden_dim,self.args.hidden_dim)
+        # dup_nodes_kv_cache -> [partition_id,n_layer,dup_nodes_num,2,feature_dim]
         # x -> [bs=1, s/p, x_d]
         x = x.unsqueeze(0) 
         n_graph = x.shape[0] 
@@ -576,14 +601,17 @@ class GT_SW(nn.Module):
         # [b, s/p+1, h]
         score_agg = None
         score_spe = []
-        for enc_layer in self.layers:
+        kv_cache = []
+        for i,enc_layer in enumerate(self.layers):
             log(f"output shape:{output.shape}")
-            output,score = enc_layer(
+            output,score,[compute_cache_k,compute_cache_v] = enc_layer(
                 output,
                 attn_bias = attn_bias,
                 edge_index=edge_index,
                 attn_type=attn_type,
-                mask=mask
+                mask=mask,
+                dup_nodes_kv_cache=dup_nodes_kv_cache[part_id],
+                layer=i
             )
             # score_agg = score if score_agg==None else score_agg+torch.sum(score,dim=1).squeeze(0) # 返回的score已经是绝对值了
             score_spe.append(score)
@@ -595,4 +623,4 @@ class GT_SW(nn.Module):
         output = self.MLP_layer(output[0, :, :])
         log(f"final output:{output.shape}")
         
-        return F.log_softmax(output, dim=1),score_agg,score_spe
+        return F.log_softmax(output, dim=1),score_agg,score_spe,dup_nodes_kv_cache

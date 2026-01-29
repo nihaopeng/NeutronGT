@@ -57,6 +57,7 @@ def parser_add_main_args(parser):
     parser.add_argument('--max_dist', type=int, default=5)
     parser.add_argument('--max_num_edges', type=int, default=512)
     parser.add_argument('--vis_dir', type=str, help='path of vis')
+    parser.add_argument('--use_cache',default=0, type=int,choices=[0,1], help='path of vis')
     
     # distributed args
     parser.add_argument('--rank', type=int, default=None,

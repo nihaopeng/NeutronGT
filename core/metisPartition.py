@@ -38,7 +38,7 @@ class weightMetis_keepParent:
         self.global_edge_index = edge_index
         self.partition_num_per_parent = n_parts // 2
         self.parent_partition = self.partition(torch.arange(0,len(csr_adjacency.adj_starts)-1),self.csr_adjacency,self.eweights,2)
-        print(len(torch.arange(0,len(csr_adjacency.adj_starts)-1)))
+        # print(len(torch.arange(0,len(csr_adjacency.adj_starts)-1)))
         # BUG:假设 n 个节点，csr_adjaceny.adj_starts 长度为 num_node + 1，则第一个参数是tensor: [0,1,2,...,num_node]
         # torch.range 已被弃用，改为torch.arange(0,len(csr_adjacency.adj_starts)-1)
 
@@ -59,6 +59,7 @@ class weightMetis_keepParent:
         self.child_partitions = []
         self.partitioned_results = []
         self.sub_edge_index_for_partition_results = []
+        self.dup_indices = None
         self.expanded_edge = [[],[]] # format follow the edge index [2,edge_num]
         # 对父分区进行再次metis
         for parent_id,parent_partition in enumerate(self.parent_partition):
@@ -84,9 +85,9 @@ class weightMetis_keepParent:
             expanded_child_partitions.append(expanded_group)
         self.child_partitions = expanded_child_partitions
         self.global_edge_index = torch.cat([self.global_edge_index,torch.tensor(self.expanded_edge)],dim=1)
-        self.duplicated_nodes = self._find_duplicate_nodes()
-        self.duplicated_edges = self._find_duplicate_edges()
-        # TODO:rerange of partition for kv cache
+        # TODO:rerange of partition for kv cache √
+        self.dup_nodes_per_partition = self._find_duplicate_nodes_and_rerange()
+        self.dup_nodes_per_partition_feature = []
         for parent_group in self.child_partitions:
             for part in parent_group:
                 self.partitioned_results.append(part)
@@ -286,25 +287,38 @@ class weightMetis_keepParent:
             sub_xadj.append(len(sub_adjncy))
         return pymetis.CSRAdjacency(adj_starts=sub_xadj, adjacent=sub_adjncy), sub_eweights
 
-    def _find_duplicate_nodes(self) -> torch.Tensor:
+    def _find_duplicate_nodes_and_rerange(self):
         """FROM QWEN
-        找出重复节点。
+        重排各子分区：重复节点置前，返回每个分区开头的重复节点列表
         """
         if not hasattr(self, 'child_partitions') or not self.child_partitions:
-            return torch.empty(0, dtype=torch.long)
-        all_tensors = []
+            return []
+        # 收集所有节点并找出全局重复节点
+        all_nodes = [node for group in self.child_partitions for part in group for node in part.tolist()]
+        if not all_nodes:
+            return []
+        unique, counts = torch.unique(torch.tensor(all_nodes), return_counts=True)
+        duplicated_set = set(unique[counts >= 2].tolist())
+        # 重排每个子分区并收集其开头的重复节点
+        dup_nodes_per_partition = []
+        new_child_partitions = []
         for parent_group in self.child_partitions:
-            all_tensors.extend(parent_group)
-        if not all_tensors:
-            return torch.empty(0, dtype=torch.long)
-        # 拼接所有节点
-        all_nodes = torch.cat(all_tensors, dim=0)
-        # 统计重复
-        unique_nodes, counts = torch.unique(all_nodes, return_counts=True)
-        duplicate_nodes = unique_nodes[counts >= 2]
-        return duplicate_nodes
-    
+            new_group = []
+            for part in parent_group:
+                nodes = part.tolist()
+                dup = [n for n in nodes if n in duplicated_set]
+                non_dup = [n for n in nodes if n not in duplicated_set]
+                reranged = torch.tensor(dup + non_dup, dtype=torch.long)
+                new_group.append(reranged)
+                if dup:
+                    dup_nodes_per_partition.append(torch.tensor(dup, dtype=torch.long))
+                else:
+                    dup_nodes_per_partition.append(torch.empty(0, dtype=torch.long))
+            new_child_partitions.append(new_group)
 
+        self.child_partitions = new_child_partitions
+        return dup_nodes_per_partition
+    
     def _find_duplicate_edges(self) -> torch.Tensor:
         """FROM QWEN
         
