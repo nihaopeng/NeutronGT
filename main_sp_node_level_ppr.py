@@ -36,7 +36,7 @@ class StructInfo:
     def __init__(self,**kwargs) -> None:
         self.graph_in_degree = kwargs["graph_in_degree"]
         self.graph_out_degree = kwargs["graph_out_degree"]
-        self.sorted_ppr_matrix = kwargs["sorted_ppr_matrix"]
+        self.sorted_ppr_matrix = kwargs["sorted_ppr_matrix"]  # tuple[torch.Tensor, torch.Tensor]
         self.wm = kwargs["wm"]
         self.spatial_pos_list = None
         self.sub_edge_index_list = None
@@ -109,49 +109,49 @@ def build_model(args,feature,device,y,**kwargs):
     elif args.model == "gt":
         model = GT(
            n_layers=args.n_layers,
-            num_heads=args.num_heads,
-            input_dim=feature.shape[1],
-            hidden_dim=args.hidden_dim,
-            output_dim=y.max().item()+1,
-            attn_bias_dim=args.attn_bias_dim,
-            dropout_rate=args.dropout_rate,
-            input_dropout_rate=args.input_dropout_rate,
-            attention_dropout_rate=args.attention_dropout_rate,
-            ffn_dim=args.ffn_dim,
-            num_global_node=args.num_global_node,
-            args=args,
-            num_in_degree = torch.max(graph_in_degree).item() if graph_in_degree is not None else 0,
-            num_out_degree = torch.max(graph_out_degree).item() if graph_out_degree is not None else 0,
-            num_spatial=args.max_dist+2,
-            num_edges=args.max_num_edges,
-            max_dist=args.max_dist,
-            edge_dim=64
+             num_heads=args.num_heads,
+             input_dim=feature.shape[1],
+             hidden_dim=args.hidden_dim,
+             output_dim=y.max().item()+1,
+             attn_bias_dim=args.attn_bias_dim,
+             dropout_rate=args.dropout_rate,
+             input_dropout_rate=args.input_dropout_rate,
+             attention_dropout_rate=args.attention_dropout_rate,
+             ffn_dim=args.ffn_dim,
+             num_global_node=args.num_global_node,
+             args=args,
+             num_in_degree = int(torch.max(graph_in_degree).item()) if graph_in_degree is not None else 0,
+             num_out_degree = int(torch.max(graph_out_degree).item()) if graph_out_degree is not None else 0,
+             num_spatial=args.max_dist+2,
+             num_edges=args.max_num_edges,
+             max_dist=args.max_dist,
+             edge_dim=64
         ).to(device)
     elif args.model == "gt_sw": # only use in ppr
         model = GT_SW(
            n_layers=args.n_layers,
-            num_heads=args.num_heads,
-            input_dim=feature.shape[1],
-            hidden_dim=args.hidden_dim,
-            output_dim=y.max().item()+1,
-            attn_bias_dim=args.attn_bias_dim,
-            dropout_rate=args.dropout_rate,
-            input_dropout_rate=args.input_dropout_rate,
-            attention_dropout_rate=args.attention_dropout_rate,
-            ffn_dim=args.ffn_dim,
-            num_global_node=args.num_global_node,
-            args=args,
-            num_in_degree = torch.max(graph_in_degree).item() if graph_in_degree is not None else 0,
-            num_out_degree = torch.max(graph_out_degree).item() if graph_out_degree is not None else 0,
-            num_spatial=args.max_dist+2,
-            num_edges=args.max_num_edges,
-            max_dist=args.max_dist,
-            edge_dim=64
+             num_heads=args.num_heads,
+             input_dim=feature.shape[1],
+             hidden_dim=args.hidden_dim,
+             output_dim=y.max().item()+1,
+             attn_bias_dim=args.attn_bias_dim,
+             dropout_rate=args.dropout_rate,
+             input_dropout_rate=args.input_dropout_rate,
+             attention_dropout_rate=args.attention_dropout_rate,
+             ffn_dim=args.ffn_dim,
+             num_global_node=args.num_global_node,
+             args=args,
+             num_in_degree = int(torch.max(graph_in_degree).item()) if graph_in_degree is not None else 0,
+             num_out_degree = int(torch.max(graph_out_degree).item()) if graph_out_degree is not None else 0,
+             num_spatial=args.max_dist+2,
+             num_edges=args.max_num_edges,
+             max_dist=args.max_dist,
+             edge_dim=64
         ).to(device)
     return model
 
 @torch.no_grad()
-def eval_epoch(args,model,partitions,feature,y,split_idx,device,epoch,structInfo):
+def eval_epoch(args,model,partitions,feature,y,split_idx,device,epoch,structInfo,kv_cache_per_partition=None):
     # ---verify that whether the param was changed---
     # curr_param = None
     # for param in model.parameters():
@@ -188,7 +188,15 @@ def eval_epoch(args,model,partitions,feature,y,split_idx,device,epoch,structInfo
             in_degree = graph_in_degree[idx].to(device)
             out_degree = graph_out_degree[idx].to(device)
             spatial_pos_i = spatial_pos_list[i].to(device)
-        out_i,_,_,_ = model(x_i, attn_bias, edge_index_i,in_degree,out_degree, spatial_pos_i,edge_input_i,attn_type=args.attn_type,mask=mask)
+        # 获取当前partition的KV cache
+        current_kv_cache = kv_cache_per_partition[i] if kv_cache_per_partition is not None else None
+        
+        out_i,_,_,updated_kv_cache = model(x_i, attn_bias, edge_index_i,in_degree,out_degree, spatial_pos_i,edge_input_i,
+                                          attn_type=args.attn_type,mask=mask,dup_nodes_kv_cache=current_kv_cache,part_id=i)
+        
+        # 更新KV cache
+        if kv_cache_per_partition is not None and updated_kv_cache is not None:
+            kv_cache_per_partition[i] = updated_kv_cache
         # print(f"out i:{out_i}")
         mask_train = torch.isin(idx.to(device), split_idx["train"].to(device)).to('cpu')
         mask_valid = torch.isin(idx.to(device), split_idx["valid"].to(device)).to('cpu')
@@ -213,7 +221,7 @@ def eval_epoch(args,model,partitions,feature,y,split_idx,device,epoch,structInfo
     print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
     print("Epoch: {:03d}, train_acc: {:.5f}%, valid_acc: {:.5f}%, test_acc: {:.5f}%,".format(epoch, train_acc*100, valid_acc*100, test_acc*100))
     print("++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++")
-    return train_acc*100, valid_acc*100, test_acc*100
+    return train_acc*100, valid_acc*100, test_acc*100, kv_cache_per_partition
 
 def train_epoch(args,model:torch.nn.Module,partitions,feature,y,optimizer,lr_scheduler,world_size,split_idx,device,epoch,structInfo):
     graph_in_degree = structInfo.graph_in_degree
@@ -223,6 +231,13 @@ def train_epoch(args,model:torch.nn.Module,partitions,feature,y,optimizer,lr_sch
     model.train()
     loss_list, iter_t_list,iter_cpu2gpu_t_list,epoch_t_list,epoch_cpu2gpu_t_list = [], [], [], [], []
     scores = []
+    
+    # 初始化KV cache（如果需要）
+    kv_cache_per_partition = None
+    if args.use_cache:
+        # 为每个partition创建空的KV cache列表
+        kv_cache_per_partition = [None] * len(partitions)
+    
     for i,idx in enumerate(partitions):
         idx_i = idx
         t0 = time.time()
@@ -243,7 +258,10 @@ def train_epoch(args,model:torch.nn.Module,partitions,feature,y,optimizer,lr_sch
             out_degree = graph_out_degree[idx_i].to(device)
             spatial_pos_i = spatial_pos_list[i].to(device)
         t1 = time.time()
-        out_i,score_agg,score_spe,dup_nodes_kv_cache = model(
+        # 获取当前partition的KV cache
+        current_kv_cache = kv_cache_per_partition[i] if kv_cache_per_partition is not None else None
+        
+        out_i,score_agg,score_spe,updated_kv_cache = model(
             x_i, 
             attn_bias, 
             edge_index_i,
@@ -253,9 +271,14 @@ def train_epoch(args,model:torch.nn.Module,partitions,feature,y,optimizer,lr_sch
             edge_input_i,
             attn_type=args.attn_type,
             mask=mask,
-            dup_nodes_kv_cache=None,
+            dup_nodes_kv_cache=current_kv_cache,
             part_id=i
         )
+        
+        # 更新KV cache
+        if kv_cache_per_partition is not None and updated_kv_cache is not None:
+            kv_cache_per_partition[i] = updated_kv_cache
+        
         # 取最后一层
         scores.append(score_spe[args.n_layers-1])
         loss = F.nll_loss(out_i, y[idx].to(device).long(),reduction='none')
@@ -288,7 +311,7 @@ def train_epoch(args,model:torch.nn.Module,partitions,feature,y,optimizer,lr_sch
         print("------------------------------------------------------------------------------------")
         print("Epoch: {:03d}, Loss: {:.4f}, Epoch Time: {:.3f}s, Trans Time: {:.3f}s".format(epoch, np.mean(loss_list), np.mean(epoch_t_list),np.mean(epoch_cpu2gpu_t_list)))
         print("------------------------------------------------------------------------------------")
-    return np.mean(loss_list),scores
+    return np.mean(loss_list),scores,kv_cache_per_partition
 
 def main():
     logger.IS_LOGGING = False
@@ -411,6 +434,85 @@ def main():
         ]
         # 按照顺序一次性传输
         wm.dup_nodes_per_partition_feature = feature[torch.tensor(dup_unique_sorted)].to(device)
+        
+        # 统计重复节点信息
+        if args.rank == 0:
+            print("\n" + "="*80)
+            print("重复节点统计信息:")
+            print("="*80)
+            # 1. 全局重复节点统计
+            total_dup_nodes = len(dup_unique_sorted)
+            total_nodes = N
+            dup_ratio_global = total_dup_nodes / total_nodes * 100
+            print(f"全局统计:")
+            print(f"  - 总节点数: {total_nodes}")
+            print(f"  - 重复节点数: {total_dup_nodes}")
+            print(f"  - 重复节点占比: {dup_ratio_global:.2f}%")
+            # 2. 各分区重复节点统计
+            print(f"\n各分区统计 (前10个分区):")
+            total_partition_nodes = 0
+            total_dup_in_partitions = 0
+            for i, (partition, dup_nodes) in enumerate(zip(wm.partitioned_results, wm.dup_nodes_per_partition)):
+                if i >= 10:  # 只显示前10个分区
+                    break 
+                partition_size = len(partition)
+                dup_size = len(dup_nodes)
+                dup_ratio = dup_size / partition_size * 100 if partition_size > 0 else 0
+                total_partition_nodes += partition_size
+                total_dup_in_partitions += dup_size
+                print(f"  分区 {i:2d}: 总节点={partition_size:4d}, 重复节点={dup_size:4d}, 占比={dup_ratio:6.2f}%")
+            # 显示汇总信息
+            if len(wm.partitioned_results) > 10:
+                print(f"  ... 还有 {len(wm.partitioned_results)-10} 个分区未显示")
+            # 3. 分区重叠度统计
+            print(f"\n分区重叠度统计:")
+            node_partition_count = {}
+            for i, partition in enumerate(wm.partitioned_results):
+                for node in partition.tolist():
+                    node_partition_count[node] = node_partition_count.get(node, 0) + 1
+            partition_counts = list(node_partition_count.values())
+            if partition_counts:
+                avg_overlap = sum(partition_counts) / len(partition_counts)
+                max_overlap = max(partition_counts)
+                print(f"  - 平均每个节点出现在 {avg_overlap:.2f} 个分区中")
+                print(f"  - 最大重叠度: {max_overlap} 个分区")
+                # 显示重叠度分布摘要
+                overlap_dist = {}
+                for count in partition_counts:
+                    overlap_dist[count] = overlap_dist.get(count, 0) + 1
+                print(f"  - 重叠度分布摘要:")
+                sorted_counts = sorted(overlap_dist.keys())
+                for count in sorted_counts[:3]:  # 显示前3种
+                    ratio = overlap_dist[count] / len(partition_counts) * 100
+                    print(f"     出现在 {count} 个分区: {overlap_dist[count]:4d} 个节点 ({ratio:5.1f}%)")
+                if len(sorted_counts) > 3:
+                    print(f"     ... 还有 {len(sorted_counts)-3} 种重叠度")
+            # 4. 计算效率提升预估
+            print(f"\n效率提升预估:")
+            compute_reduction = dup_ratio_global
+            if compute_reduction > 0:
+                speedup = 1/(1-compute_reduction/100)
+                print(f"  - 理论计算量减少: {compute_reduction:.1f}%")
+                print(f"  - 理论加速比: {speedup:.2f}x")
+            else:
+                print(f"  - 无重复节点，KV cache无加速效果")
+            # 5. KV cache内存占用预估
+            print(f"\nKV cache内存占用预估:")
+            hidden_dim = args.hidden_dim
+            num_heads = args.num_heads
+            n_layers = args.n_layers
+            att_size = hidden_dim // num_heads
+            if total_dup_nodes > 0:
+                k_cache_size = total_dup_nodes * num_heads * att_size * 4  # float32: 4 bytes
+                v_cache_size = total_dup_nodes * num_heads * att_size * 4
+                per_layer_cache = (k_cache_size + v_cache_size) / (1024**2)  # MB
+                total_cache = per_layer_cache * n_layers
+                print(f"  - 每层总计: {per_layer_cache:.2f} MB")
+                print(f"  - {n_layers}层总计: {total_cache:.2f} MB")
+                print(f"  - 平均每个重复节点: {per_layer_cache/total_dup_nodes*1024:.2f} KB")
+            else:
+                print(f"  - 无重复节点，无需KV cache内存")
+            print("="*80 + "\n")
     # ===== 提前获取各设备idx ======
     partitions = []
     # for i in range(0,len(partitioned_results)): # 全都计算，一般使用gt模型，以支持注意力交换。
@@ -418,19 +520,55 @@ def main():
         partitions.append(wm.partitioned_results[i])
     spatial_pos_list = None
     if args.struct_enc=="True":
-        spatial_pos_list,_ = compute_graphormer_spatial_pos_only(structInfo.sorted_ppr_matrix,partitions,N,max_dist=args.max_dist)
+        # structInfo.sorted_ppr_matrix是tuple[torch.Tensor, torch.Tensor]
+        # 但compute_graphormer_spatial_pos_only期望tuple[list[torch.Tensor,torch.Tensor],torch.Tensor]
+        # 我们需要适配
+        ppr_tuple = (structInfo.sorted_ppr_matrix[0], structInfo.sorted_ppr_matrix[1])
+        spatial_pos_list,_ = compute_graphormer_spatial_pos_only(ppr_tuple, partitions, N, max_dist=args.max_dist)
         structInfo.spatial_pos_list = spatial_pos_list
     loss_mean_list = []
     detector = LossStagnationDetector(cooldown=0)
+    
+    # 初始化全局KV cache
+    global_kv_cache = None
+    if args.use_cache:
+        # 为所有partition创建空的KV cache列表
+        total_partitions = len(wm.partitioned_results)
+        global_kv_cache = [None] * total_partitions
+    
     for epoch in range(0, args.epochs):
-        loss_mean,scores_list = train_epoch(args,model,partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
+        # 获取当前rank负责的partitions对应的KV cache
+        current_kv_cache = None
+        if global_kv_cache is not None:
+            current_kv_cache = [global_kv_cache[i] for i in range(args.rank, len(global_kv_cache), seq_parallel_world_size)]
+        
+        loss_mean,scores_list,updated_kv_cache = train_epoch(args,model,partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
                     epoch=epoch,
                     structInfo=structInfo)
+        
+        # 更新全局KV cache
+        if global_kv_cache is not None and updated_kv_cache is not None:
+            for idx, local_idx in enumerate(range(args.rank, len(global_kv_cache), seq_parallel_world_size)):
+                if local_idx < len(global_kv_cache):
+                    global_kv_cache[local_idx] = updated_kv_cache[idx]
+        
         if args.rank == 0 and epoch % 20 == 0:
             print(f"epoch {epoch}: lr = {lr_scheduler.get_last_lr()[0]:.2e}")
-            train_acc,valid_test,test_acc = eval_epoch(args,model,partitions,feature,y,split_idx,device,
+            # 获取当前rank负责的partitions对应的KV cache用于评估
+            eval_kv_cache = None
+            if global_kv_cache is not None:
+                eval_kv_cache = [global_kv_cache[i] for i in range(args.rank, len(global_kv_cache), seq_parallel_world_size)]
+            
+            train_acc,valid_test,test_acc,updated_eval_kv_cache = eval_epoch(args,model,partitions,feature,y,split_idx,device,
                     epoch=epoch,
-                    structInfo=structInfo)
+                    structInfo=structInfo,
+                    kv_cache_per_partition=eval_kv_cache)
+            
+            # 更新评估后的KV cache
+            if global_kv_cache is not None and updated_eval_kv_cache is not None:
+                for idx, local_idx in enumerate(range(args.rank, len(global_kv_cache), seq_parallel_world_size)):
+                    if local_idx < len(global_kv_cache):
+                        global_kv_cache[local_idx] = updated_eval_kv_cache[idx]
         
         # 窗口调整
         # =================================================================
@@ -447,7 +585,20 @@ def main():
                 partitions.append(wm.partitioned_results[i])
             spatial_pos_list = None
             if args.struct_enc=="True":
-                structInfo.spatial_pos_list,_ = compute_graphormer_spatial_pos_only(structInfo.sorted_ppr_matrix,wm.partitioned_results,N,max_dist=args.max_dist)
+                ppr_tuple = (structInfo.sorted_ppr_matrix[0], structInfo.sorted_ppr_matrix[1])
+                structInfo.spatial_pos_list,_ = compute_graphormer_spatial_pos_only(ppr_tuple, wm.partitioned_results, N, max_dist=args.max_dist)
+            
+            # 显示窗口调整后的重复节点占比
+            if args.rank == 0 and hasattr(wm, 'dup_nodes_per_partition'):
+                print(f"\n[窗口调整后] 重复节点统计:")
+                total_dup_nodes = sum(len(dup_nodes) for dup_nodes in wm.dup_nodes_per_partition)
+                unique_dup_nodes = len(torch.unique(torch.cat(wm.dup_nodes_per_partition)))
+                total_partition_nodes = sum(len(partition) for partition in wm.partitioned_results)
+                
+                print(f"  - 总分区节点数: {total_partition_nodes}")
+                print(f"  - 重复节点出现次数: {total_dup_nodes}")
+                print(f"  - 唯一重复节点数: {unique_dup_nodes}")
+                print(f"  - 平均重复度: {total_dup_nodes/unique_dup_nodes:.2f}")
         # ================================================================= 
 
 if __name__ == "__main__":

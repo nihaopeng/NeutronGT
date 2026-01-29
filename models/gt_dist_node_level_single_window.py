@@ -198,6 +198,7 @@ class CoreAttention(nn.Module):
         # q, k, v: [b, s+p, np, hn], edge_index: [2, total_edges], attn_bias: [b, n, s+p, s+p]
         batch_size, s_len = q.size(0), q.size(1)
         score = None
+        x = None
         if attn_type == "full":
             x,score = self.full_attention(k, q, v, attn_bias,pruning_mask=pruning_mask,mask=mask)
         elif attn_type == "sparse":
@@ -209,8 +210,11 @@ class CoreAttention(nn.Module):
             k = k.half()
             v = v.half()
             # x = flash_attn_func(q, k, v, self.attention_dropout_rate)
-            x = self.naive_attention(q.transpose(1,2), k.transpose(1,2), v.transpose(1,2), dropout_p=self.attention_dropout_rate)
+            x,_ = self.naive_attention(q.transpose(1,2), k.transpose(1,2), v.transpose(1,2), dropout_p=self.attention_dropout_rate)
             x = x.float()
+        else:
+            # 默认使用full attention
+            x,score = self.full_attention(k, q, v, attn_bias,pruning_mask=pruning_mask,mask=mask)
         
         # [b, s+p, hp]
         log(f"x:{x.shape}")
@@ -252,25 +256,24 @@ class MultiHeadAttention(nn.Module):
         k,v= None,None
         compute_cache_k,compute_cache_v = None,None
         q = self.linear_q(x).view(batch_size, -1, self.num_heads, self.att_size)
-        dup_nodes_kv_cache = dup_nodes_kv_cache[layer]
+        
         if dup_nodes_kv_cache is None:
             k = compute_cache_k = self.linear_k(x).view(batch_size, -1, self.num_heads, self.att_size)
             v = compute_cache_v = self.linear_v(x).view(batch_size, -1, self.num_heads, self.att_size)
         else:
-            # dup_nodes_kv_cache -> [n_layer,2,dup_nodes_num,feature_dim]
-            # TODO:use kv cache
-            layer_cache = dup_nodes_kv_cache[layer]  # [2, dup_nodes_num, feature_dim]
-            k_cache, v_cache = layer_cache  # each: [dup_nodes_num, feature_dim]
+            # dup_nodes_kv_cache -> [n_layer, 2, dup_nodes_num, num_heads, att_size]
+            layer_cache = dup_nodes_kv_cache[layer]  # [2, dup_nodes_num, num_heads, att_size]
+            k_cache, v_cache = layer_cache  # each: [dup_nodes_num, num_heads, att_size]
             dup_nodes_num = k_cache.size(0)
-            assert dup_nodes_num < seq_len, f"Cache size {dup_nodes_num} > input seq_len {seq_len}"
+            assert dup_nodes_num <= seq_len, f"Cache size {dup_nodes_num} > input seq_len {seq_len}"
             # 1. Compute K/V for the non-cached part (from x[:, dup_nodes_num:, :])
             x_dynamic = x[:, dup_nodes_num:, :]  # [b, dynamic_len, hidden_dim]
             k_dynamic = self.linear_k(x_dynamic).view(batch_size, -1, self.num_heads, self.att_size)
             v_dynamic = self.linear_v(x_dynamic).view(batch_size, -1, self.num_heads, self.att_size)
-            # 2. Reshape cached K/V to multi-head format
-            # [dup_nodes_num, feature_dim] -> [1, dup_nodes_num, num_heads, att_size]
-            k_cached = k_cache.view(1, dup_nodes_num, self.num_heads, self.att_size).expand(batch_size, -1, -1, -1)
-            v_cached = v_cache.view(1, dup_nodes_num, self.num_heads, self.att_size).expand(batch_size, -1, -1, -1)
+            # 2. Expand cached K/V to batch dimension
+            # [dup_nodes_num, num_heads, att_size] -> [b, dup_nodes_num, num_heads, att_size]
+            k_cached = k_cache.unsqueeze(0).expand(batch_size, -1, -1, -1)
+            v_cached = v_cache.unsqueeze(0).expand(batch_size, -1, -1, -1)
             # 3. Concatenate cached and dynamic parts along sequence dimension
             k = torch.cat([k_cached, k_dynamic], dim=1)  # [b, seq_len, n_head, att_size]
             v = torch.cat([v_cached, v_dynamic], dim=1)
@@ -324,7 +327,7 @@ class EncoderLayer(nn.Module):
         # ==================================
         # x: [b, seq_len, hidden_dim]
         y,score,[compute_cache_k,compute_cache_v] = self.self_attention(x, attn_bias, edge_index=edge_index, 
-                                      attn_type=attn_type,pruning_mask=pruning_mask,mask=mask,duplicated_nodes=dup_nodes_kv_cache,layer=layer
+                                      attn_type=attn_type,pruning_mask=pruning_mask,mask=mask,dup_nodes_kv_cache=dup_nodes_kv_cache,layer=layer
         )
         y = self.self_attention_dropout(y)
         y = self.O(y)
@@ -560,12 +563,9 @@ class GT_SW(nn.Module):
         
         
     def forward(self, x, attn_bias, edge_index, in_degree, out_degree,spatial_pos, 
-                edge_input,perturb=None, attn_type=None, mask= None, pruning_mask=None,dup_nodes_kv_cache=None,part_id:int=None
+                edge_input,perturb=None, attn_type=None, mask= None, pruning_mask=None,dup_nodes_kv_cache=None,part_id=None
         ):
-        if self.args.use_cache == 1:
-            assert dup_nodes_kv_cache is not None
-            assert dup_nodes_kv_cache[0].shape == (self.args.n_layers,2,x.shape[0],self.args.hidden_dim,self.args.hidden_dim)
-        # dup_nodes_kv_cache -> [partition_id,n_layer,dup_nodes_num,2,feature_dim]
+        # dup_nodes_kv_cache -> [partition_id, n_layer, 2, dup_nodes_num, num_heads, att_size]
         # x -> [bs=1, s/p, x_d]
         x = x.unsqueeze(0) 
         n_graph = x.shape[0] 
@@ -601,20 +601,57 @@ class GT_SW(nn.Module):
         # [b, s/p+1, h]
         score_agg = None
         score_spe = []
-        kv_cache = []
+        new_kv_cache = []
         for i,enc_layer in enumerate(self.layers):
             log(f"output shape:{output.shape}")
+            # 处理KV cache传递
+            layer_kv_cache = None
+            if dup_nodes_kv_cache is not None:
+                if isinstance(dup_nodes_kv_cache, list) and part_id is not None:
+                    # dup_nodes_kv_cache是列表，按partition_id索引
+                    layer_kv_cache = dup_nodes_kv_cache[part_id]
+                else:
+                    # 已经按partition_id索引过了，直接使用
+                    layer_kv_cache = dup_nodes_kv_cache
+            
             output,score,[compute_cache_k,compute_cache_v] = enc_layer(
                 output,
                 attn_bias = attn_bias,
                 edge_index=edge_index,
                 attn_type=attn_type,
                 mask=mask,
-                dup_nodes_kv_cache=dup_nodes_kv_cache[part_id],
+                dup_nodes_kv_cache=layer_kv_cache,
                 layer=i
             )
             # score_agg = score if score_agg==None else score_agg+torch.sum(score,dim=1).squeeze(0) # 返回的score已经是绝对值了
             score_spe.append(score)
+            
+            # 收集新的KV cache
+            if compute_cache_k is not None and compute_cache_v is not None:
+                # 只保存重复节点的KV cache
+                if dup_nodes_kv_cache is not None and layer_kv_cache is not None:
+                    # 获取重复节点数量
+                    dup_nodes_num = 0
+                    if isinstance(layer_kv_cache, tuple) and len(layer_kv_cache) == 2:
+                        # layer_kv_cache是(k_cache, v_cache)元组
+                        k_cache_item, v_cache_item = layer_kv_cache
+                        if k_cache_item is not None:
+                            dup_nodes_num = k_cache_item.shape[0]
+                    
+                    if dup_nodes_num > 0:
+                        # 取前dup_nodes_num个节点的KV
+                        k_cache = compute_cache_k[:, :dup_nodes_num, :, :]  # [b, dup_nodes_num, num_heads, att_size]
+                        v_cache = compute_cache_v[:, :dup_nodes_num, :, :]
+                        # 去掉batch维度
+                        k_cache = k_cache.squeeze(0)  # [dup_nodes_num, num_heads, att_size]
+                        v_cache = v_cache.squeeze(0)
+                        new_kv_cache.append((k_cache, v_cache))
+                    else:
+                        new_kv_cache.append((None, None))
+                else:
+                    new_kv_cache.append((None, None))
+            else:
+                new_kv_cache.append((None, None))
         # Output part
         # t6 = time.time()
         # print(f"cost time6:{t6-t5:.3f}")
@@ -623,4 +660,23 @@ class GT_SW(nn.Module):
         output = self.MLP_layer(output[0, :, :])
         log(f"final output:{output.shape}")
         
-        return F.log_softmax(output, dim=1),score_agg,score_spe,dup_nodes_kv_cache
+        # 构建新的KV cache结构
+        updated_kv_cache = dup_nodes_kv_cache
+        if new_kv_cache and any(k is not None for k, v in new_kv_cache):
+            # 如果有新的KV cache，更新它
+            if updated_kv_cache is None:
+                # 创建新的KV cache结构
+                updated_kv_cache = []
+                for k_cache, v_cache in new_kv_cache:
+                    if k_cache is not None and v_cache is not None:
+                        updated_kv_cache.append((k_cache, v_cache))
+                    else:
+                        updated_kv_cache.append((None, None))
+            elif isinstance(updated_kv_cache, list) and part_id is not None:
+                # 更新特定partition的cache
+                if part_id < len(updated_kv_cache):
+                    for i, (k_cache, v_cache) in enumerate(new_kv_cache):
+                        if k_cache is not None and v_cache is not None:
+                            updated_kv_cache[part_id][i] = (k_cache, v_cache)
+        
+        return F.log_softmax(output, dim=1),score_agg,score_spe,updated_kv_cache
