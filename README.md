@@ -24,5 +24,3 @@ install torch, torch_npu (租的服务器已经安装，1.11版本)
 `pip install torch-sparse -f https://data.pyg.org/whl/torch-2.1.0+cpu.html`
 
 `pip install numba,pymetis`
-## tip
-1, 当前版本请不要使用除了full以外的attn type，他们都没有返回score，也不被我们需要

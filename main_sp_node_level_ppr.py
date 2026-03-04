@@ -464,55 +464,6 @@ def main():
             # 显示汇总信息
             if len(wm.partitioned_results) > 10:
                 print(f"  ... 还有 {len(wm.partitioned_results)-10} 个分区未显示")
-            # 3. 分区重叠度统计
-            print(f"\n分区重叠度统计:")
-            node_partition_count = {}
-            for i, partition in enumerate(wm.partitioned_results):
-                for node in partition.tolist():
-                    node_partition_count[node] = node_partition_count.get(node, 0) + 1
-            partition_counts = list(node_partition_count.values())
-            if partition_counts:
-                avg_overlap = sum(partition_counts) / len(partition_counts)
-                max_overlap = max(partition_counts)
-                print(f"  - 平均每个节点出现在 {avg_overlap:.2f} 个分区中")
-                print(f"  - 最大重叠度: {max_overlap} 个分区")
-                # 显示重叠度分布摘要
-                overlap_dist = {}
-                for count in partition_counts:
-                    overlap_dist[count] = overlap_dist.get(count, 0) + 1
-                print(f"  - 重叠度分布摘要:")
-                sorted_counts = sorted(overlap_dist.keys())
-                for count in sorted_counts[:3]:  # 显示前3种
-                    ratio = overlap_dist[count] / len(partition_counts) * 100
-                    print(f"     出现在 {count} 个分区: {overlap_dist[count]:4d} 个节点 ({ratio:5.1f}%)")
-                if len(sorted_counts) > 3:
-                    print(f"     ... 还有 {len(sorted_counts)-3} 种重叠度")
-            # 4. 计算效率提升预估
-            print(f"\n效率提升预估:")
-            compute_reduction = dup_ratio_global
-            if compute_reduction > 0:
-                speedup = 1/(1-compute_reduction/100)
-                print(f"  - 理论计算量减少: {compute_reduction:.1f}%")
-                print(f"  - 理论加速比: {speedup:.2f}x")
-            else:
-                print(f"  - 无重复节点，KV cache无加速效果")
-            # 5. KV cache内存占用预估
-            print(f"\nKV cache内存占用预估:")
-            hidden_dim = args.hidden_dim
-            num_heads = args.num_heads
-            n_layers = args.n_layers
-            att_size = hidden_dim // num_heads
-            if total_dup_nodes > 0:
-                k_cache_size = total_dup_nodes * num_heads * att_size * 4  # float32: 4 bytes
-                v_cache_size = total_dup_nodes * num_heads * att_size * 4
-                per_layer_cache = (k_cache_size + v_cache_size) / (1024**2)  # MB
-                total_cache = per_layer_cache * n_layers
-                print(f"  - 每层总计: {per_layer_cache:.2f} MB")
-                print(f"  - {n_layers}层总计: {total_cache:.2f} MB")
-                print(f"  - 平均每个重复节点: {per_layer_cache/total_dup_nodes*1024:.2f} KB")
-            else:
-                print(f"  - 无重复节点，无需KV cache内存")
-            print("="*80 + "\n")
     # ===== 提前获取各设备idx ======
     partitions = []
     # for i in range(0,len(partitioned_results)): # 全都计算，一般使用gt模型，以支持注意力交换。
