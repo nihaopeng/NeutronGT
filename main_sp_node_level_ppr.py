@@ -151,7 +151,7 @@ def build_model(args,feature,device,y,**kwargs):
     return model
 
 @torch.no_grad()
-def eval_epoch(args,model,partitions,feature,y,split_idx,device,epoch,structInfo,kv_cache_per_partition=None):
+def eval_epoch(args,model,partitions,feature,y,split_idx,device,epoch,structInfo):
     # ---verify that whether the param was changed---
     # curr_param = None
     # for param in model.parameters():
@@ -169,6 +169,12 @@ def eval_epoch(args,model,partitions,feature,y,split_idx,device,epoch,structInfo
     model.eval()
     y_train_true,y_valid_true,y_test_true = [], [], []
     y_train_pred,y_valid_pred,y_test_pred = [], [], []
+    
+    # 初始化KV cache（如果需要）
+    kv_cache_per_partition = None
+    if args.use_cache:
+        # 为每个partition创建空的KV cache列表
+        kv_cache_per_partition = [None] * len(partitions)
     
     for i,idx in enumerate(partitions):
         # + 全部重传
@@ -480,51 +486,20 @@ def main():
     loss_mean_list = []
     detector = LossStagnationDetector(cooldown=0)
     
-    # 初始化全局KV cache
-    global_kv_cache = None
-    if args.use_cache:
-        # 为所有partition创建空的KV cache列表
-        total_partitions = len(wm.partitioned_results)
-        global_kv_cache = [None] * total_partitions
-    
     for epoch in range(0, args.epochs):
-        # 获取当前rank负责的partitions对应的KV cache
-        current_kv_cache = None
-        if global_kv_cache is not None:
-            current_kv_cache = [global_kv_cache[i] for i in range(args.rank, len(global_kv_cache), seq_parallel_world_size)]
         
         loss_mean,scores_list,updated_kv_cache = train_epoch(args,model,partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
                     epoch=epoch,
                     structInfo=structInfo)
         
-        # 更新全局KV cache
-        if global_kv_cache is not None and updated_kv_cache is not None:
-            for idx, local_idx in enumerate(range(args.rank, len(global_kv_cache), seq_parallel_world_size)):
-                if local_idx < len(global_kv_cache):
-                    global_kv_cache[local_idx] = updated_kv_cache[idx]
-        
         if args.rank == 0 and epoch % 20 == 0:
             print(f"epoch {epoch}: lr = {lr_scheduler.get_last_lr()[0]:.2e}")
-            # 获取当前rank负责的partitions对应的KV cache用于评估
-            eval_kv_cache = None
-            if global_kv_cache is not None:
-                eval_kv_cache = [global_kv_cache[i] for i in range(args.rank, len(global_kv_cache), seq_parallel_world_size)]
             
-            train_acc,valid_test,test_acc,updated_eval_kv_cache = eval_epoch(args,model,partitions,feature,y,split_idx,device,
+            eval_epoch(args,model,partitions,feature,y,split_idx,device,
                     epoch=epoch,
-                    structInfo=structInfo,
-                    kv_cache_per_partition=eval_kv_cache)
-            
-            # 更新评估后的KV cache
-            if global_kv_cache is not None and updated_eval_kv_cache is not None:
-                for idx, local_idx in enumerate(range(args.rank, len(global_kv_cache), seq_parallel_world_size)):
-                    if local_idx < len(global_kv_cache):
-                        global_kv_cache[local_idx] = updated_eval_kv_cache[idx]
+                    structInfo=structInfo)
         
         # 窗口调整
-        # =================================================================
-        # if (epoch+1) % 20 == 0:
-        #     partitionTree.dynamic_window_build(scores,metis_partition_nodes,remove_ratio=0.05)
         loss_mean_list.append(loss_mean)
         if args.use_cache==0 and detector(loss_mean_list):
             print("!node in and out!")
