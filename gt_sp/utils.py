@@ -406,6 +406,8 @@ def get_batch(args, x, y, idx_batch, adjs, rest_split_sizes, device):
         return x_i, y_i, attn_bias
     
 
+partition_graph_and_remap = reformat_graph
+
 def get_batch_reorder_blockize(args, x, y, idx_batch, rest_split_sizes, device, edge_index, N, k, block_size, beta_coeffi='1'):
     """
     Dummy bias for faster processing time each iteration

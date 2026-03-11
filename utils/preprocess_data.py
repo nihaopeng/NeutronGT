@@ -170,11 +170,11 @@ def get_dataset(dataset_name):
             edge_index = torch.stack([row, col], dim=0)
             edge_index = coalesce(edge_index, num_nodes=data_x.size(0))
             
-        elif dataset_name in ['amazon']:
-            dataset_dir = "/home/mzhang/data/"
-            adj = sp.load_npz(os.path.join(dataset_dir, dataset_name, 'adj_full.npz'))
-            data_x = np.load(os.path.join(dataset_dir, dataset_name, 'feats.npy'))
-            data_y = np.load(os.path.join(dataset_dir, dataset_name, 'labels.npy'))
+        elif dataset_name in ['AmazonProducts']:
+            dataset_dir = './dataset/'
+            adj = sp.load_npz(os.path.join(dataset_dir, dataset_name,'raw', 'adj_full.npz'))
+            data_x = np.load(os.path.join(dataset_dir, dataset_name,'raw','feats.npy'))
+            data_y = np.load(os.path.join(dataset_dir, dataset_name,'raw', 'labels.npy'))
             data_x = torch.tensor(data_x, dtype=torch.float32)
             data_y = torch.tensor(data_y)
             data_y = torch.argmax(data_y, -1)
@@ -204,19 +204,19 @@ def get_dataset(dataset_name):
             column_normalized_adj = column_normalize(adj)
 
         elif dataset_name in {"ogbn-papers100M"}:
-            file_dir = '/home/mzhang/data/'
+            file_dir = './dataset/'
             ogb_dataset = NodePropPredDataset(name=dataset_name, root=file_dir)
             split_idx = ogb_dataset.get_idx_split()
             idx_train, idx_val, idx_test = split_idx["train"], split_idx["valid"], split_idx["test"]
             
             data_y = torch.as_tensor(ogb_dataset.labels).squeeze(1)
-            # data_x = torch.as_tensor(ogb_dataset.graph['node_feat'])
+            data_x = torch.as_tensor(ogb_dataset.graph['node_feat'])
             edge_index = torch.as_tensor(ogb_dataset.graph['edge_index'])
-            # num_nodes=ogb_dataset.graph['num_nodes']
-            # adj = sp.coo_matrix((np.ones(edge_index.shape[1]), (edge_index[0], edge_index[1])),
-            #                         shape=(num_nodes, num_nodes), dtype=np.float32)
-            # normalized_adj = adj_normalize(adj)
-            # column_normalized_adj = column_normalize(adj)
+            num_nodes=ogb_dataset.graph['num_nodes']
+            adj = sp.coo_matrix((np.ones(edge_index.shape[1]), (edge_index[0], edge_index[1])),
+                                    shape=(num_nodes, num_nodes), dtype=np.float32)
+            normalized_adj = adj_normalize(adj)
+            column_normalized_adj = column_normalize(adj)
         
         elif dataset_name in ["ogbn-arxiv", "ogbn-products"]:
             ogb_dataset = NodePropPredDataset(name=dataset_name, root=dataset_dir)
@@ -234,6 +234,7 @@ def get_dataset(dataset_name):
 
         # sp.save_npz(dataset_dir + dataset_name + '/adj.npz', adj)
         # sp.save_npz(dataset_dir + dataset_name + '/normalized_adj.npz', normalized_adj)
+        print("--------------save")
         dataset_dir = './dataset/'
         torch.save(data_x, dataset_dir + dataset_name + '/x.pt')
         torch.save(data_y, dataset_dir + dataset_name + '/y.pt')
@@ -369,4 +370,4 @@ def rand_nodes_seq(dataset_name, k1, p=None):
 
 
 if __name__ == '__main__':
-    get_dataset('ogbn-arxiv')
+    get_dataset('AmazonProducts')

@@ -548,3 +548,6 @@ class DistributedAttentionNoMerge(torch.nn.Module):
 
         # out e.g., [b, s/p+1, h]
         return output
+
+
+DistributedAttentionAll2allNoMerge = DistributedAttentionNoMerge

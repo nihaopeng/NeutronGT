@@ -147,6 +147,7 @@ def main():
             power=1.0)
     
     val_acc_list, test_acc_list, epoch_t_list = [], [], []
+    epoch_cpu2gpu_t_list = []
     best_model, best_val, best_test = None, float('-inf'), float('-inf')
 
     num_batch = flatten_train_idx.size(0) // args.seq_len + 1
@@ -160,7 +161,8 @@ def main():
         model.train()
         
         loss_list, iter_t_list = [], []
-        
+        iter_cpu2gpu_t_list = []
+
         if args.attn_type == "hybrid":
             percent_list  = [(i + 1) / args.switch_freq for i in range(args.switch_freq)]
             switch_points = [int(num_batch * percentage) for percentage in percent_list]
@@ -168,6 +170,8 @@ def main():
         
         for i in range(num_batch):
             idx_i = flatten_train_idx[i*args.seq_len: (i+1)*args.seq_len]
+
+            t0 = time.time()
             packed_data = get_batch_reorder_blockize(args, feature, y, idx_i.to("cpu"), sub_split_seq_lens, device, edge_index, N, k=8, block_size=16, beta_coeffi=beta_coeffi_list[beta_idx])
 
             x_i, y_i, edge_index_i, attn_bias = packed_data
@@ -175,7 +179,12 @@ def main():
                 x_i, y_i, edge_index_i, attn_bias = x_i.to(device), y_i.to(device), edge_index_i.to(device), attn_bias.to(device)
             else:
                 x_i, y_i, edge_index_i = x_i.to(device), y_i.to(device), edge_index_i.to(device)
-        
+
+            torch.cuda.synchronize() 
+            t1 = time.time()
+            
+
+
             if args.attn_type == "sparse":
                 attn_type = "sparse"
             elif args.attn_type == "full":
@@ -191,7 +200,7 @@ def main():
                 #     attn_type = "sparse"
                 # else:
                 #     attn_type = "full"       
-            t1 = time.time()
+            
                 
             out_i = model(x_i, attn_bias, edge_index_i, attn_type=attn_type)    
             loss = F.nll_loss(out_i, y_i.long())
@@ -208,16 +217,18 @@ def main():
             optimizer.step()  
             torch.cuda.synchronize()   
             t2 = time.time() 
-             
+            iter_cpu2gpu_t_list.append(t1 - t0) 
             iter_t_list.append(t2 - t1) 
+            
      
         loss_list.append(loss.item()) 
         lr_scheduler.step()
         
         if epoch > 4 and args.rank == 0:  
             epoch_t_list.append(np.sum(iter_t_list))
+            epoch_cpu2gpu_t_list.append(np.sum(iter_cpu2gpu_t_list))
             print("------------------------------------------------------------------------------------")
-            print("Epoch: {:03d}, Loss: {:.4f}, Epoch Time: {:.3f}s".format(epoch, np.mean(loss_list), np.mean(epoch_t_list)))
+            print("Epoch: {:03d}, Loss: {:.4f}, Epoch Time: {:.3f}s, Trans Time: {:.3f}s".format(epoch, np.mean(loss_list), np.mean(epoch_t_list),np.mean(epoch_cpu2gpu_t_list)))
             print("------------------------------------------------------------------------------------")
 
         if args.rank == 0 and epoch % 5 == 0:   

@@ -1,4 +1,12 @@
 TorchGT/
 model_ckpt/
 dataset/
-**/__pycache__/
+__pycache__/
+*.csv
+*.json
+*.png
+
+dataset/
+dataset-graph/
+dataset/*
+dataset-graph/*
