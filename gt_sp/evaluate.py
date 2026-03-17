@@ -49,7 +49,7 @@ def eval(args, model, device, x, y, sub_idx, adjs):
         x_i, y_i, attn_bias = get_batch(args, x, y, idx_i, adjs, rest_split_sizes, device)
         
         pred = model(x_i, attn_bias)
-        loss = F.nll_loss(pred, y_i)
+        loss = F.nll_loss(pred, y_i.long())
         loss_list.append(loss.item())
         y_true.append(y_i.view(-1))
         y_pred.append(pred.argmax(1))
@@ -112,7 +112,7 @@ def eval_cpu_subset_batch(args, model, x, y, sub_idx, adjs):
         attn_bias = attn_bias.permute(1, 2, 0)
         
         pred = model(x_i, attn_bias)
-        loss = F.nll_loss(pred, y_i)
+        loss = F.nll_loss(pred, y_i.long())
         loss_list.append(loss.item())
         
         y_true.append(y_i.view(-1))
@@ -150,7 +150,7 @@ def eval_gpu_subset_batch(args, model, x, y, sub_idx, adjs, device):
         
         x_i, y_i, attn_bias = x_i.to(device), y_i.to(device), attn_bias.to(device)
         pred = model(x_i, attn_bias)
-        loss = F.nll_loss(pred, y_i)
+        loss = F.nll_loss(pred, y_i.long())
         loss_list.append(loss.item())
         
         y_true.append(y_i.view(-1))
@@ -200,7 +200,7 @@ def sparse_eval_cpu_subset_batch(args, model, x, y, sub_idx, adjs, edge_index):
         edge_index_i = gen_sub_edge_index(edge_index, idx_i, N) # [2, num_edges] index plused global token
         
         pred = model(x_i, attn_bias, edge_index_i, attn_type=attn_type)
-        loss = F.nll_loss(pred, y_i)
+        loss = F.nll_loss(pred, y_i.long())
         loss_list.append(loss.item())
         
         y_true.append(y_i.view(-1))
@@ -248,7 +248,7 @@ def sparse_eval_gpu_subset_batch(args, model, x, y, sub_idx, adjs, edge_index, d
         x_i, y_i, edge_index_i, attn_bias = x_i.to(device), y_i.to(device), edge_index_i.to(device), attn_bias.to(device)
         
         pred = model(x_i, attn_bias, edge_index_i, attn_type=attn_type)
-        loss = F.nll_loss(pred, y_i)
+        loss = F.nll_loss(pred, y_i.long())
         loss_list.append(loss.item())
         
         y_true.append(y_i.view(-1))
@@ -303,7 +303,7 @@ def sparse_eval_cpu_subset_batch_dummy_bias(args, model, x, y, sub_idx, dummy_at
         edge_index_i = gen_sub_edge_index(edge_index, idx_i, N) # [2, num_edges] index plused global token
         
         pred = model(x_i, dummy_attn_bias, edge_index_i, attn_type=attn_type)
-        loss = F.nll_loss(pred, y_i)
+        loss = F.nll_loss(pred, y_i.long())
         loss_list.append(loss.item())
         
         y_true.append(y_i.view(-1))
@@ -354,7 +354,7 @@ def sparse_eval_gpu(args, model, x, y, sub_idx, attn_bias, edge_index, device):
         x_i, y_i, edge_index_i = x_i.to(device), y_i.to(device), edge_index_i.to(device)
 
         pred = model(x_i, attn_bias, edge_index_i, attn_type=attn_type)
-        loss = F.nll_loss(pred, y_i)
+        loss = F.nll_loss(pred, y_i.long())
         loss_list.append(loss.item())
         
         y_true.append(y_i.view(-1))
@@ -395,7 +395,7 @@ def eval_cpu_batch(args, model, x, y, split_idx, adjs):
         attn_bias = attn_bias.permute(1, 2, 0)
         
         pred = model(x_i, attn_bias)
-        loss = F.nll_loss(pred, y_i)
+        loss = F.nll_loss(pred,y_i.long())
         
         y_true.append(y_i.view(-1))
         y_pred.append(pred.argmax(1))

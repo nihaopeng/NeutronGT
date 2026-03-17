@@ -10,3 +10,7 @@ dataset/
 dataset-graph/
 dataset/*
 dataset-graph/*
+*.log
+*.txt
+experiment_logs/
+exps/

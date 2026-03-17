@@ -45,14 +45,33 @@ def main():
         os.makedirs(args.model_dir, exist_ok=True)
     
     # Dataset 
-    feature = torch.load(args.dataset_dir + args.dataset + '/x.pt') # [N, x_dim]
+    feature = torch.load(args.dataset_dir + args.dataset + '/x.pt',mmap=True) # [N, x_dim]
     y = torch.load(args.dataset_dir + args.dataset + '/y.pt') # [N]
     edge_index = torch.load(args.dataset_dir + args.dataset + '/edge_index.pt') # [2, num_edges]
     N = feature.shape[0]
+    split_idx = None
+    
+    
+    print(f'feature shape {feature.shape}')
+    print(f'y shape {y.shape}')
+    print(f'edge_index shape {edge_index.shape}')
 
     if args.dataset == 'pokec':
         y = torch.clamp(y, min=0) 
-    split_idx = random_split_idx(y, frac_train=0.6, frac_valid=0.2, frac_test=0.2, seed=args.seed)
+    
+    if args.dataset == 'ogbn-papers100M':
+        split_idx = torch.load(args.dataset_dir + args.dataset +'/split_idx.pt')
+        print(f"split_idx keys: {split_idx.keys()}")
+        print(f"Train size: {split_idx['train'].shape}, Valid size: {split_idx['valid'].shape}, Test size: {split_idx['test'].shape}")
+
+        split_idx['train'] = torch.as_tensor(split_idx['train'], dtype=torch.long)
+        split_idx['valid'] = torch.as_tensor(split_idx['valid'], dtype=torch.long)
+        split_idx['test'] = torch.as_tensor(split_idx['test'], dtype=torch.long)
+    else:
+        split_idx = random_split_idx(y, frac_train=0.6, frac_valid=0.2, frac_test=0.2, seed=args.seed)
+
+    
+
 
     if args.rank == 0:
         print(args)
@@ -74,6 +93,13 @@ def main():
         flatten_train_idx = torch.empty(total_numel,
                                 device=device,
                                 dtype=torch.int64)
+        
+    num_classes = None
+    if args.dataset == 'ogbn-papers100M':
+        num_classes = int(y[train_idx].max().item()) + 1
+    else:
+        num_classes = int(y.max().item()) + 1
+
     # Broadcast
     if seq_parallel_world_size > 1:
         dist.broadcast(flatten_train_idx, src_rank, group=group)
@@ -107,7 +133,8 @@ def main():
             num_heads=args.num_heads,
             input_dim=feature.shape[1],
             hidden_dim=args.hidden_dim,
-            output_dim=y.max().item()+1,
+            # output_dim=y.max().item()+1,
+            output_dim = num_classes,
             attn_bias_dim=args.attn_bias_dim,
             dropout_rate=args.dropout_rate,
             input_dropout_rate=args.input_dropout_rate,
@@ -121,7 +148,8 @@ def main():
             num_heads=args.num_heads,
             input_dim=feature.shape[1],
             hidden_dim=args.hidden_dim,
-            output_dim=y.max().item()+1,
+            # output_dim=y.max().item()+1,
+            output_dim = num_classes,
             attn_bias_dim=args.attn_bias_dim,
             dropout_rate=args.dropout_rate,
             input_dropout_rate=args.input_dropout_rate,

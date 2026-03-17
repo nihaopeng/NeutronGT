@@ -204,19 +204,33 @@ def get_dataset(dataset_name):
             column_normalized_adj = column_normalize(adj)
 
         elif dataset_name in {"ogbn-papers100M"}:
-            file_dir = './dataset/'
-            ogb_dataset = NodePropPredDataset(name=dataset_name, root=file_dir)
-            split_idx = ogb_dataset.get_idx_split()
-            idx_train, idx_val, idx_test = split_idx["train"], split_idx["valid"], split_idx["test"]
+            # file_dir = './dataset/'
+            # ogb_dataset = NodePropPredDataset(name=dataset_name, root=file_dir)
+            # split_idx = ogb_dataset.get_idx_split()
+            # idx_train, idx_val, idx_test = split_idx["train"], split_idx["valid"], split_idx["test"]
             
+            # data_y = torch.as_tensor(ogb_dataset.labels).squeeze(1)
+            # data_x = torch.as_tensor(ogb_dataset.graph['node_feat'])
+            # edge_index = torch.as_tensor(ogb_dataset.graph['edge_index'])
+            # num_nodes=ogb_dataset.graph['num_nodes']
+            # adj = sp.coo_matrix((np.ones(edge_index.shape[1]), (edge_index[0], edge_index[1])),
+            #                         shape=(num_nodes, num_nodes), dtype=np.float32)
+            # normalized_adj = adj_normalize(adj)
+            # column_normalized_adj = column_normalize(adj)
+            file_dir = './dataset/'
+            print(f"正在加载 {dataset_name} (请确保服务器有充足内存)...")
+            ogb_dataset = NodePropPredDataset(name=dataset_name, root=file_dir)
+            
+            # 1. 提取核心张量并拿到官方的切分字典 (包含 train/valid/test 的索引)
+            split_idx = ogb_dataset.get_idx_split()
             data_y = torch.as_tensor(ogb_dataset.labels).squeeze(1)
             data_x = torch.as_tensor(ogb_dataset.graph['node_feat'])
             edge_index = torch.as_tensor(ogb_dataset.graph['edge_index'])
-            num_nodes=ogb_dataset.graph['num_nodes']
-            adj = sp.coo_matrix((np.ones(edge_index.shape[1]), (edge_index[0], edge_index[1])),
-                                    shape=(num_nodes, num_nodes), dtype=np.float32)
-            normalized_adj = adj_normalize(adj)
-            column_normalized_adj = column_normalize(adj)
+            num_nodes = ogb_dataset.graph['num_nodes']
+            
+            # 2. 规范化边索引（对齐底层的稀疏注意力机制）
+            print("正在 coalesce 规范化 edge_index...")
+            edge_index = coalesce(edge_index, num_nodes=num_nodes)
         
         elif dataset_name in ["ogbn-arxiv", "ogbn-products"]:
             ogb_dataset = NodePropPredDataset(name=dataset_name, root=dataset_dir)
@@ -234,12 +248,29 @@ def get_dataset(dataset_name):
 
         # sp.save_npz(dataset_dir + dataset_name + '/adj.npz', adj)
         # sp.save_npz(dataset_dir + dataset_name + '/normalized_adj.npz', normalized_adj)
+        # print("--------------save")
+        # dataset_dir = './dataset/'
+       
+        # torch.save(data_x, dataset_dir + dataset_name + '/x.pt')
+        # torch.save(data_y, dataset_dir + dataset_name + '/y.pt')
+        # torch.save(edge_index, dataset_dir + dataset_name + '/edge_index.pt')
+        # # sp.save_npz(dataset_dir + dataset_name + '/column_normalized_adj.npz', column_normalized_adj)
+            
         print("--------------save")
-        dataset_dir = './dataset/'
-        torch.save(data_x, dataset_dir + dataset_name + '/x.pt')
-        torch.save(data_y, dataset_dir + dataset_name + '/y.pt')
-        torch.save(edge_index, dataset_dir + dataset_name + '/edge_index.pt')
-        # sp.save_npz(dataset_dir + dataset_name + '/column_normalized_adj.npz', column_normalized_adj)
+
+        dataset_dir = './dataset'
+        # 自动拼接完整目录名 (无论 dataset_dir 结尾有没有斜杠都能正确拼接)
+        save_dir = os.path.join(dataset_dir, dataset_name)
+        
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # 使用 os.path.join 自动处理文件名拼接
+        # torch.save(data_x, os.path.join(save_dir, 'x.pt'))
+        # torch.save(data_y, os.path.join(save_dir, 'y.pt'))
+        # torch.save(edge_index, os.path.join(save_dir, 'edge_index.pt'))
+        torch.save(split_idx, os.path.join(save_dir, 'split_idx.pt'))
+        
+        print(f"已成功保存至目录: {save_dir}")
 
 
 def process_data(dataset_name, k1):
@@ -370,4 +401,4 @@ def rand_nodes_seq(dataset_name, k1, p=None):
 
 
 if __name__ == '__main__':
-    get_dataset('AmazonProducts')
+    get_dataset('ogbn-papers100M')

@@ -94,6 +94,18 @@ def train(args, model, device, packed_data, optimizer, criterion, epoch, lr_sche
         switch_points = [int(len(packed_data) * percentage) for percentage in percent_list]
     iter = 1
     for batch in packed_data:
+        # Debug: 打印 batch 信息
+        if args.rank == 0 and iter == 1:
+            print(f"\n{'='*50}")
+            print(f"=== Batch Info (Epoch {epoch}, Rank {args.rank}) ===")
+            print(f"  x shape: {batch[0].shape}")      # [num_nodes, hidden_dim]
+            print(f"  y shape: {batch[1].shape}, y: {batch[1].tolist()}")             # 图标签
+            print(f"  in_degree shape: {batch[2].shape}")
+            print(f"  out_degree shape: {batch[3].shape}")
+            print(f"  edge_index shape: {batch[4].shape}")
+            # print(f"  sub_split_seq_lens: {batch[5]}")
+            print(f"{'='*50}\n")
+        
         x_i, y_i, in_degree_i, out_degree_i, edge_index = get_sp_rank_data(args, batch, device)
         # print(edge_index)
         
@@ -115,6 +127,7 @@ def train(args, model, device, packed_data, optimizer, criterion, epoch, lr_sche
         
         pred = model(x_i, in_degree_i, out_degree_i, edge_index, attn_type=attn_type) # [bs, num_class]
 
+
         if args.dataset in ["ZINC"]:
             pred = pred.view(-1)
             y_true = y_i.view(-1)
@@ -128,6 +141,8 @@ def train(args, model, device, packed_data, optimizer, criterion, epoch, lr_sche
 
         # sync all-reduce gradient 
         # reducer.synchronize()
+        
+        
         for name, param in model.named_parameters():
             if param.requires_grad and param.grad is not None:
                 param.grad.div_(get_sequence_parallel_world_size())

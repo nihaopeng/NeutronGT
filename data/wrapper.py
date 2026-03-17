@@ -192,40 +192,98 @@ def preprocess_item_malnet(item):
     return item
 
 
-def preprocess_item_malnet_dummy_encd(item):
-    """
-    Precompute node features(x) as MalNet originally doesn't have any node nor edge features
-    """
-    num_virtual_tokens = 1
-    # edge_attr: [num_edges, edge_attr_dim], edge_index: [2, num_edges], x: [num_nodes, node_attr_dim]
-    edge_attr, edge_index, x = item.edge_attr, item.edge_index, item.x
+# def preprocess_item_malnet_dummy_encd(item):
+#     """
+#     Precompute node features(x) as MalNet originally doesn't have any node nor edge features
+#     """
+#     num_virtual_tokens = 1
+#     # edge_attr: [num_edges, edge_attr_dim], edge_index: [2, num_edges], x: [num_nodes, node_attr_dim]
+#     edge_attr, edge_index, x = item.edge_attr, item.edge_index, item.x
     
-    if hasattr(item, "num_nodes"):
-        N = item.num_nodes
-    else:
-        N = x.size(0)
+#     if hasattr(item, "num_nodes"):
+#         N = item.num_nodes
+#     else:
+#         N = x.size(0)
 
-    # Precompute node features x: [N, 5]
-    if x is None:
+#     # Precompute node features x: [N, 5]
+#     if x is None:
+#         transform_func = T.LocalDegreeProfile()
+#         item = transform_func(item)
+#         x = item.x.long()
+    
+#     if edge_attr is None:
+#         edge_attr = torch.zeros((edge_index.shape[1]), dtype=torch.long)
+
+#     in_degree = degree(edge_index[1], num_nodes=N)
+#     out_degree = degree(edge_index[0], num_nodes=N)
+
+
+#     # combine
+#     item.x = x
+#     item.in_degree = in_degree.long()
+#     item.out_degree = out_degree.long()
+#     # item.edge_attr = edge_attr.float()
+
+#     return item
+def preprocess_item_malnet_dummy_encd(item):
+    edge_index = item.edge_index
+    
+    # ===== 先获取原始节点数 =====
+    num_nodes_from_edge = int(edge_index.max().item()) + 1
+    
+    # 生成节点特征（使用原始节点数）
+    if item.x is None:
+        item.num_nodes = num_nodes_from_edge
         transform_func = T.LocalDegreeProfile()
         item = transform_func(item)
         x = item.x.long()
+    else:
+        x = item.x
     
-    if edge_attr is None:
-        edge_attr = torch.zeros((edge_index.shape[1]), dtype=torch.long)
-
-    in_degree = degree(edge_index[1], num_nodes=N)
-    out_degree = degree(edge_index[0], num_nodes=N)
-
-
-    # combine
+    # ===== 节点 ID 重映射（确保从 0 开始连续）=====
+    unique_nodes = torch.unique(edge_index)
+    num_nodes = len(unique_nodes)
+    
+    # 检查是否需要重映射
+    needs_remap = (unique_nodes.max() + 1 != num_nodes) or (unique_nodes.min() != 0)
+    
+    if needs_remap:
+        # 创建映射: 旧ID -> 新ID (0, 1, 2, ...)
+        max_id = unique_nodes.max()
+        node_mapping = torch.zeros(max_id + 1, dtype=torch.long)
+        node_mapping[unique_nodes] = torch.arange(num_nodes)
+        
+        # 重映射边索引
+        edge_index = node_mapping[edge_index]
+        
+        # 重新计算度数
+        in_degree = degree(edge_index[1], num_nodes=num_nodes)
+        out_degree = degree(edge_index[0], num_nodes=num_nodes)
+    else:
+        # 检查 item 是否有 in_degree，如果没有则重新计算
+        if hasattr(item, 'in_degree') and item.in_degree is not None:
+            in_degree = item.in_degree
+            out_degree = item.out_degree
+        else:
+            in_degree = degree(edge_index[1], num_nodes=num_nodes)
+            out_degree = degree(edge_index[0], num_nodes=num_nodes)
+    # =============================================
+    
+    # 确保特征矩阵与节点数匹配
+    if x.size(0) < num_nodes:
+        missing = num_nodes - x.size(0)
+        padding = torch.zeros(missing, x.shape[1], dtype=x.dtype)
+        x = torch.cat([x, padding], dim=0)
+    elif x.size(0) > num_nodes:
+        x = x[:num_nodes]
+    
     item.x = x
     item.in_degree = in_degree.long()
     item.out_degree = out_degree.long()
-    # item.edge_attr = edge_attr.float()
-
+    item.num_nodes = num_nodes
+    item.edge_index = edge_index
+    
     return item
-
 
 class MyGraphPropPredDataset(PygGraphPropPredDataset):
     def download(self):

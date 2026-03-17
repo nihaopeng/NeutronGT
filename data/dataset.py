@@ -254,7 +254,7 @@ class GraphormerDataset:
                     myargs = self.myargs,
                 ),
             )
-        elif self.dataset_name == "MalNet":
+        elif self.dataset_name in ["MalNet", "MalNetTiny"]:
             loader = DataLoader(
                 self.dataset_train,
                 batch_size=self.batch_size,
@@ -304,7 +304,7 @@ class GraphormerDataset:
                     myargs = self.myargs,
                 ),
             )
-        elif self.dataset_name == "MalNet":
+        elif self.dataset_name in ["MalNet", "MalNetTiny"]:
             loader = DataLoader(
                 self.dataset_val,
                 batch_size=self.batch_size,
@@ -356,7 +356,7 @@ class GraphormerDataset:
                     myargs = self.myargs,
                 ),
             )
-        elif self.dataset_name == "MalNet":
+        elif self.dataset_name in ["MalNet", "MalNetTiny"]:
             loader = DataLoader(
                 self.dataset_test,
                 batch_size=self.batch_size,

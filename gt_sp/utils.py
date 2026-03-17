@@ -476,6 +476,7 @@ def get_batch_reorder_blockize(args, x, y, idx_batch, rest_split_sizes, device, 
         y_i = torch.index_select(y_i, 0, sorted_indices)
     else:
         edge_index_i = edge_index_i_raw
+        attn_bias = None
     
 
     if idx_batch.shape[0] < seq_length:

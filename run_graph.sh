@@ -10,11 +10,10 @@ device_num=${#arr[@]}
 echo "显卡数量: ${device_num}，准备 Graph-level MalNet 分布式训练..."
 
 CUDA_VISIBLE_DEVICES=$1 python  main_sp_sparse_malnet.py \
-    --dataset MalNet \
+    --dataset MalNetTiny \
     --model graphormer \
     --seq_len 512 \
-    --batch_size 16 \ 
-    # 8
+    --batch_size 16 \
     --n_layers 4 \
     --hidden_dim 64 \
     --num_heads 8 \
