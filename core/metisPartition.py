@@ -66,10 +66,10 @@ class weightMetis_keepParent:
             csr_adjacency,eweight = self._extract_subgraph_csr_eweight(parent_partition)
             self.child_partitions.append(self.partition(parent_partition,csr_adjacency,eweight,self.partition_num_per_parent))
             # self.child_partitions = [[tensor,tensor,...],[tensor,tensor,...]]
-            # TODO:将另一个父分区中特征相似的并入。√
-            # TODO:将对外有联系的对端节点合并入分区。√
+            # TOD:将另一个父分区中特征相似的并入。√
+            # TOD:将对外有联系的对端节点合并入分区。√
         expanded_child_partitions = []
-        for parent_group in self.child_partitions:
+        for parent_id, parent_group in enumerate(self.child_partitions):
             expanded_group = []
             for part in parent_group:
                 halo_extended = torch.tensor([])
