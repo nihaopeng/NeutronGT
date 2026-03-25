@@ -48,6 +48,13 @@ class CoreAttention(nn.Module):
         self.num_heads = num_heads
         self.att_dropout = nn.Dropout(attention_dropout_rate)
         self.attention_dropout_rate = attention_dropout_rate
+        self.window_sparse_threshold = 0.15
+
+    def _window_density(self, edge_index, seq_len):
+        if edge_index is None or seq_len <= 0:
+            return 1.0
+        edge_count = int(edge_index.size(1))
+        return edge_count / float(seq_len * seq_len)
 
     # def full_flash_attention(self, q, k, v, attn_bias=None, mask=None):
     #     return flash_attn_func(q, k, v, self.attention_dropout_rate)
@@ -208,6 +215,12 @@ class CoreAttention(nn.Module):
             # 这个sparse的score还不清楚是否可以
             # x,score = self.sparse_attention_bias(q, k, v, edge_index, attn_bias)
             x,score = self.sparse_attention_bias(q, k, v, edge_index, attn_bias)
+        elif attn_type == "auto":
+            density = self._window_density(edge_index, s_len)
+            if density < getattr(self, 'window_sparse_threshold', 0.15):
+                x,score = self.sparse_attention_bias(q, k, v, edge_index, attn_bias)
+            else:
+                x,score = self.full_attention(k, q, v, attn_bias,pruning_mask=pruning_mask,mask=mask)
         elif attn_type == "flash":
             q = q.half()
             k = k.half()

@@ -206,6 +206,9 @@ def build_model(args, feature, device, num_classes, **kwargs):
              max_dist=args.max_dist,
              edge_dim=64
         ).to(device)
+    for module in model.modules():
+        if hasattr(module, "window_sparse_threshold"):
+            module.window_sparse_threshold = args.window_sparse_threshold
     return model
 
 @torch.no_grad()
