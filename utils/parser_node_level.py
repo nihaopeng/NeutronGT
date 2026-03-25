@@ -58,6 +58,14 @@ def parser_add_main_args(parser):
     parser.add_argument('--max_num_edges', type=int, default=512)
     parser.add_argument('--vis_dir', type=str, help='path of vis')
     parser.add_argument('--use_cache',default=0, type=int,choices=[0,1], help='path of vis')
+    parser.add_argument('--ppr_backend', type=str, default='torchgeo', choices=['torchgeo', 'fora'], help='PPR backend used before Metis partitioning')
+    parser.add_argument('--ppr_topk', type=int, default=5, help='Top-k neighbors kept per source node in PPR preprocessing')
+    parser.add_argument('--ppr_alpha', type=float, default=0.85, help='Teleport alpha used by the selected PPR backend')
+    parser.add_argument('--ppr_cache_dir', type=str, default=None, help='Optional cache directory for persisted PPR preprocessing results')
+    parser.add_argument('--fora_bin', type=str, default='./third_party/fora/build/fora', help='Path to the compiled FORA binary')
+    parser.add_argument('--fora_work_dir', type=str, default='./third_party/fora/data', help='Directory used to store FORA graph input and batch dumps')
+    parser.add_argument('--fora_epsilon', type=float, default=0.5, help='Relative error bound passed to FORA')
+    parser.add_argument('--fora_query_batch_size', type=int, default=0, help='Optional number of source nodes per FORA top-k batch; 0 means all nodes in one batch')
     
     # distributed args
     parser.add_argument('--rank', type=int, default=None,

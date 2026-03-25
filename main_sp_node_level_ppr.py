@@ -27,7 +27,7 @@ from gt_sp.reducer import sync_params_and_buffers, Reducer
 from gt_sp.evaluate import calc_acc
 from gt_sp.utils import LossStagnationDetector, compute_graphormer_spatial_pos_only, get_node_degrees, random_split_idx
 from utils.parser_node_level import parser_add_main_args
-from core.pprPartition import add_isolated_connections, personal_pagerank,build_adj_fromat
+from core.pprPartition import add_isolated_connections, personal_pagerank, build_adj_fromat
 from utils.vis import vis_interface
 import utils.vis as vis
 import utils.logger as logger
@@ -90,7 +90,21 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,topk=50,n_parts
     # =================== ppr partition =========================
     # partitioned_results = []
     # if args.rank == 0:
-    sorted_ppr_matrix = personal_pagerank(edge_index,0.85,topk=topk)
+    sorted_ppr_matrix = personal_pagerank(
+        edge_index,
+        alpha=args.ppr_alpha,
+        topk=topk,
+        backend=args.ppr_backend,
+        num_nodes=N,
+        dataset_name=args.dataset,
+        dataset_dir=args.dataset_dir,
+        ppr_cache_dir=args.ppr_cache_dir,
+        fora_bin=args.fora_bin,
+        fora_work_dir=args.fora_work_dir,
+        fora_epsilon=args.fora_epsilon,
+        fora_query_batch_size=args.fora_query_batch_size,
+        device='cpu'
+    )
     sorted_ppr_matrix = add_isolated_connections(sorted_ppr_matrix,N,connect_prob=connect_prob)
     csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
     wm = weightMetis_keepParent(
@@ -126,7 +140,7 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,topk=50,n_parts
         sorted_ppr_matrix=sorted_ppr_matrix,
         wm=wm)
 
-def build_model(args,feature,device,y,**kwargs):
+def build_model(args, feature, device, num_classes, **kwargs):
     graph_in_degree = kwargs["graph_in_degree"]
     graph_out_degree = kwargs["graph_out_degree"]
     if args.model == "graphormer":
@@ -135,7 +149,7 @@ def build_model(args,feature,device,y,**kwargs):
             num_heads=args.num_heads,
             input_dim=feature.shape[1],
             hidden_dim=args.hidden_dim,
-            output_dim=y.max().item()+1,
+            output_dim=num_classes,
             attn_bias_dim=args.attn_bias_dim,
             dropout_rate=args.dropout_rate,
             input_dropout_rate=args.input_dropout_rate,
@@ -156,7 +170,7 @@ def build_model(args,feature,device,y,**kwargs):
              num_heads=args.num_heads,
              input_dim=feature.shape[1],
              hidden_dim=args.hidden_dim,
-             output_dim=y.max().item()+1,
+             output_dim=num_classes,
              attn_bias_dim=args.attn_bias_dim,
              dropout_rate=args.dropout_rate,
              input_dropout_rate=args.input_dropout_rate,
@@ -177,7 +191,7 @@ def build_model(args,feature,device,y,**kwargs):
              num_heads=args.num_heads,
              input_dim=feature.shape[1],
              hidden_dim=args.hidden_dim,
-             output_dim=y.max().item()+1,
+             output_dim=num_classes,
              attn_bias_dim=args.attn_bias_dim,
              dropout_rate=args.dropout_rate,
              input_dropout_rate=args.input_dropout_rate,
@@ -371,14 +385,20 @@ def main():
     if args.rank == 0:
         os.makedirs(args.model_dir, exist_ok=True)
     
-    feature = torch.load(args.dataset_dir + args.dataset + '/x.pt')
+    feature = torch.load(args.dataset_dir + args.dataset + '/x.pt', mmap=True)
     y = torch.load(args.dataset_dir + args.dataset + '/y.pt')
     edge_index = torch.load(args.dataset_dir + args.dataset + '/edge_index.pt')
     N = feature.shape[0]
 
     if args.dataset == 'pokec':
         y = torch.clamp(y, min=0) 
-    split_idx = random_split_idx(y, frac_train=0.6, frac_valid=0.2, frac_test=0.2, seed=args.seed)
+    if args.dataset == 'ogbn-papers100M':
+        split_idx = torch.load(args.dataset_dir + args.dataset + '/split_idx.pt')
+        split_idx['train'] = torch.as_tensor(split_idx['train'], dtype=torch.long)
+        split_idx['valid'] = torch.as_tensor(split_idx['valid'], dtype=torch.long)
+        split_idx['test'] = torch.as_tensor(split_idx['test'], dtype=torch.long)
+    else:
+        split_idx = random_split_idx(y, frac_train=0.6, frac_valid=0.2, frac_test=0.2, seed=args.seed)
 
     if args.rank == 0:
         print(args)
@@ -389,6 +409,10 @@ def main():
     seq_parallel_world_size = get_sequence_parallel_world_size() if sequence_parallel_is_initialized() else 1
 
     train_idx = split_idx['train']
+    if args.dataset == 'ogbn-papers100M':
+        num_classes = int(y[train_idx].max().item()) + 1
+    else:
+        num_classes = int(y.max().item()) + 1
     
     if args.rank == 0:
         flatten_train_idx = train_idx.to('cuda')
@@ -421,13 +445,20 @@ def main():
 
     structInfo:StructInfo = build_graph_struct_info(
             args,N,edge_index,feature,seq_parallel_world_size,
-            topk=5,
+            topk=args.ppr_topk,
             n_parts=50,
             related_nodes_topk_rate=2
         )
     wm:weightMetis_keepParent = structInfo.wm
 
-    model = build_model(args,feature,device,y,graph_in_degree=structInfo.graph_in_degree,graph_out_degree=structInfo.graph_out_degree)
+    model = build_model(
+        args,
+        feature,
+        device,
+        num_classes,
+        graph_in_degree=structInfo.graph_in_degree,
+        graph_out_degree=structInfo.graph_out_degree
+    )
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.peak_lr, weight_decay=args.weight_decay)
     lr_scheduler = PolynomialDecayLR(
