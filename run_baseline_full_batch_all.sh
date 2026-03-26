@@ -21,14 +21,20 @@ echo "🖥️  系统配置: 检测到 $device_num 张 GPU (可用设备: $DEVIC
 echo "================================================================="
 
 CURRENT_DATE=$(date +"%Y%m%d_%H%M")
-mkdir -p experiment_logs
+mkdir -p experiment_logs_new
 
 # "ogbn-papers100M"
-DATASETS=("ogbn-arxiv")
+DATASETS=(
+    "ogbn-products"
+    "AmazonProducts"
+    "ogbn-papers100M"
+    "ogbn-arxiv"
+)
 
 # 模型配置：格式为 "日志代号|传入的--model名|n_layers|hidden_dim|num_heads"
 # 注: 根据你的测试脚本，ffn_dim 通常与 hidden_dim 保持一致，脚本中会自动关联
 MODELS=(
+    "Graphormer-Slim|graphormer|4|64|8"
     "Graphormer-Large|graphormer|12|768|32"
     "GT|gt|4|128|8"
 )
@@ -42,8 +48,8 @@ ATTENTIONS=(
 
 # 固定的训练超参数
 SEQ_LEN=64000
-EPOCHS=1000
-MASTER_PORT=8100
+EPOCHS=200
+MASTER_PORT=8097
 
 
 for dataset in "${DATASETS[@]}"; do
@@ -59,7 +65,7 @@ for dataset in "${DATASETS[@]}"; do
             IFS='|' read -r strategy_alias attn_type use_reorder <<< "$attn_info"
 
             # 动态生成日志文件名
-            LOG_FILE="experiment_logs/${dataset}_${model_alias}_${strategy_alias}_${CURRENT_DATE}.log"
+            LOG_FILE="experiment_logs_new/${dataset}_${model_alias}_${strategy_alias}_${CURRENT_DATE}.log"
 
             # 动态处理 --reorder 开关标志
             REORDER_FLAG=""
@@ -104,4 +110,4 @@ for dataset in "${DATASETS[@]}"; do
     done
 done
 
-echo "所有实验评测已完毕！请检查 experiment_logs 目录获取详细指标。"
+echo "所有实验评测已完毕！请检查 experiment_logs_new 目录获取详细指标。"

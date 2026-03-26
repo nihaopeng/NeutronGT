@@ -175,6 +175,8 @@ def main():
             power=1.0)
     
     val_acc_list, test_acc_list, epoch_t_list = [], [], []
+    epoch_full_t_list = []
+    epoch_reorder_t_list = []
     epoch_cpu2gpu_t_list = []
     best_model, best_val, best_test = None, float('-inf'), float('-inf')
 
@@ -189,7 +191,12 @@ def main():
         model.train()
         
         loss_list, iter_t_list = [], []
+        iter_reorder_t_list = []
         iter_cpu2gpu_t_list = []
+        torch.cuda.synchronize()
+        if seq_parallel_world_size > 1:
+            dist.barrier(group=get_sequence_parallel_group())
+        epoch_full_t0 = time.time()
 
         if args.attn_type == "hybrid":
             percent_list  = [(i + 1) / args.switch_freq for i in range(args.switch_freq)]
@@ -201,8 +208,10 @@ def main():
 
             t0 = time.time()
             packed_data = get_batch_reorder_blockize(args, feature, y, idx_i.to("cpu"), sub_split_seq_lens, device, edge_index, N, k=8, block_size=16, beta_coeffi=beta_coeffi_list[beta_idx])
+            t_reorder_end = time.time()
 
             x_i, y_i, edge_index_i, attn_bias = packed_data
+            t_transfer_start = time.time()
             if attn_bias is not None:
                 x_i, y_i, edge_index_i, attn_bias = x_i.to(device), y_i.to(device), edge_index_i.to(device), attn_bias.to(device)
             else:
@@ -245,18 +254,34 @@ def main():
             optimizer.step()  
             torch.cuda.synchronize()   
             t2 = time.time() 
-            iter_cpu2gpu_t_list.append(t1 - t0) 
+            iter_reorder_t_list.append(t_reorder_end - t0)
+            iter_cpu2gpu_t_list.append(t1 - t_transfer_start)
             iter_t_list.append(t2 - t1) 
             
      
+        torch.cuda.synchronize()
+        if seq_parallel_world_size > 1:
+            dist.barrier(group=get_sequence_parallel_group())
+        epoch_full_t1 = time.time()
         loss_list.append(loss.item()) 
         lr_scheduler.step()
         
-        if epoch > 4 and args.rank == 0:  
+        if epoch > 0 and args.rank == 0:  
             epoch_t_list.append(np.sum(iter_t_list))
+            epoch_full_t_list.append(epoch_full_t1 - epoch_full_t0)
+            epoch_reorder_t_list.append(np.sum(iter_reorder_t_list))
             epoch_cpu2gpu_t_list.append(np.sum(iter_cpu2gpu_t_list))
             print("------------------------------------------------------------------------------------")
-            print("Epoch: {:03d}, Loss: {:.4f}, Epoch Time: {:.3f}s, Trans Time: {:.3f}s".format(epoch, np.mean(loss_list), np.mean(epoch_t_list),np.mean(epoch_cpu2gpu_t_list)))
+            print(
+                "Epoch: {:03d}, Loss: {:.4f}, Epoch Time: {:.3f}s, Full Epoch Time: {:.3f}s, Batch Prep Time: {:.3f}s, CPU->GPU Time: {:.3f}s".format(
+                    epoch,
+                    np.mean(loss_list),
+                    np.mean(epoch_t_list),
+                    np.mean(epoch_full_t_list),
+                    np.mean(epoch_reorder_t_list),
+                    np.mean(epoch_cpu2gpu_t_list),
+                )
+            )
             print("------------------------------------------------------------------------------------")
 
         if args.rank == 0 and epoch % 5 == 0:   
@@ -267,8 +292,19 @@ def main():
             t5 = time.time()
             print("------------------------------------------------------------------------------------")
             print(f'Eval time {t5-t4}s')
-            print("Epoch: {:03d}, Loss: {:4f}, Train acc: {:.2%}, Val acc: {:.2%}, Test acc: {:.2%}, Epoch Time: {:.3f}s".format(
-                epoch, np.mean(loss_list), train_acc, val_acc, test_acc, np.mean(epoch_t_list)))
+            print(
+                "Epoch: {:03d}, Loss: {:4f}, Train acc: {:.2%}, Val acc: {:.2%}, Test acc: {:.2%}, Epoch Time: {:.3f}s, Full Epoch Time: {:.3f}s, Reorder Time: {:.3f}s, CPU->GPU Time: {:.3f}s".format(
+                    epoch,
+                    np.mean(loss_list),
+                    train_acc,
+                    val_acc,
+                    test_acc,
+                    np.mean(epoch_t_list) if epoch_t_list else np.sum(iter_t_list),
+                    np.mean(epoch_full_t_list) if epoch_full_t_list else (epoch_full_t1 - epoch_full_t0),
+                    np.mean(epoch_reorder_t_list) if epoch_reorder_t_list else np.sum(iter_reorder_t_list),
+                    np.mean(epoch_cpu2gpu_t_list) if epoch_cpu2gpu_t_list else np.sum(iter_cpu2gpu_t_list),
+                )
+            )
             print("------------------------------------------------------------------------------------")
             
             if val_acc > best_val:

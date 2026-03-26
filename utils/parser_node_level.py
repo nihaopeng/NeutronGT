@@ -41,7 +41,10 @@ def parser_add_main_args(parser):
     parser.add_argument('--switch_freq', type=int, default=5)
     parser.add_argument('--reorder', action='store_true', default=False,
                         help='TorchGT mode')
-    
+    parser.add_argument('--full_batch', action='store_true', default=False,
+                        help='use all graph vertices in each training step and compute loss on train split only')
+
+
     # distributed args
     parser.add_argument('--rank', type=int, default=None,
                        help='rank passed from distributed launcher.')

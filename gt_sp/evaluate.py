@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
-from gt_sp.utils import get_batch, gen_sub_edge_index
+from gt_sp.utils import get_batch, gen_sub_edge_index, fix_edge_index, reformat_graph
 from gt_sp.initialize import (
     get_sequence_parallel_world_size,
     set_last_batch_global_token_indices
@@ -16,6 +16,54 @@ def calc_acc(y_true, y_pred):
     acc_list.append(float(np.sum(correct)) / len(correct))
 
     return sum(acc_list) / len(acc_list)
+
+
+@torch.no_grad()
+def sparse_eval_gpu_full_batch(args, model, x, y, sub_idx, edge_index, device):
+    model.eval()
+
+    x_i = x
+    y_i = y
+    edge_index_i = edge_index
+    eval_idx = sub_idx.clone().to(torch.long)
+    attn_bias = None
+
+    if args.model == "graphormer":
+        edge_index_i = fix_edge_index(edge_index_i, x_i.shape[0])
+
+    if args.reorder:
+        edge_index_i, sorted_indices = reformat_graph(edge_index_i, 8, 16)
+        if args.model == "graphormer":
+            sorted_indices = sorted_indices[sorted_indices != 0]
+            sorted_indices = sorted_indices - 1
+
+        x_i = torch.index_select(x_i, 0, sorted_indices)
+        y_i = torch.index_select(y_i, 0, sorted_indices)
+
+        inverse_perm = torch.empty_like(sorted_indices)
+        inverse_perm[sorted_indices] = torch.arange(sorted_indices.numel(), dtype=sorted_indices.dtype)
+        eval_idx = inverse_perm[eval_idx]
+
+    x_i = x_i.to(device)
+    y_i = y_i.to(device)
+    edge_index_i = edge_index_i.to(device)
+
+    if args.attn_type == "full":
+        attn_type = "full"
+    elif args.attn_type == "flash":
+        attn_type = "flash"
+    else:
+        attn_type = "sparse"
+
+    pred = model(x_i, attn_bias, edge_index_i, attn_type=attn_type)
+    pred = pred.argmax(1)
+
+    acc = calc_acc(y_i[eval_idx], pred[eval_idx])
+
+    del x_i, y_i, edge_index_i
+    torch.cuda.empty_cache()
+
+    return acc
 
 
 @torch.no_grad()
@@ -322,6 +370,9 @@ def sparse_eval_gpu(args, model, x, y, sub_idx, attn_bias, edge_index, device):
     Evaluate the model on train/valid/test subset of nodes in a batched way on GPU.
     lager seq_len will be slower 
     """
+    if getattr(args, "full_batch", False):
+        return sparse_eval_gpu_full_batch(args, model, x, y, sub_idx, edge_index, device)
+
     model.eval()
 
     y_true = []
