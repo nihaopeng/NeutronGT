@@ -31,3 +31,5 @@ core/*
 data
 data/
 data/*
+
+third_party
