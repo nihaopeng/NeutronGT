@@ -119,10 +119,8 @@ class CoreAttention(nn.Module):
     def sparse_attention_bias(self, q, k, v, edge_index, attn_bias):
         # q, k, v: [b, s, np, hn]  e: [total_edges, n, hn], edge_index: [2, total_edges], attn_bias: [b, n, s+1, s+1]
         batch_size, node_num = k.size(0), k.size(1)
-        if self.training:
-            num_heads = self.num_attention_heads_per_partition
-        else:
-            num_heads = self.num_heads
+        
+        num_heads = self.num_heads
         
         # Reshaping into [total_s, np, hn] to
         # get projections for multi-head attention
