@@ -1,4 +1,7 @@
+import math
+import multiprocessing as mp
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -106,12 +109,91 @@ def _format_alpha(alpha: float) -> str:
     return str(alpha).replace('.', 'p')
 
 
+def _format_ratio(ratio: float) -> str:
+    return str(ratio).replace('.', 'p')
+
+
+def _query_cache_suffix(query_policy: str, query_ratio: float) -> str:
+    if query_policy == 'high_degree_subset':
+        return f'_hdtop{_format_ratio(query_ratio)}'
+    return ''
+
+
+def _estimate_ppr_result_budget(num_query_nodes: int, topk: int, memory_budget_gb: float) -> dict[str, float]:
+    estimated_edges = int(num_query_nodes) * int(topk)
+    estimated_bytes = estimated_edges * 40
+    budget_bytes = int(memory_budget_gb * (1024 ** 3)) if memory_budget_gb and memory_budget_gb > 0 else 0
+    recommended_topk_max = None
+    if budget_bytes > 0 and num_query_nodes > 0:
+        recommended_topk_max = max(1, budget_bytes // (40 * int(num_query_nodes)))
+    return {
+        'estimated_edges': estimated_edges,
+        'estimated_bytes': estimated_bytes,
+        'budget_bytes': budget_bytes,
+        'recommended_topk_max': recommended_topk_max,
+    }
+
+
+def _select_query_nodes_by_out_degree(num_nodes: int, high_degree_ratio: float, rowptr=None, col=None, edge_index=None) -> tuple[list[int], int]:
+    if not (0 < float(high_degree_ratio) <= 1.0):
+        raise ValueError(f'ppr_high_degree_ratio must be in (0, 1], got {high_degree_ratio}')
+    if float(high_degree_ratio) >= 1.0:
+        return list(range(int(num_nodes))), 0
+    target_count = max(1, int(math.ceil(int(num_nodes) * float(high_degree_ratio))))
+    if rowptr is not None:
+        rowptr = rowptr.detach().cpu().long()
+        out_degree = rowptr[1:] - rowptr[:-1]
+    else:
+        if edge_index is None:
+            raise ValueError('Need rowptr or edge_index to select high-degree query nodes')
+        edge_index = edge_index.detach().cpu().long()
+        out_degree = torch.bincount(edge_index[0], minlength=int(num_nodes))
+    top_values, top_indices = torch.topk(out_degree, k=target_count, largest=True, sorted=True)
+    min_selected_degree = int(top_values[-1].item()) if top_values.numel() > 0 else 0
+    return top_indices.cpu().tolist(), min_selected_degree
+
+
+def _link_or_copy(src: Path, dst: Path):
+    if dst.exists() or dst.is_symlink():
+        return
+    try:
+        dst.symlink_to(src.resolve())
+        return
+    except OSError:
+        pass
+    try:
+        os.link(src, dst)
+        return
+    except OSError as exc:
+        raise RuntimeError(f'Failed to create shared link for {src} -> {dst}. Copy fallback is disabled to avoid duplicate storage.') from exc
+
+
+def _prepare_fora_batch_dir(base_graph_dir: Path, batch_graph_dir: Path):
+    _ensure_dir(batch_graph_dir)
+    _link_or_copy(base_graph_dir / 'graph.txt', batch_graph_dir / 'graph.txt')
+    _link_or_copy(base_graph_dir / 'attribute.txt', batch_graph_dir / 'attribute.txt')
+
+
+def _run_fora_topk_worker(task: dict) -> tuple[int, str]:
+    _run_fora_topk(
+        fora_bin=Path(task['fora_bin']),
+        prefix_dir=Path(task['prefix_dir']),
+        dataset_name=task['dataset_name'],
+        alpha=task['alpha'],
+        topk=task['topk'],
+        epsilon=task['epsilon'],
+        query_nodes=task['query_nodes'],
+        dump_path=Path(task['dump_path']),
+    )
+    return int(task['batch_start']), task['dump_path']
+
+
 def _ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def _resolve_cache_path(dataset_dir, dataset_name, ppr_cache_dir, backend: str, topk: int, alpha: float) -> Path:
+def _resolve_cache_path(dataset_dir, dataset_name, ppr_cache_dir, backend: str, topk: int, alpha: float, query_policy: str = 'all', query_ratio: float = 1.0) -> Path:
     if ppr_cache_dir is not None:
         cache_root = Path(ppr_cache_dir)
     elif dataset_dir is not None and dataset_name is not None:
@@ -119,7 +201,8 @@ def _resolve_cache_path(dataset_dir, dataset_name, ppr_cache_dir, backend: str, 
     else:
         cache_root = REPO_ROOT / 'cache'
     _ensure_dir(cache_root)
-    return cache_root / f'ppr_{backend}_topk{topk}_alpha{_format_alpha(alpha)}.pt'
+    cache_suffix = _query_cache_suffix(query_policy, query_ratio)
+    return cache_root / f'ppr_{backend}{cache_suffix}_topk{topk}_alpha{_format_alpha(alpha)}.pt'
 
 
 def export_graph_for_fora(edge_index: torch.Tensor, num_nodes: int, output_dir) -> tuple[Path, Path, Path]:
@@ -220,7 +303,19 @@ def _run_fora_topk(fora_bin: Path, prefix_dir: Path, dataset_name: str, alpha: f
         '--k', str(topk),
         '--dump_topk_path', str(dump_path),
     ]
-    subprocess.run(cmd, check=True, cwd=fora_bin.parent)
+    completed = subprocess.run(
+        cmd,
+        check=False,
+        cwd=fora_bin.parent,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if completed.returncode != 0:
+        stderr = (completed.stderr or '').strip()
+        if stderr:
+            print(f'FORA batch failed for dataset={dataset_name}: {stderr}')
+        raise subprocess.CalledProcessError(completed.returncode, cmd, output=None, stderr=completed.stderr)
 
 
 def personal_pagerank_torchgeo(edge_index, alpha, topk=100, max_iter: int = 100, device='cuda', rowptr=None, col=None) -> tuple:
@@ -250,16 +345,38 @@ def personal_pagerank_torchgeo(edge_index, alpha, topk=100, max_iter: int = 100,
     return topk_indices, topk_values
 
 
-def personal_pagerank_fora(edge_index, alpha, topk=100, max_iter: int = 100, device='cuda', num_nodes=None, dataset_name=None, dataset_dir=None, ppr_cache_dir=None, fora_bin=None, fora_work_dir=None, fora_epsilon: float = 0.5, fora_query_batch_size: int = 0, rowptr=None, col=None) -> tuple:
+def personal_pagerank_fora(edge_index, alpha, topk=100, max_iter: int = 100, device='cuda', num_nodes=None, dataset_name=None, dataset_dir=None, ppr_cache_dir=None, fora_bin=None, fora_work_dir=None, fora_epsilon: float = 0.5, fora_query_batch_size: int = 0, rowptr=None, col=None, query_nodes=None, ppr_high_degree_ratio: float = 1.0, fora_num_workers: int = 1, ppr_result_budget_gb: float = 0.0) -> tuple:
     if num_nodes is None:
         raise ValueError('FORA backend requires num_nodes')
     if dataset_name is None:
         raise ValueError('FORA backend requires dataset_name')
 
-    cache_path = _resolve_cache_path(dataset_dir, dataset_name, ppr_cache_dir, 'fora', topk, alpha)
+    query_policy = 'high_degree_subset' if float(ppr_high_degree_ratio) < 1.0 else 'all'
+    cache_path = _resolve_cache_path(dataset_dir, dataset_name, ppr_cache_dir, 'fora', topk, alpha, query_policy=query_policy, query_ratio=float(ppr_high_degree_ratio))
     if cache_path.exists():
         cached = torch.load(cache_path, map_location='cpu')
         return cached['edge_index'].to(device), cached['edge_values'].to(device)
+
+    if query_nodes is None:
+        query_nodes, min_selected_degree = _select_query_nodes_by_out_degree(
+            num_nodes=int(num_nodes),
+            high_degree_ratio=float(ppr_high_degree_ratio),
+            rowptr=rowptr,
+            col=col,
+            edge_index=edge_index,
+        )
+    else:
+        query_nodes = [int(node) for node in query_nodes]
+        min_selected_degree = 0
+
+    if not query_nodes:
+        raise ValueError('No FORA query nodes selected')
+
+    budget_info = _estimate_ppr_result_budget(len(query_nodes), topk, float(ppr_result_budget_gb))
+    print(f"FORA query mode: {query_policy}, query_nodes={len(query_nodes)}, min_selected_degree={min_selected_degree}")
+    print(f"Estimated PPR result edges: {budget_info['estimated_edges']}, estimated size: {budget_info['estimated_bytes'] / (1024 ** 3):.3f} GB")
+    if budget_info['recommended_topk_max'] is not None:
+        print(f"Memory budget: {float(ppr_result_budget_gb):.3f} GB, recommended topk <= {budget_info['recommended_topk_max']}")
 
     fora_bin_path = build_fora_if_needed(fora_bin)
     fora_prefix_dir = _ensure_dir(Path(fora_work_dir).expanduser().resolve() if fora_work_dir is not None else DEFAULT_FORA_WORK_DIR.resolve())
@@ -271,25 +388,43 @@ def personal_pagerank_fora(edge_index, alpha, topk=100, max_iter: int = 100, dev
             raise ValueError('FORA backend requires edge_index or CSR inputs')
         export_graph_for_fora(edge_index=edge_index, num_nodes=num_nodes, output_dir=graph_dir)
 
-    all_query_nodes = list(range(int(num_nodes)))
-    batch_size = int(fora_query_batch_size) if fora_query_batch_size else int(num_nodes)
+    batch_size = int(fora_query_batch_size) if fora_query_batch_size else len(query_nodes)
     batch_size = max(1, batch_size)
+    batch_tasks = []
+    batch_dump_paths = []
+    for batch_start in range(0, len(query_nodes), batch_size):
+        query_nodes_batch = query_nodes[batch_start: batch_start + batch_size]
+        batch_dataset_name = f'{dataset_name}__batch_{batch_start}'
+        batch_graph_dir = _ensure_dir(fora_prefix_dir / batch_dataset_name)
+        _prepare_fora_batch_dir(graph_dir, batch_graph_dir)
+        dump_path = batch_graph_dir / f'topk_batch_{batch_start}.tsv'
+        batch_tasks.append({
+            'batch_start': batch_start,
+            'fora_bin': str(fora_bin_path),
+            'prefix_dir': str(fora_prefix_dir),
+            'dataset_name': batch_dataset_name,
+            'alpha': float(alpha),
+            'topk': int(topk),
+            'epsilon': float(fora_epsilon),
+            'query_nodes': query_nodes_batch,
+            'dump_path': str(dump_path),
+        })
+        batch_dump_paths.append((batch_start, dump_path))
+
+    worker_count = max(1, int(fora_num_workers))
+    worker_count = min(worker_count, len(batch_tasks))
+    print(f"FORA batch schedule: batch_size={batch_size}, num_batches={len(batch_tasks)}, num_workers={worker_count}")
+    if worker_count == 1:
+        for task in batch_tasks:
+            _run_fora_topk_worker(task)
+    else:
+        ctx = mp.get_context('spawn')
+        with ctx.Pool(processes=worker_count) as pool:
+            pool.map(_run_fora_topk_worker, batch_tasks)
 
     edge_parts = []
     value_parts = []
-    for batch_start in range(0, len(all_query_nodes), batch_size):
-        query_nodes = all_query_nodes[batch_start: batch_start + batch_size]
-        dump_path = graph_dir / f'topk_batch_{batch_start}.tsv'
-        _run_fora_topk(
-            fora_bin=fora_bin_path,
-            prefix_dir=fora_prefix_dir,
-            dataset_name=dataset_name,
-            alpha=alpha,
-            topk=topk,
-            epsilon=fora_epsilon,
-            query_nodes=query_nodes,
-            dump_path=dump_path,
-        )
+    for batch_start, dump_path in sorted(batch_dump_paths, key=lambda item: item[0]):
         batch_edge_index, batch_edge_values = _parse_fora_dump(dump_path, device='cpu')
         edge_parts.append(batch_edge_index)
         value_parts.append(batch_edge_values)
@@ -301,11 +436,18 @@ def personal_pagerank_fora(edge_index, alpha, topk=100, max_iter: int = 100, dev
         edge_index_out = torch.empty((2, 0), dtype=torch.long)
         edge_values_out = torch.empty((0,), dtype=torch.float32)
 
-    torch.save({'edge_index': edge_index_out, 'edge_values': edge_values_out}, cache_path)
+    torch.save({
+        'edge_index': edge_index_out,
+        'edge_values': edge_values_out,
+        'query_mode': query_policy,
+        'query_ratio': float(ppr_high_degree_ratio),
+        'num_query_nodes': int(len(query_nodes)),
+        'query_policy': query_policy,
+    }, cache_path)
     return edge_index_out.to(device), edge_values_out.to(device)
 
 
-def personal_pagerank(edge_index, alpha, topk=100, max_iter: int = 100, device='cuda', backend='torchgeo', num_nodes=None, dataset_name=None, dataset_dir=None, ppr_cache_dir=None, fora_bin=None, fora_work_dir=None, fora_epsilon: float = 0.5, fora_query_batch_size: int = 0, rowptr=None, col=None) -> tuple:
+def personal_pagerank(edge_index, alpha, topk=100, max_iter: int = 100, device='cuda', backend='torchgeo', num_nodes=None, dataset_name=None, dataset_dir=None, ppr_cache_dir=None, fora_bin=None, fora_work_dir=None, fora_epsilon: float = 0.5, fora_query_batch_size: int = 0, rowptr=None, col=None, ppr_high_degree_ratio: float = 1.0, fora_num_workers: int = 1, ppr_result_budget_gb: float = 0.0) -> tuple:
     if backend == 'torchgeo':
         return personal_pagerank_torchgeo(edge_index=edge_index, alpha=alpha, topk=topk, max_iter=max_iter, device=device, rowptr=rowptr, col=col)
     if backend == 'fora':
@@ -325,6 +467,9 @@ def personal_pagerank(edge_index, alpha, topk=100, max_iter: int = 100, device='
             fora_query_batch_size=fora_query_batch_size,
             rowptr=rowptr,
             col=col,
+            ppr_high_degree_ratio=ppr_high_degree_ratio,
+            fora_num_workers=fora_num_workers,
+            ppr_result_budget_gb=ppr_result_budget_gb,
         )
     raise ValueError(f'Unsupported ppr backend: {backend}')
 
@@ -341,12 +486,15 @@ def metis_partition(csr_adjacency: pymetis.CSRAdjacency, eweights: list[list], n
     return [torch.tensor(part, dtype=torch.long) for part in partitions]
 
 
-def build_adj_fromat(sorted_ppr_matrix):
+def build_adj_fromat(sorted_ppr_matrix, num_nodes: Optional[int] = None):
     print('======start adj format building===========')
     edge_index, ppr_val = sorted_ppr_matrix
     edge_index, ppr_val = edge_index.to('cpu'), ppr_val.to('cpu')
     assert edge_index.shape[0] == 2
-    num_nodes = int(edge_index.max().item()) + 1
+    if num_nodes is None:
+        num_nodes = int(edge_index.max().item()) + 1
+    else:
+        num_nodes = int(num_nodes)
     src, dst = edge_index[0], edge_index[1]
     u = torch.min(src, dst)
     v = torch.max(src, dst)

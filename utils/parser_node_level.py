@@ -67,6 +67,9 @@ def parser_add_main_args(parser):
     parser.add_argument('--fora_work_dir', type=str, default='./third_party/fora/data', help='Directory used to store FORA graph input and batch dumps')
     parser.add_argument('--fora_epsilon', type=float, default=0.5, help='Relative error bound passed to FORA')
     parser.add_argument('--fora_query_batch_size', type=int, default=0, help='Optional number of source nodes per FORA top-k batch; 0 means all nodes in one batch')
+    parser.add_argument('--fora_num_workers', type=int, default=1, help='Number of Python worker processes used to run FORA batches in parallel; 1 keeps serial execution')
+    parser.add_argument('--ppr_high_degree_ratio', type=float, default=1.0, help='Only run PPR for the top ratio of highest out-degree nodes; 1.0 means all nodes')
+    parser.add_argument('--ppr_result_budget_gb', type=float, default=0.0, help='Optional memory budget in GB used to estimate a safe upper bound for ppr_topk before FORA runs')
     
     # distributed args
     parser.add_argument('--rank', type=int, default=None,

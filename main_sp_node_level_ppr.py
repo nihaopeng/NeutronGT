@@ -31,6 +31,7 @@ from core.pprPartition import GraphTopology, add_isolated_connections, build_adj
 from utils.vis import vis_interface
 import utils.vis as vis
 import utils.logger as logger
+from types import SimpleNamespace
 
 class StructInfo:
     def __init__(self,**kwargs) -> None:
@@ -73,6 +74,8 @@ def broadcast_window_state(args, structInfo: StructInfo, feature: torch.Tensor, 
             "sub_edge_index_for_partition_results": structInfo.wm.sub_edge_index_for_partition_results,
             "dup_nodes_per_partition": structInfo.wm.dup_nodes_per_partition,
             "spatial_pos_by_pid": structInfo.spatial_pos_by_pid,
+            "graph_in_degree": structInfo.graph_in_degree,
+            "graph_out_degree": structInfo.graph_out_degree,
         }
     dist.broadcast_object_list(payload, src=0)
     state = payload[0]
@@ -81,6 +84,8 @@ def broadcast_window_state(args, structInfo: StructInfo, feature: torch.Tensor, 
         structInfo.wm.sub_edge_index_for_partition_results = state["sub_edge_index_for_partition_results"]
         structInfo.wm.dup_nodes_per_partition = state["dup_nodes_per_partition"]
         structInfo.spatial_pos_by_pid = state["spatial_pos_by_pid"]
+        structInfo.graph_in_degree = state["graph_in_degree"]
+        structInfo.graph_out_degree = state["graph_out_degree"]
 
     if args.use_cache:
         build_dup_cache_metadata(structInfo.wm, feature, device)
@@ -106,9 +111,12 @@ def build_graph_struct_info(args, N, graph_topology: GraphTopology, feature, wor
         device='cpu',
         rowptr=graph_topology.rowptr,
         col=graph_topology.col,
+        ppr_high_degree_ratio=args.ppr_high_degree_ratio,
+        fora_num_workers=args.fora_num_workers,
+        ppr_result_budget_gb=args.ppr_result_budget_gb,
     )
     sorted_ppr_matrix = add_isolated_connections(sorted_ppr_matrix,N,connect_prob=connect_prob)
-    csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
+    csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix, num_nodes=N)
     edge_index = graph_topology.get_edge_index()
     wm = weightMetis_keepParent(
         csr_adjacency=csr_adjacency, 
@@ -507,14 +515,34 @@ def main():
     set_global_token_indices(global_token_indices)
     set_last_batch_global_token_indices(global_token_indices_last_batch)
 
-    preprocess_t0 = time.time()
-    structInfo:StructInfo = build_graph_struct_info(
-            args, N, graph_topology, feature, seq_parallel_world_size,
-            topk=args.ppr_topk,
-            n_parts=50,
-            related_nodes_topk_rate=2
+    preprocess_time_local = 0.0
+    if args.rank == 0:
+        preprocess_t0 = time.time()
+        structInfo:StructInfo = build_graph_struct_info(
+                args, N, graph_topology, feature, seq_parallel_world_size,
+                topk=args.ppr_topk,
+                n_parts=50,
+                related_nodes_topk_rate=2
+            )
+        preprocess_time_local = time.time() - preprocess_t0
+        ppr_tuple = (structInfo.sorted_ppr_matrix[0], structInfo.sorted_ppr_matrix[1])
+        if args.struct_enc=="True":
+            structInfo.spatial_pos_by_pid,_ = compute_graphormer_spatial_pos_only(ppr_tuple, structInfo.wm.partitioned_results, N, max_dist=args.max_dist)
+    else:
+        placeholder_wm = SimpleNamespace(
+            partitioned_results=[],
+            sub_edge_index_for_partition_results=[],
+            dup_nodes_per_partition=[],
+            dup_indices=None,
+            dup_nodes_per_partition_feature=[],
         )
-    preprocess_time_local = time.time() - preprocess_t0
+        structInfo = StructInfo(
+            graph_in_degree=None,
+            graph_out_degree=None,
+            sorted_ppr_matrix=None,
+            wm=placeholder_wm,
+        )
+    broadcast_window_state(args, structInfo, feature, device)
     preprocess_time_tensor = torch.tensor([preprocess_time_local], device=device, dtype=torch.float64)
     if seq_parallel_world_size > 1:
         dist.all_reduce(preprocess_time_tensor, op=dist.ReduceOp.MAX, group=get_sequence_parallel_group())
@@ -548,12 +576,10 @@ def main():
     if seq_parallel_world_size > 1:
         sync_params_and_buffers(model)
 
-    ppr_tuple = (structInfo.sorted_ppr_matrix[0], structInfo.sorted_ppr_matrix[1])
-    if args.struct_enc=="True":
-        structInfo.spatial_pos_by_pid,_ = compute_graphormer_spatial_pos_only(ppr_tuple, wm.partitioned_results, N, max_dist=args.max_dist)
+    ppr_tuple = (structInfo.sorted_ppr_matrix[0], structInfo.sorted_ppr_matrix[1]) if args.rank == 0 else None
 
     if args.use_cache:
-        dup_unique_sorted = build_dup_cache_metadata(wm, feature, device)
+        dup_unique_sorted = torch.unique(torch.cat(wm.dup_nodes_per_partition), sorted=True).flip(0) if wm.dup_nodes_per_partition else torch.empty(0, dtype=torch.long)
         if args.rank == 0:
             print("\n" + "="*80)
             print("重复节点统计信息:")
@@ -576,7 +602,6 @@ def main():
             if len(wm.partitioned_results) > 10:
                 print(f"  ... 还有 {len(wm.partitioned_results)-10} 个分区未显示")
 
-    broadcast_window_state(args, structInfo, feature, device)
     local_partition_ids, local_partitions = build_local_partitions(wm, args.rank, seq_parallel_world_size)
     print(f"rank {args.rank} local_partition_ids: {local_partition_ids}")
     loss_mean_list = []
