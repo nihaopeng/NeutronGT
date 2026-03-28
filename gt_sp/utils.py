@@ -432,6 +432,7 @@ def get_batch_reorder_blockize(args, x, y, idx_batch, rest_split_sizes, device, 
         # Fix edge index: add new edges of virtual nodes
         edge_index_i_raw = fix_edge_index(edge_index_i_raw, idx_batch.shape[0])
     
+    current_global_ids = idx_batch # 形状为 [s]
     # Broadcast the reordered edges & sorted indices to all ranks
     if args.reorder:
         if args.rank == 0:
@@ -470,10 +471,13 @@ def get_batch_reorder_blockize(args, x, y, idx_batch, rest_split_sizes, device, 
             # attn_bias = torch.zeros(idx_batch.shape[0], idx_batch.shape[0], args.attn_bias_dim, dtype=torch.float32) # For quicker experiments, use dummy attn bias
             # attn_bias = torch.index_select(attn_bias, 0, sorted_indices)
             # attn_bias = torch.index_select(attn_bias, 1, sorted_indices)
+            valid_sorted_indices = sorted_indices[sorted_indices != 0] - 1
         else:
             attn_bias = None
+            valid_sorted_indices = sorted_indices
         x_i = torch.index_select(x_i, 0, sorted_indices)
         y_i = torch.index_select(y_i, 0, sorted_indices)
+        current_global_ids = torch.index_select(current_global_ids, 0, valid_sorted_indices)
     else:
         edge_index_i = edge_index_i_raw
         attn_bias = None
@@ -503,6 +507,9 @@ def get_batch_reorder_blockize(args, x, y, idx_batch, rest_split_sizes, device, 
             attn_bias = attn_bias_list[seq_parallel_world_rank] # [s/p, s, d]
         
         last_batch_flag(True)
+        current_global_ids = pad_y(current_global_ids, seq_length, value=-1) # 假设 pad_y 支持指定值
+        ids_list = [t for t in torch.split(current_global_ids, afterpad_split_sizes, dim=0)]
+        current_global_ids = ids_list[seq_parallel_world_rank]
         
     else:
         assert seq_length % seq_parallel_world_size == 0
@@ -521,8 +528,9 @@ def get_batch_reorder_blockize(args, x, y, idx_batch, rest_split_sizes, device, 
             edge_index_i = adjust_edge_index_nomerge(edge_index_i, sub_seq_length)
             
         last_batch_flag(False)
+        current_global_ids = current_global_ids[sub_seq_start:sub_seq_end]
 
-    return (x_i, y_i, edge_index_i, attn_bias)
+    return (x_i, y_i, edge_index_i, attn_bias, current_global_ids)
 
 
 def get_batch_papers100m(args, x, y, idx_batch, attn_bias, rest_split_sizes, device, edge_index, N):

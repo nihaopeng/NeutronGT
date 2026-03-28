@@ -356,7 +356,7 @@ def main():
                 #     attn_type = "full"       
             
                 
-            out_i = model(x_i, attn_bias, edge_index_i, attn_type=attn_type)    
+            out_i,score = model(x_i, attn_bias, edge_index_i, attn_type=attn_type)    
 
             # print(out_i.shape[0], y_i.shape[0])
             # print(train_mask.sum().item(), split_idx['train'].shape[0])
