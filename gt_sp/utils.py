@@ -1039,7 +1039,20 @@ def get_node_degrees(edge_index, num_nodes):
     # 数值 +1 (为了避开 padding_idx=0)
     in_degree = in_degree + 1
     out_degree = out_degree + 1
+    return in_degree, out_degree
 
+
+def get_node_degrees_from_csr(rowptr, col, num_nodes):
+    rowptr = rowptr.detach().cpu().long()
+    col = col.detach().cpu().long()
+    if rowptr.ndim != 1 or col.ndim != 1:
+        raise ValueError(f'CSR tensors must be 1-D, got rowptr={tuple(rowptr.shape)}, col={tuple(col.shape)}')
+    if int(rowptr.numel()) != int(num_nodes) + 1:
+        raise ValueError(f'CSR rowptr length mismatch: expected {int(num_nodes) + 1}, got {int(rowptr.numel())}')
+    out_degree = rowptr[1:] - rowptr[:-1]
+    in_degree = torch.bincount(col, minlength=num_nodes)
+    in_degree = in_degree.to(torch.long) + 1
+    out_degree = out_degree.to(torch.long) + 1
     return in_degree, out_degree
 
 def get_all_pairs_path(edge_index, num_nodes, max_dist=5):

@@ -1,6 +1,8 @@
 import os
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pymetis
@@ -12,6 +14,92 @@ from tqdm import tqdm
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_FORA_BIN = REPO_ROOT / "third_party" / "fora" / "build" / "fora"
 DEFAULT_FORA_WORK_DIR = REPO_ROOT / "third_party" / "fora" / "data"
+
+
+@dataclass
+class GraphTopology:
+    num_nodes: int
+    source_format: str
+    edge_index: Optional[torch.Tensor] = None
+    rowptr: Optional[torch.Tensor] = None
+    col: Optional[torch.Tensor] = None
+
+    def get_edge_index(self) -> torch.Tensor:
+        if self.edge_index is None:
+            if self.rowptr is None or self.col is None:
+                raise ValueError("Cannot reconstruct edge_index without CSR data")
+            self.edge_index = csr_to_edge_index(self.rowptr, self.col)
+        return self.edge_index
+
+
+def _validate_csr(rowptr: torch.Tensor, col: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    rowptr = rowptr.detach().cpu().long()
+    col = col.detach().cpu().long()
+    if rowptr.ndim != 1 or col.ndim != 1:
+        raise ValueError(f"CSR tensors must be 1-D, got rowptr={tuple(rowptr.shape)}, col={tuple(col.shape)}")
+    if rowptr.numel() == 0:
+        raise ValueError("CSR rowptr must not be empty")
+    if int(rowptr[0].item()) != 0:
+        raise ValueError("CSR rowptr[0] must be 0")
+    if rowptr[1:].numel() > 0 and torch.any(rowptr[1:] < rowptr[:-1]):
+        raise ValueError("CSR rowptr must be nondecreasing")
+    if int(rowptr[-1].item()) != int(col.numel()):
+        raise ValueError(f"CSR rowptr[-1] must equal len(col), got {int(rowptr[-1].item())} vs {int(col.numel())}")
+    return rowptr, col
+
+
+def load_graph_topology(dataset_dir, dataset_name, num_nodes: Optional[int] = None) -> GraphTopology:
+    dataset_path = Path(dataset_dir) / dataset_name
+    csr_path = dataset_path / "edge_index_csr.pt"
+    edge_index_path = dataset_path / "edge_index.pt"
+    if csr_path.exists():
+        payload = torch.load(csr_path, map_location="cpu")
+        if isinstance(payload, dict):
+            rowptr = payload.get("rowptr")
+            col = payload.get("col")
+        elif isinstance(payload, (tuple, list)) and len(payload) == 2:
+            rowptr, col = payload
+        else:
+            raise ValueError(f"Unsupported CSR payload format in {csr_path}")
+        if rowptr is None or col is None:
+            raise ValueError(f"CSR payload in {csr_path} must contain rowptr and col")
+        rowptr, col = _validate_csr(rowptr, col)
+        inferred_num_nodes = int(rowptr.numel()) - 1
+        if num_nodes is not None and inferred_num_nodes != int(num_nodes):
+            raise ValueError(f"CSR num_nodes mismatch: inferred {inferred_num_nodes}, expected {int(num_nodes)}")
+        return GraphTopology(
+            num_nodes=inferred_num_nodes,
+            source_format="csr",
+            edge_index=None,
+            rowptr=rowptr,
+            col=col,
+        )
+    if not edge_index_path.exists():
+        raise FileNotFoundError(f"Neither {csr_path} nor {edge_index_path} exists")
+    edge_index = torch.load(edge_index_path, map_location="cpu")
+    edge_index = edge_index.detach().cpu().long()
+    if edge_index.ndim != 2 or edge_index.shape[0] != 2:
+        raise ValueError(f"edge_index must have shape [2, E], got {tuple(edge_index.shape)}")
+    inferred_num_nodes = int(edge_index.max().item()) + 1 if edge_index.numel() > 0 else int(num_nodes or 0)
+    if num_nodes is not None and inferred_num_nodes != int(num_nodes):
+        raise ValueError(f"edge_index num_nodes mismatch: inferred {inferred_num_nodes}, expected {int(num_nodes)}")
+    return GraphTopology(
+        num_nodes=inferred_num_nodes,
+        source_format="coo",
+        edge_index=edge_index,
+        rowptr=None,
+        col=None,
+    )
+
+
+def csr_to_edge_index(rowptr: torch.Tensor, col: torch.Tensor) -> torch.Tensor:
+    rowptr, col = _validate_csr(rowptr, col)
+    num_nodes = int(rowptr.numel()) - 1
+    if num_nodes == 0 or col.numel() == 0:
+        return torch.empty((2, 0), dtype=torch.long)
+    counts = rowptr[1:] - rowptr[:-1]
+    src = torch.repeat_interleave(torch.arange(num_nodes, dtype=torch.long), counts)
+    return torch.stack([src, col], dim=0)
 
 
 def _format_alpha(alpha: float) -> str:
@@ -54,6 +142,33 @@ def export_graph_for_fora(edge_index: torch.Tensor, num_nodes: int, output_dir) 
     graph_path.write_text(''.join(f'{int(src)} {int(dst)}\n' for src, dst in unique_edges.tolist()), encoding='utf-8')
     attr_path.write_text(f'n={int(num_nodes)}\nm={int(unique_edges.shape[0])}\n', encoding='utf-8')
     ssquery_path.write_text(''.join(f'{i}\n' for i in range(int(num_nodes))), encoding='utf-8')
+    return graph_path, attr_path, ssquery_path
+
+
+def export_graph_for_fora_from_csr(rowptr: torch.Tensor, col: torch.Tensor, num_nodes: int, output_dir) -> tuple[Path, Path, Path]:
+    output_dir = _ensure_dir(Path(output_dir))
+    graph_path = output_dir / 'graph.txt'
+    attr_path = output_dir / 'attribute.txt'
+    ssquery_path = output_dir / 'ssquery.txt'
+
+    rowptr, col = _validate_csr(rowptr, col)
+    edge_count = 0
+    with graph_path.open('w', encoding='utf-8') as graph_file:
+        for src in range(int(num_nodes)):
+            start = int(rowptr[src].item())
+            end = int(rowptr[src + 1].item())
+            if start >= end:
+                continue
+            for dst in col[start:end].tolist():
+                dst = int(dst)
+                if dst == src:
+                    continue
+                graph_file.write(f'{src} {dst}\n')
+                edge_count += 1
+    attr_path.write_text(f'n={int(num_nodes)}\nm={int(edge_count)}\n', encoding='utf-8')
+    with ssquery_path.open('w', encoding='utf-8') as query_file:
+        for node in range(int(num_nodes)):
+            query_file.write(f'{node}\n')
     return graph_path, attr_path, ssquery_path
 
 
@@ -108,7 +223,11 @@ def _run_fora_topk(fora_bin: Path, prefix_dir: Path, dataset_name: str, alpha: f
     subprocess.run(cmd, check=True, cwd=fora_bin.parent)
 
 
-def personal_pagerank_torchgeo(edge_index, alpha, topk=100, max_iter: int = 100, device='cuda') -> tuple:
+def personal_pagerank_torchgeo(edge_index, alpha, topk=100, max_iter: int = 100, device='cuda', rowptr=None, col=None) -> tuple:
+    if edge_index is None:
+        if rowptr is None or col is None:
+            raise ValueError('torchgeo backend requires edge_index or CSR inputs')
+        edge_index = csr_to_edge_index(rowptr, col)
     edge_indices, edge_values = ppr.get_ppr(edge_index, alpha=alpha, eps=1e-6)
     edge_indices, edge_values = edge_indices.to(device), edge_values.to(device)
     source_nodes = edge_indices[0]
@@ -131,7 +250,7 @@ def personal_pagerank_torchgeo(edge_index, alpha, topk=100, max_iter: int = 100,
     return topk_indices, topk_values
 
 
-def personal_pagerank_fora(edge_index, alpha, topk=100, max_iter: int = 100, device='cuda', num_nodes=None, dataset_name=None, dataset_dir=None, ppr_cache_dir=None, fora_bin=None, fora_work_dir=None, fora_epsilon: float = 0.5, fora_query_batch_size: int = 0) -> tuple:
+def personal_pagerank_fora(edge_index, alpha, topk=100, max_iter: int = 100, device='cuda', num_nodes=None, dataset_name=None, dataset_dir=None, ppr_cache_dir=None, fora_bin=None, fora_work_dir=None, fora_epsilon: float = 0.5, fora_query_batch_size: int = 0, rowptr=None, col=None) -> tuple:
     if num_nodes is None:
         raise ValueError('FORA backend requires num_nodes')
     if dataset_name is None:
@@ -145,7 +264,12 @@ def personal_pagerank_fora(edge_index, alpha, topk=100, max_iter: int = 100, dev
     fora_bin_path = build_fora_if_needed(fora_bin)
     fora_prefix_dir = _ensure_dir(Path(fora_work_dir).expanduser().resolve() if fora_work_dir is not None else DEFAULT_FORA_WORK_DIR.resolve())
     graph_dir = _ensure_dir(fora_prefix_dir / dataset_name)
-    export_graph_for_fora(edge_index=edge_index, num_nodes=num_nodes, output_dir=graph_dir)
+    if rowptr is not None and col is not None:
+        export_graph_for_fora_from_csr(rowptr=rowptr, col=col, num_nodes=num_nodes, output_dir=graph_dir)
+    else:
+        if edge_index is None:
+            raise ValueError('FORA backend requires edge_index or CSR inputs')
+        export_graph_for_fora(edge_index=edge_index, num_nodes=num_nodes, output_dir=graph_dir)
 
     all_query_nodes = list(range(int(num_nodes)))
     batch_size = int(fora_query_batch_size) if fora_query_batch_size else int(num_nodes)
@@ -181,9 +305,9 @@ def personal_pagerank_fora(edge_index, alpha, topk=100, max_iter: int = 100, dev
     return edge_index_out.to(device), edge_values_out.to(device)
 
 
-def personal_pagerank(edge_index, alpha, topk=100, max_iter: int = 100, device='cuda', backend='torchgeo', num_nodes=None, dataset_name=None, dataset_dir=None, ppr_cache_dir=None, fora_bin=None, fora_work_dir=None, fora_epsilon: float = 0.5, fora_query_batch_size: int = 0) -> tuple:
+def personal_pagerank(edge_index, alpha, topk=100, max_iter: int = 100, device='cuda', backend='torchgeo', num_nodes=None, dataset_name=None, dataset_dir=None, ppr_cache_dir=None, fora_bin=None, fora_work_dir=None, fora_epsilon: float = 0.5, fora_query_batch_size: int = 0, rowptr=None, col=None) -> tuple:
     if backend == 'torchgeo':
-        return personal_pagerank_torchgeo(edge_index=edge_index, alpha=alpha, topk=topk, max_iter=max_iter, device=device)
+        return personal_pagerank_torchgeo(edge_index=edge_index, alpha=alpha, topk=topk, max_iter=max_iter, device=device, rowptr=rowptr, col=col)
     if backend == 'fora':
         return personal_pagerank_fora(
             edge_index=edge_index,
@@ -199,6 +323,8 @@ def personal_pagerank(edge_index, alpha, topk=100, max_iter: int = 100, device='
             fora_work_dir=fora_work_dir,
             fora_epsilon=fora_epsilon,
             fora_query_batch_size=fora_query_batch_size,
+            rowptr=rowptr,
+            col=col,
         )
     raise ValueError(f'Unsupported ppr backend: {backend}')
 

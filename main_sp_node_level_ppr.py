@@ -25,9 +25,9 @@ from gt_sp.initialize import (
 )
 from gt_sp.reducer import sync_params_and_buffers, Reducer
 from gt_sp.evaluate import calc_acc
-from gt_sp.utils import LossStagnationDetector, compute_graphormer_spatial_pos_only, get_node_degrees, random_split_idx
+from gt_sp.utils import LossStagnationDetector, compute_graphormer_spatial_pos_only, get_node_degrees, get_node_degrees_from_csr, random_split_idx
 from utils.parser_node_level import parser_add_main_args
-from core.pprPartition import add_isolated_connections, personal_pagerank, build_adj_fromat
+from core.pprPartition import GraphTopology, add_isolated_connections, build_adj_fromat, load_graph_topology, personal_pagerank
 from utils.vis import vis_interface
 import utils.vis as vis
 import utils.logger as logger
@@ -85,13 +85,13 @@ def broadcast_window_state(args, structInfo: StructInfo, feature: torch.Tensor, 
     if args.use_cache:
         build_dup_cache_metadata(structInfo.wm, feature, device)
 
-def build_graph_struct_info(args,N,edge_index,feature,world_size,topk=50,n_parts=50,related_nodes_topk_rate=5,connect_prob=0.01):
+def build_graph_struct_info(args, N, graph_topology: GraphTopology, feature, world_size, topk=50, n_parts=50, related_nodes_topk_rate=5, connect_prob=0.01):
     # --------------------计算结构信息------------------------------------------------------------
     # =================== ppr partition =========================
     # partitioned_results = []
     # if args.rank == 0:
     sorted_ppr_matrix = personal_pagerank(
-        edge_index,
+        graph_topology.edge_index,
         alpha=args.ppr_alpha,
         topk=topk,
         backend=args.ppr_backend,
@@ -103,10 +103,13 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,topk=50,n_parts
         fora_work_dir=args.fora_work_dir,
         fora_epsilon=args.fora_epsilon,
         fora_query_batch_size=args.fora_query_batch_size,
-        device='cpu'
+        device='cpu',
+        rowptr=graph_topology.rowptr,
+        col=graph_topology.col,
     )
     sorted_ppr_matrix = add_isolated_connections(sorted_ppr_matrix,N,connect_prob=connect_prob)
     csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
+    edge_index = graph_topology.get_edge_index()
     wm = weightMetis_keepParent(
         csr_adjacency=csr_adjacency, 
         eweights=eweights,
@@ -120,7 +123,10 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,topk=50,n_parts
     # ===== 计算centrality encoding =====
     graph_in_degree, graph_out_degree = None, None
     if args.struct_enc == "True":
-        graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
+        if graph_topology.rowptr is not None and graph_topology.col is not None:
+            graph_in_degree, graph_out_degree = get_node_degrees_from_csr(graph_topology.rowptr, graph_topology.col, N)
+        else:
+            graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
 
     print("node len:",end="")
     sum_nodes_in_compute = 0 
@@ -445,8 +451,8 @@ def main():
     
     feature = torch.load(args.dataset_dir + args.dataset + '/x.pt', mmap=True)
     y = torch.load(args.dataset_dir + args.dataset + '/y.pt')
-    edge_index = torch.load(args.dataset_dir + args.dataset + '/edge_index.pt')
     N = feature.shape[0]
+    graph_topology = load_graph_topology(args.dataset_dir, args.dataset, num_nodes=N)
 
     if args.dataset == 'pokec':
         y = torch.clamp(y, min=0) 
@@ -503,7 +509,7 @@ def main():
 
     preprocess_t0 = time.time()
     structInfo:StructInfo = build_graph_struct_info(
-            args,N,edge_index,feature,seq_parallel_world_size,
+            args, N, graph_topology, feature, seq_parallel_world_size,
             topk=args.ppr_topk,
             n_parts=50,
             related_nodes_topk_rate=2

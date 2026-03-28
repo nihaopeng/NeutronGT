@@ -19,3 +19,4 @@ esac
 
 
 
+# bash run.sh ppr 0 8012 ogbn-papers100M gt_sw True 5 ./vis 2>&1 | tee papers100m_fora.log
