@@ -32,6 +32,19 @@ from utils.vis import vis_interface
 import utils.vis as vis
 import utils.logger as logger
 
+def sync_device(device: str):
+    if device.startswith("cuda") and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+
+# to avoid the lock when every rank get different numbers of partition
+def build_zero_loss(model: torch.nn.Module, device: str):
+    zero_loss = torch.zeros((), device=device)
+    for param in model.parameters():
+        if param.requires_grad:
+            zero_loss = zero_loss + param.sum() * 0.0
+    return zero_loss
+
+
 class StructInfo:
     def __init__(self,**kwargs) -> None:
         self.graph_in_degree = kwargs["graph_in_degree"]
@@ -286,78 +299,129 @@ def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitio
     spatial_pos_by_pid = structInfo.spatial_pos_by_pid
     wm:weightMetis_keepParent = structInfo.wm
     model.train()
-    loss_list, iter_t_list,iter_cpu2gpu_t_list,epoch_t_list,epoch_cpu2gpu_t_list = [], [], [], [], []
+    loss_list = []
     scores_by_pid = {}
-    
+    cpu_to_gpu_total_time = 0.0
+    window_forward_backward_total_time = 0.0
+    window_count = 0
+
+    local_window_count = len(local_partitions)
+    max_window_steps = local_window_count
+    if world_size > 1:
+        local_window_count_tensor = torch.tensor([local_window_count], device=device, dtype=torch.long)
+        gathered_window_counts = [torch.zeros_like(local_window_count_tensor) for _ in range(world_size)]
+        dist.all_gather(gathered_window_counts, local_window_count_tensor)
+        max_window_steps = max(int(item.item()) for item in gathered_window_counts)
+
+    sync_device(device)
+    epoch_train_start = time.time()
+
     kv_cache_per_partition = None
     if args.use_cache:
         kv_cache_per_partition = [None] * len(local_partitions)
-    
-    for local_i, global_pid in enumerate(local_partition_ids):
-        idx_i = local_partitions[local_i]
-        assert torch.equal(idx_i, wm.partitioned_results[global_pid]), f"rank {args.rank} partition mismatch for global_pid={global_pid}"
-        t0 = time.time()
-        if args.use_cache:
-            start_of_no_dup = len(wm.dup_indices[global_pid])
-            x_i = feature[idx_i[start_of_no_dup:]].to(device)
-            x_i = torch.cat([wm.dup_nodes_per_partition_feature[wm.dup_indices[global_pid]],x_i],dim=0)
+
+    for local_i in range(max_window_steps):
+        is_dummy_step = local_i >= local_window_count
+        if not is_dummy_step:
+            global_pid = local_partition_ids[local_i]
+            idx_i = local_partitions[local_i]
+            assert torch.equal(idx_i, wm.partitioned_results[global_pid]), f"rank {args.rank} partition mismatch for global_pid={global_pid}"
+
+            sync_device(device)
+            cpu_to_gpu_start = time.time()
+            if args.use_cache:
+                start_of_no_dup = len(wm.dup_indices[global_pid])
+                x_i = feature[idx_i[start_of_no_dup:]].to(device)
+                x_i = torch.cat([wm.dup_nodes_per_partition_feature[wm.dup_indices[global_pid]], x_i], dim=0)
+            else:
+                x_i = feature[idx_i].to(device)
+            attn_bias, in_degree, out_degree = None, None, None
+            edge_index_i, edge_input_i, mask, spatial_pos_i = wm.sub_edge_index_for_partition_results[global_pid].to(device), None, None, None
+            if args.struct_enc == "True":
+                in_degree = graph_in_degree[idx_i].to(device)
+                out_degree = graph_out_degree[idx_i].to(device)
+                spatial_pos_i = spatial_pos_by_pid[global_pid].to(device)
+                assert len(idx_i) == spatial_pos_i.shape[0], f"rank {args.rank} spatial_pos mismatch for global_pid={global_pid}"
+            sync_device(device)
+            cpu_to_gpu_total_time += time.time() - cpu_to_gpu_start
+
+            current_kv_cache = kv_cache_per_partition[local_i] if kv_cache_per_partition is not None else None
+
+            sync_device(device)
+            window_train_start = time.time()
+            out_i, score_agg, score_spe, updated_kv_cache = model(
+                x_i,
+                attn_bias,
+                edge_index_i,
+                in_degree,
+                out_degree,
+                spatial_pos_i,
+                edge_input_i,
+                attn_type=args.attn_type,
+                mask=mask,
+                dup_nodes_kv_cache=current_kv_cache,
+                part_id=global_pid
+            )
+
+            if kv_cache_per_partition is not None and updated_kv_cache is not None:
+                kv_cache_per_partition[local_i] = updated_kv_cache
+
+            scores_by_pid[global_pid] = score_spe[args.n_layers - 1]
+            loss = F.nll_loss(out_i, y[idx_i].to(device).long(), reduction='none')
+            mask_train = torch.isin(idx_i.to(device), split_idx["train"].to(device))
+            if mask_train.any():
+                loss = loss[mask_train].mean()
+                loss_list.append(loss.item())
+            else:
+                print(f"rank:{args.rank},epoch:{epoch},no train nodes!")
+                loss = build_zero_loss(model, device)
+                loss_list.append(0.0)
         else:
-            x_i = feature[idx_i].to(device)
-        attn_bias,in_degree,out_degree = None,None,None
-        edge_index_i,edge_input_i,mask,spatial_pos_i = wm.sub_edge_index_for_partition_results[global_pid].to(device),None,None,None
-        if args.struct_enc=="True":
-            in_degree = graph_in_degree[idx_i].to(device)
-            out_degree = graph_out_degree[idx_i].to(device)
-            spatial_pos_i = spatial_pos_by_pid[global_pid].to(device)
-            assert len(idx_i) == spatial_pos_i.shape[0], f"rank {args.rank} spatial_pos mismatch for global_pid={global_pid}"
-        t1 = time.time()
-        current_kv_cache = kv_cache_per_partition[local_i] if kv_cache_per_partition is not None else None
-        
-        out_i,score_agg,score_spe,updated_kv_cache = model(
-            x_i, 
-            attn_bias, 
-            edge_index_i,
-            in_degree,
-            out_degree, 
-            spatial_pos_i,
-            edge_input_i,
-            attn_type=args.attn_type,
-            mask=mask,
-            dup_nodes_kv_cache=current_kv_cache,
-            part_id=global_pid
-        )
-        
-        if kv_cache_per_partition is not None and updated_kv_cache is not None:
-            kv_cache_per_partition[local_i] = updated_kv_cache
-        
-        scores_by_pid[global_pid] = score_spe[args.n_layers-1]
-        loss = F.nll_loss(out_i, y[idx_i].to(device).long(),reduction='none')
+            loss = build_zero_loss(model, device)
+
         optimizer.zero_grad(set_to_none=True)
-        mask_train = torch.isin(idx_i.to(device), split_idx["train"].to(device))
-        if mask_train.any():
-            loss = loss[mask_train].mean()
-        else:
-            print(f"rank:{args.rank},epoch:{epoch},no train nodes!")
-            loss = torch.tensor(0.0, device=device, requires_grad=True)
         loss.backward()
         if world_size > 1:
             for name, param in model.named_parameters():
-                if param.requires_grad and param.grad is not None:
+                if param.requires_grad:
+                    if param.grad is None:
+                        param.grad = torch.zeros_like(param)
                     param.grad.div_(get_sequence_parallel_world_size())
                     dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=get_sequence_parallel_group())
         optimizer.step()
-        t2 = time.time()
-        iter_t_list.append(t2 - t1)
-        iter_cpu2gpu_t_list.append(t1-t0)
-        loss_list.append(loss.item())
+
+        if not is_dummy_step:
+            sync_device(device)
+            window_forward_backward_total_time += time.time() - window_train_start
+            window_count += 1
+
     lr_scheduler.step()
+    sync_device(device)
+    epoch_train_total_time = time.time() - epoch_train_start
+    loss_mean = float(np.mean(loss_list)) if loss_list else 0.0
+    time_stats = {
+        "epoch_train_total_time": epoch_train_total_time,
+        "cpu_to_gpu_total_time": cpu_to_gpu_total_time,
+        "window_forward_backward_total_time": window_forward_backward_total_time,
+        "window_forward_backward_avg_time": window_forward_backward_total_time / window_count if window_count > 0 else 0.0,
+        "num_processed_windows": window_count,
+    }
     if args.rank == 0:
-        epoch_t_list.append(np.sum(iter_t_list))
-        epoch_cpu2gpu_t_list.append(np.sum(iter_cpu2gpu_t_list))
         print("------------------------------------------------------------------------------------")
-        print("Epoch: {:03d}, Loss: {:.4f}, Epoch Time: {:.3f}s, Trans Time: {:.3f}s".format(epoch, np.mean(loss_list), np.mean(epoch_t_list),np.mean(epoch_cpu2gpu_t_list)))
+        print(
+            "Epoch: {:03d}, Loss: {:.4f}, Train Time: {:.3f}s, CPU->GPU Time: {:.3f}s, Window FW/BW Avg: {:.3f}s, Window FW/BW Total: {:.3f}s, Windows: {}, Max Window Steps: {}".format(
+                epoch,
+                loss_mean,
+                time_stats["epoch_train_total_time"],
+                time_stats["cpu_to_gpu_total_time"],
+                time_stats["window_forward_backward_avg_time"],
+                time_stats["window_forward_backward_total_time"],
+                time_stats["num_processed_windows"],
+                max_window_steps,
+            )
+        )
         print("------------------------------------------------------------------------------------")
-    return np.mean(loss_list),scores_by_pid,kv_cache_per_partition
+    return loss_mean, scores_by_pid, kv_cache_per_partition, time_stats
 
 def main():
     logger.IS_LOGGING = False
@@ -428,10 +492,12 @@ def main():
     set_global_token_indices(global_token_indices)
     set_last_batch_global_token_indices(global_token_indices_last_batch)
 
+    sync_device(device)
+    graph_preprocess_start = time.time()
     structInfo:StructInfo = build_graph_struct_info(
             args,N,edge_index,feature,seq_parallel_world_size,device,
             topk=args.ppr_topk,
-            n_parts=50,
+            n_parts=10,
             related_nodes_topk_rate=2
         )
     wm:weightMetis_keepParent = structInfo.wm
@@ -455,8 +521,21 @@ def main():
         sync_params_and_buffers(model)
 
     ppr_tuple = (structInfo.sorted_ppr_matrix[0], structInfo.sorted_ppr_matrix[1])
+    spatial_pos_preprocess_time = 0.0
     if args.struct_enc=="True":
+        sync_device(device)
+        spatial_pos_preprocess_start = time.time()
         structInfo.spatial_pos_by_pid,_ = compute_graphormer_spatial_pos_only(ppr_tuple, wm.partitioned_results, N, max_dist=args.max_dist)
+        sync_device(device)
+        spatial_pos_preprocess_time = time.time() - spatial_pos_preprocess_start
+    sync_device(device)
+    graph_preprocess_total_time = time.time() - graph_preprocess_start
+    if args.rank == 0:
+        print("====================================================================================")
+        print("Graph preprocess total time: {:.3f}s".format(graph_preprocess_total_time))
+        if args.struct_enc == "True":
+            print("Spatial position preprocess time: {:.3f}s".format(spatial_pos_preprocess_time))
+        print("====================================================================================")
 
     if args.use_cache:
         dup_unique_sorted = build_dup_cache_metadata(wm, feature, device)
@@ -489,7 +568,7 @@ def main():
     detector = LossStagnationDetector(cooldown=0)
     
     for epoch in range(0, args.epochs):
-        loss_mean,scores_by_pid,updated_kv_cache = train_epoch(args,model,local_partition_ids,local_partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
+        loss_mean,scores_by_pid,updated_kv_cache,time_stats = train_epoch(args,model,local_partition_ids,local_partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
                     epoch=epoch,
                     structInfo=structInfo)
         
@@ -502,6 +581,10 @@ def main():
         
         loss_mean_list.append(loss_mean)
         if args.use_cache==0 and detector(loss_mean_list):
+            if seq_parallel_world_size > 1:
+                dist.barrier()
+            sync_device(device)
+            window_adjust_start = time.time()
             print("!node in and out!")
             gathered_scores = [None for _ in range(args.world_size)]
             dist.all_gather_object(gathered_scores, scores_by_pid)
@@ -525,6 +608,14 @@ def main():
                 print(f"  - 重复节点出现次数: {total_dup_nodes}")
                 print(f"  - 唯一重复节点数: {unique_dup_nodes}")
                 print(f"  - 平均重复度: {total_dup_nodes/unique_dup_nodes:.2f}")
+            if seq_parallel_world_size > 1:
+                dist.barrier()
+            sync_device(device)
+            window_adjust_time = time.time() - window_adjust_start
+            if args.rank == 0:
+                print("------------------------------------------------------------------------------------")
+                print("Window Adjust Time: {:.3f}s".format(window_adjust_time))
+                print("------------------------------------------------------------------------------------")
 
 if __name__ == "__main__":
     main()
