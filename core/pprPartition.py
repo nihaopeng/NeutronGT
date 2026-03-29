@@ -553,26 +553,55 @@ def ppr_partition(sorted_ppr_matrix: list[torch.tensor, torch.tensor], flatten_t
     return [torch.tensor(partition, dtype=torch.long) for partition in partitioned_results]
 
 
-def add_isolated_connections(ppr_result, num_nodes: int, connect_prob: float = 0.01, ppr_fill_value: float = 0.001, device='cuda') -> tuple:
+def add_isolated_connections(ppr_result, num_nodes: int, connect_prob: float = 0.01, ppr_fill_value: float = 0.001, device='cuda', original_edge_index: Optional[torch.Tensor] = None, original_rowptr: Optional[torch.Tensor] = None, original_col: Optional[torch.Tensor] = None) -> tuple:
     edge_index, edge_values = ppr_result
     edge_index = edge_index.to(device)
     edge_values = edge_values.to(device)
-    appeared_nodes = torch.unique(edge_index)
+
+    appeared_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
+    if edge_index.numel() > 0:
+        appeared_mask[torch.unique(edge_index)] = True
+
+    if original_rowptr is not None and original_col is not None:
+        rowptr, col = _validate_csr(original_rowptr, original_col)
+        out_degree = rowptr[1:] - rowptr[:-1]
+        in_degree = torch.bincount(col, minlength=int(num_nodes))
+        original_appeared = (out_degree > 0) | (in_degree > 0)
+        appeared_mask |= original_appeared.to(device)
+    elif original_edge_index is not None:
+        original_edge_index = original_edge_index.to(device)
+        if original_edge_index.numel() > 0:
+            appeared_mask[torch.unique(original_edge_index)] = True
+
     all_nodes = torch.arange(num_nodes, device=device)
-    is_isolated = ~torch.isin(all_nodes, appeared_nodes)
-    isolated_nodes = all_nodes[is_isolated]
+    isolated_nodes = all_nodes[~appeared_mask]
     if isolated_nodes.numel() == 0:
         return edge_index, edge_values
-    non_isolated_nodes = all_nodes[~is_isolated]
+    non_isolated_nodes = all_nodes[appeared_mask]
     if non_isolated_nodes.numel() == 0:
         return edge_index, edge_values
-    rand_probs = torch.rand(len(isolated_nodes), len(non_isolated_nodes), device=device)
-    connect_mask = rand_probs < connect_prob
-    i_idx, j_idx = torch.where(connect_mask)
-    if i_idx.numel() == 0:
+
+    max_mask_elements = 50_000_000
+    non_isolated_count = int(non_isolated_nodes.numel())
+    isolated_chunk_size = max(1, min(int(isolated_nodes.numel()), max_mask_elements // max(1, non_isolated_count)))
+
+    src_parts = []
+    dst_parts = []
+    for start in range(0, int(isolated_nodes.numel()), isolated_chunk_size):
+        isolated_chunk = isolated_nodes[start:start + isolated_chunk_size]
+        rand_probs = torch.rand(isolated_chunk.numel(), non_isolated_count, device=device)
+        connect_mask = rand_probs < connect_prob
+        i_idx, j_idx = torch.where(connect_mask)
+        if i_idx.numel() == 0:
+            continue
+        src_parts.append(isolated_chunk[i_idx])
+        dst_parts.append(non_isolated_nodes[j_idx])
+
+    if not src_parts:
         return edge_index, edge_values
-    srcs = isolated_nodes[i_idx]
-    dsts = non_isolated_nodes[j_idx]
+
+    srcs = torch.cat(src_parts, dim=0)
+    dsts = torch.cat(dst_parts, dim=0)
     new_edges = torch.stack([srcs, dsts], dim=0)
     new_values = torch.full((new_edges.shape[1],), ppr_fill_value, device=device, dtype=edge_values.dtype)
     final_edge_index = torch.cat([edge_index, new_edges], dim=1)

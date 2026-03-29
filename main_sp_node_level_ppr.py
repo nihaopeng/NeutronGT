@@ -115,7 +115,14 @@ def build_graph_struct_info(args, N, graph_topology: GraphTopology, feature, wor
         fora_num_workers=args.fora_num_workers,
         ppr_result_budget_gb=args.ppr_result_budget_gb,
     )
-    sorted_ppr_matrix = add_isolated_connections(sorted_ppr_matrix,N,connect_prob=connect_prob)
+    sorted_ppr_matrix = add_isolated_connections(
+        sorted_ppr_matrix,
+        N,
+        connect_prob=connect_prob,
+        original_edge_index=graph_topology.edge_index,
+        original_rowptr=graph_topology.rowptr,
+        original_col=graph_topology.col,
+    )
     csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix, num_nodes=N)
     edge_index = graph_topology.get_edge_index()
     wm = weightMetis_keepParent(

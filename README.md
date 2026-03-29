@@ -90,123 +90,97 @@ third_party/fora/CMakeLists.txt
 
 -----
 
-现在这版多进程 FORA的 dataflow，可以理解成：
+现在这版多进程 FORA的 dataflow
 
 选 query 节点 -> 切 batch -> 每个 batch 一个独立 FORA 工作目录 -> Python 多进程并行调用 FORA -> 回收每个 batch 的 TSV -> 合并成最终 PPR tensor/cache
 
 按实际代码顺序是这样。
 
 1. 先选要查的 source 节点
-入口在 personal_pagerank_fora (line 330)。
-
-这里先决定 query 集合：
-
-如果 ppr_high_degree_ratio < 1.0
-用 _select_query_nodes_by_out_degree (line 137) 按出度选 Top 比例高度节点
-否则
-默认全量节点做 query
-所以第一步输出是：
-
-query_nodes
+    入口在 personal_pagerank_fora (line 330)。这里先决定 query 集合：
+    如果 ppr_high_degree_ratio < 1.0，用 _select_query_nodes_by_out_degree (line 137) 按出度选 Top 比例高度节点
+    否则默认全量节点做 query
+    所以第一步输出是：query_nodes
 2. 先准备一份共享的基础图目录
-还是在 personal_pagerank_fora (line 375) 附近：
-
-先建 graph_dir = fora_prefix_dir / dataset_name
-把原图导出成 FORA 需要的基础文件：
-graph.txt
-attribute.txt
-如果有 CSR，就优先走：
-
-export_graph_for_fora_from_csr (line 215)
-否则走：
-
-export_graph_for_fora (line 185)
-这一步只做一次，是所有 batch 共享的“只读基础图”。
+    还是在 personal_pagerank_fora (line 375) 附近：
+    先建 graph_dir = fora_prefix_dir / dataset_name 把原图导出成 FORA 需要的基础文件：
+    graph.txt
+    attribute.txt
+    如果有 CSR，就优先走：
+    export_graph_for_fora_from_csr (line 215)
+    否则走：
+    export_graph_for_fora (line 185)
+    这一步只做一次，是所有 batch 共享的“只读基础图”。
 
 3. 把 query_nodes 按 batch 切开
-在 personal_pagerank_fora (line 386) 开始：
-
-batch_size = fora_query_batch_size
-把 query_nodes 切成：
-batch_0
-batch_10000
-batch_20000
-...
-每个 batch 都会构造一个任务描述 batch_tasks。
-
+    在 personal_pagerank_fora (line 386) 开始：
+    batch_size = fora_query_batch_size
+    把 query_nodes 切成：
+    batch_0、batch_10000、batch_20000...
+    每个 batch 都会构造一个任务描述 batch_tasks。
 4. 每个 batch 有自己独立的 FORA 数据集目录
-这是多进程安全的关键。
+    这是多进程安全的关键。
+    当前每个 batch 的 dataset 名会被扁平化成：
+    ogbn-arxiv__batch_0、ogbn-arxiv__batch_10000
+    对应目录在：
+    third_party/fora/data/ogbn-arxiv__batch_0/ 、 third_party/fora/data/ogbn-arxiv__batch_10000/
+    这一步由：
+    _prepare_fora_batch_dir (line 165)做，它会把共享基础图目录里的：
+    graph.txt
+    attribute.txt
+    链接到 batch 专属目录里。然后每个 batch 自己再写：
 
-当前每个 batch 的 dataset 名会被扁平化成：
-
-ogbn-arxiv__batch_0
-ogbn-arxiv__batch_10000
-对应目录在：
-
-third_party/fora/data/ogbn-arxiv__batch_0/
-third_party/fora/data/ogbn-arxiv__batch_10000/
-这一步由：
-
-_prepare_fora_batch_dir (line 165)
-来做，它会把共享基础图目录里的：
-
-graph.txt
-attribute.txt
-链接或复制到 batch 专属目录里。
-
-然后每个 batch 自己再写：
-
-ssquery.txt
-topk_batch_<start>.tsv
-所以 batch 之间不会互相覆盖。
+    ssquery.txt
+    topk_batch_<start>.tsv
+    所以 batch 之间不会互相覆盖。
 
 5. Python 多进程并行调度 FORA
-调度在 personal_pagerank_fora (line 410) 附近：
+    调度在 personal_pagerank_fora (line 410) 附近：
 
-fora_num_workers == 1
-串行跑 _run_fora_topk_worker
-fora_num_workers > 1
-用 multiprocessing.get_context('spawn').Pool(...)
-pool.map(_run_fora_topk_worker, batch_tasks)
-每个 worker 实际只做一件事：
+    fora_num_workers == 1
+    串行跑 _run_fora_topk_worker
+    fora_num_workers > 1
+    用 multiprocessing.get_context('spawn').Pool(...)
+    pool.map(_run_fora_topk_worker, batch_tasks)
+    每个 worker 实际只做一件事：
 
-调一次 _run_fora_topk_worker (line 171)
-它再调用 _run_fora_topk (line 285)
+    调一次 _run_fora_topk_worker (line 171)
+    它再调用 _run_fora_topk (line 285)
 6. 单个 worker 内部做什么
-_run_fora_topk(...) 的流程是：
+    _run_fora_topk(...) 的流程是：
 
-在自己的 batch 目录下写 ssquery.txt
-调外部 FORA 二进制：
-fora topk --dataset ogbn-arxiv__batch_0 ...
-FORA 读取这个 batch 目录里的：
-graph.txt
-attribute.txt
-ssquery.txt
-写出：
-topk_batch_0.tsv
-现在正常运行时，FORA 的 stdout 已经被压掉了，所以不会再把每个 source 的 noisy log 打到总日志里。
+    在自己的 batch 目录下写 ssquery.txt
+    调外部 FORA 二进制：
+    fora topk --dataset ogbn-arxiv__batch_0 ...
+    FORA 读取这个 batch 目录里的：
+    graph.txt
+    attribute.txt
+    ssquery.txt
+    写出：
+    topk_batch_0.tsv
+    现在正常运行时，FORA 的 stdout 已经被压掉了，所以不会再把每个 source 的 noisy log 打到总日志里。
 
 7. 所有 batch 跑完后，主进程按顺序回收结果
-回收在 personal_pagerank_fora (line 419) 开始：
+    回收在 personal_pagerank_fora (line 419) 开始：
 
-按 batch_start 排序遍历 batch_dump_paths
-用 _parse_fora_dump (line 265) 解析每个 topk_batch_*.tsv
-得到：
-batch_edge_index
-batch_edge_values
-先 append 到：
-edge_parts
-value_parts
+    按 batch_start 排序遍历 batch_dump_paths
+    用 _parse_fora_dump (line 265) 解析每个 topk_batch_*.tsv
+    得到：
+    batch_edge_index
+    batch_edge_values
+    先 append 到：
+    edge_parts
+    value_parts
 8. 最后合并并缓存
-最后在 personal_pagerank_fora (line 425) 开始：
+    最后在 personal_pagerank_fora (line 425) 开始：
 
-torch.cat(edge_parts, dim=1)
-torch.cat(value_parts, dim=0)
-保存到最终 cache：
-ppr_fora_...pt
-这里还会一起存 metadata：
+    torch.cat(edge_parts, dim=1)
+    torch.cat(value_parts, dim=0)
+    保存到最终 cache：
+    ppr_fora_...pt
+    这里还会一起存 metadata：
 
-query_mode
-query_ratio
-num_query_nodes
-query_policy
+    query_mode
+    query_ratio
+    num_query_nodes
+    query_policy
