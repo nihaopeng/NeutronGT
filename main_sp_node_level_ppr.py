@@ -85,13 +85,22 @@ def broadcast_window_state(args, structInfo: StructInfo, feature: torch.Tensor, 
     if args.use_cache:
         build_dup_cache_metadata(structInfo.wm, feature, device)
 
-def build_graph_struct_info(args,N,edge_index,feature,world_size,topk=50,n_parts=50,related_nodes_topk_rate=5,connect_prob=0.01):
+def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,n_parts=50,related_nodes_topk_rate=5,connect_prob=0.01):
     # --------------------计算结构信息------------------------------------------------------------
     # =================== ppr partition =========================
     # partitioned_results = []
     # if args.rank == 0:
-    sorted_ppr_matrix = personal_pagerank(edge_index,0.85,topk=topk)
-    sorted_ppr_matrix = add_isolated_connections(sorted_ppr_matrix,N,connect_prob=connect_prob)
+    sorted_ppr_matrix = personal_pagerank(
+        edge_index,
+        args.ppr_alpha,
+        topk=topk,
+        backend=args.ppr_backend,
+        num_iterations=args.ppr_num_iterations,
+        batch_size=args.ppr_batch_size,
+        eps=args.ppr_eps,
+        device=device,
+    )
+    sorted_ppr_matrix = add_isolated_connections(sorted_ppr_matrix, edge_index, N, connect_prob=connect_prob)
     csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
     wm = weightMetis_keepParent(
         csr_adjacency=csr_adjacency, 
@@ -420,8 +429,8 @@ def main():
     set_last_batch_global_token_indices(global_token_indices_last_batch)
 
     structInfo:StructInfo = build_graph_struct_info(
-            args,N,edge_index,feature,seq_parallel_world_size,
-            topk=5,
+            args,N,edge_index,feature,seq_parallel_world_size,device,
+            topk=args.ppr_topk,
             n_parts=50,
             related_nodes_topk_rate=2
         )

@@ -58,6 +58,18 @@ def parser_add_main_args(parser):
     parser.add_argument('--max_num_edges', type=int, default=512)
     parser.add_argument('--vis_dir', type=str, help='path of vis')
     parser.add_argument('--use_cache',default=0, type=int,choices=[0,1], help='path of vis')
+    parser.add_argument('--ppr_backend', type=str, default='torch_geometric', choices=['torch_geometric', 'appnp'],
+                       help='backend used to materialize PPR edges')
+    parser.add_argument('--ppr_alpha', type=float, default=0.85,
+                       help='teleport coefficient used by the selected PPR backend')
+    parser.add_argument('--ppr_topk', type=int, default=5,
+                       help='top-k PPR neighbors kept for each source node')
+    parser.add_argument('--ppr_num_iterations', type=int, default=10,
+                       help='APPNP backend only: number of power-iteration propagation steps')
+    parser.add_argument('--ppr_batch_size', type=int, default=8,
+                       help='APPNP backend only: number of seed nodes processed per SpMM batch')
+    parser.add_argument('--ppr_eps', type=float, default=1e-6,
+                       help='torch_geometric backend only: epsilon used by get_ppr')
     
     # distributed args
     parser.add_argument('--rank', type=int, default=None,
