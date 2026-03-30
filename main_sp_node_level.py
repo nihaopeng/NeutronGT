@@ -76,7 +76,25 @@ def main():
     if args.dataset == 'pokec':
         y = torch.clamp(y, min=0) 
     log(f"y shape:{y.shape}")
-    split_idx = random_split_idx(y, frac_train=0.6, frac_valid=0.2, frac_test=0.2, seed=args.seed)
+    if args.dataset == "ogbn-papers100M":
+        split_idx_path = os.path.join(args.dataset_dir, args.dataset, "split_idx.pt")
+        local_split_idx = torch.load(split_idx_path, map_location="cpu")
+        if "train" in local_split_idx and "valid" in local_split_idx and "test" in local_split_idx:
+            split_idx = {
+                "train": torch.as_tensor(local_split_idx["train"], dtype=torch.long),
+                "valid": torch.as_tensor(local_split_idx["valid"], dtype=torch.long),
+                "test": torch.as_tensor(local_split_idx["test"], dtype=torch.long),
+            }
+        elif "train_idx" in local_split_idx and "val_idx" in local_split_idx and "test_idx" in local_split_idx:
+            split_idx = {
+                "train": torch.as_tensor(local_split_idx["train_idx"], dtype=torch.long),
+                "valid": torch.as_tensor(local_split_idx["val_idx"], dtype=torch.long),
+                "test": torch.as_tensor(local_split_idx["test_idx"], dtype=torch.long),
+            }
+        else:
+            raise KeyError(f"Unsupported split_idx.pt format in {split_idx_path}: {list(local_split_idx.keys())}")
+    else:
+        split_idx = random_split_idx(y, frac_train=0.6, frac_valid=0.2, frac_test=0.2, seed=args.seed)
 
     if args.rank == 0:
         print(args)

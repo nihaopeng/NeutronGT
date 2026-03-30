@@ -45,6 +45,16 @@ def build_zero_loss(model: torch.nn.Module, device: str):
     return zero_loss
 
 
+def load_optional_edge_csr(dataset_dir: str, dataset_name: str):
+    edge_csr_path = os.path.join(dataset_dir, dataset_name, "edge_index_csr.pt")
+    if not os.path.exists(edge_csr_path):
+        return None
+    edge_csr = torch.load(edge_csr_path, map_location="cpu")
+    if not isinstance(edge_csr, dict) or "rowptr" not in edge_csr or "col" not in edge_csr:
+        raise KeyError(f"Unsupported CSR format in {edge_csr_path}; expected keys rowptr and col")
+    return edge_csr
+
+
 class StructInfo:
     def __init__(self,**kwargs) -> None:
         self.graph_in_degree = kwargs["graph_in_degree"]
@@ -98,7 +108,7 @@ def broadcast_window_state(args, structInfo: StructInfo, feature: torch.Tensor, 
     if args.use_cache:
         build_dup_cache_metadata(structInfo.wm, feature, device)
 
-def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,n_parts=50,related_nodes_topk_rate=5,connect_prob=0.01):
+def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,n_parts=50,related_nodes_topk_rate=5,connect_prob=0.01,edge_csr_data=None):
     # --------------------计算结构信息------------------------------------------------------------
     # =================== ppr partition =========================
     # partitioned_results = []
@@ -112,6 +122,9 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
         batch_size=args.ppr_batch_size,
         eps=args.ppr_eps,
         device=device,
+        csr_data=edge_csr_data,
+        num_nodes=N,
+        iter_topk=args.ppr_iter_topk,
     )
     sorted_ppr_matrix = add_isolated_connections(sorted_ppr_matrix, edge_index, N, connect_prob=connect_prob)
     csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
@@ -447,15 +460,36 @@ def main():
     feature = torch.load(args.dataset_dir + args.dataset + '/x.pt')
     y = torch.load(args.dataset_dir + args.dataset + '/y.pt')
     edge_index = torch.load(args.dataset_dir + args.dataset + '/edge_index.pt')
+    edge_csr_data = load_optional_edge_csr(args.dataset_dir, args.dataset) if args.ppr_backend == 'appnp' else None
     N = feature.shape[0]
 
     if args.dataset == 'pokec':
         y = torch.clamp(y, min=0) 
-    split_idx = random_split_idx(y, frac_train=0.6, frac_valid=0.2, frac_test=0.2, seed=args.seed)
+    if args.dataset == "ogbn-papers100M":
+        split_idx_path = os.path.join(args.dataset_dir, args.dataset, "split_idx.pt")
+        local_split_idx = torch.load(split_idx_path, map_location="cpu")
+        if "train" in local_split_idx and "valid" in local_split_idx and "test" in local_split_idx:
+            split_idx = {
+                "train": torch.as_tensor(local_split_idx["train"], dtype=torch.long),
+                "valid": torch.as_tensor(local_split_idx["valid"], dtype=torch.long),
+                "test": torch.as_tensor(local_split_idx["test"], dtype=torch.long),
+            }
+        elif "train_idx" in local_split_idx and "val_idx" in local_split_idx and "test_idx" in local_split_idx:
+            split_idx = {
+                "train": torch.as_tensor(local_split_idx["train_idx"], dtype=torch.long),
+                "valid": torch.as_tensor(local_split_idx["val_idx"], dtype=torch.long),
+                "test": torch.as_tensor(local_split_idx["test_idx"], dtype=torch.long),
+            }
+        else:
+            raise KeyError(f"Unsupported split_idx.pt format in {split_idx_path}: {list(local_split_idx.keys())}")
+    else:
+        split_idx = random_split_idx(y, frac_train=0.6, frac_valid=0.2, frac_test=0.2, seed=args.seed)
 
     if args.rank == 0:
         print(args)
         print('Dataset load successfully')
+        if edge_csr_data is not None:
+            print('APPNP backend will use edge_index_csr.pt')
         print(f"Train nodes: {split_idx['train'].shape[0]}, Val nodes: {split_idx['valid'].shape[0]}, Test nodes: {split_idx['test'].shape[0]}") 
         print(f"Training iters: {split_idx['train'].size(0) // args.seq_len + 1}, Val iters: {split_idx['valid'].size(0) // args.seq_len + 1}, Test iters: {split_idx['test'].size(0) // args.seq_len + 1}")
     
@@ -498,7 +532,8 @@ def main():
             args,N,edge_index,feature,seq_parallel_world_size,device,
             topk=args.ppr_topk,
             n_parts=10,
-            related_nodes_topk_rate=2
+            related_nodes_topk_rate=2,
+            edge_csr_data=edge_csr_data
         )
     wm:weightMetis_keepParent = structInfo.wm
 

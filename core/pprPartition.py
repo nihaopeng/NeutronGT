@@ -152,6 +152,9 @@ def personal_pagerank(
     num_iterations: int | None = None,
     batch_size: int = 8,
     eps: float = 1e-6,
+    csr_data=None,
+    num_nodes: int | None = None,
+    iter_topk: int | None = None,
 ) -> tuple:
     """为所有节点计算个性化PageRank。"""
     if backend == "torch_geometric":
@@ -166,6 +169,9 @@ def personal_pagerank(
             num_iterations=num_iterations,
             batch_size=batch_size,
             device=device,
+            csr_data=csr_data,
+            num_nodes=num_nodes,
+            iter_topk=iter_topk,
         )
     raise ValueError(f"Unsupported PPR backend: {backend}")
 
