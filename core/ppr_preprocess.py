@@ -32,51 +32,47 @@ def build_adj_fromat(sorted_ppr_matrix):
     """FROM QWEN"""
     print("======start adj format building===========")
     edge_index, ppr_val = sorted_ppr_matrix
-    edge_index, ppr_val = edge_index.to("cpu"), ppr_val.to("cpu")
     assert edge_index.shape[0] == 2
+    if edge_index.numel() == 0:
+        csr_adj = pymetis.CSRAdjacency(adj_starts=[0], adjacent=[])
+        return csr_adj, [], None
+
     num_nodes = int(edge_index.max().item()) + 1
-    src, dst = edge_index[0], edge_index[1]
-    u = torch.min(src, dst)
-    v = torch.max(src, dst)
+    src, dst = edge_index[0].long(), edge_index[1].long()
+    u = torch.minimum(src, dst)
+    v = torch.maximum(src, dst)
     edge_key = u * num_nodes + v
-    unique_edge_keys, inverse_indices, counts = torch.unique(
-        edge_key, return_inverse=True, return_counts=True
-    )
-    unique_edges = torch.stack([
-        torch.div(unique_edge_keys, num_nodes, rounding_mode="floor"),
-        unique_edge_keys % num_nodes
-    ], dim=1)
-    summed_ppr = torch.zeros(inverse_indices.max() + 1, device=ppr_val.device)
+    unique_edge_keys, inverse_indices = torch.unique(edge_key, sorted=True, return_inverse=True)
+    summed_ppr = torch.zeros(unique_edge_keys.numel(), dtype=ppr_val.dtype, device=ppr_val.device)
     summed_ppr.scatter_add_(0, inverse_indices, ppr_val)
-    weights = (summed_ppr * 1000).clamp_min(1).long().cpu()
+    unique_u = torch.div(unique_edge_keys, num_nodes, rounding_mode="floor")
+    unique_v = unique_edge_keys % num_nodes
+    weights = (summed_ppr * 1000).clamp_min(1).to(torch.int32)
+
     print("======构建无向连接===========")
-    u_all = torch.cat([unique_edges[:, 0], unique_edges[:, 1]])
-    v_all = torch.cat([unique_edges[:, 1], unique_edges[:, 0]])
-    weights_all = torch.cat([weights, weights])
+    u_all = torch.cat([unique_u, unique_v], dim=0)
+    v_all = torch.cat([unique_v, unique_u], dim=0)
+    weights_all = torch.cat([weights, weights], dim=0)
     sort_idx = torch.argsort(u_all)
-    u_all = u_all[sort_idx].cpu().numpy()
-    v_all = v_all[sort_idx].cpu().numpy()
-    weights_all_np = weights_all[sort_idx].numpy()
+    u_all = u_all[sort_idx]
+    v_all = v_all[sort_idx]
+    weights_all = weights_all[sort_idx]
+
     print("======csr format building===========")
-    xadj = np.zeros(num_nodes + 1, dtype=np.int32)
-    degrees = np.bincount(u_all, minlength=num_nodes)
-    xadj[1:] = np.cumsum(degrees)
-    adjncy = v_all.astype(np.int32)
-    eweights = weights_all_np.astype(np.int32)
-    assert len(adjncy) == len(eweights)
-    assert xadj[-1] == len(adjncy)
+    degrees = torch.bincount(u_all, minlength=num_nodes).to(torch.int32)
+    xadj = torch.zeros(num_nodes + 1, dtype=torch.int32, device=u_all.device)
+    xadj[1:] = torch.cumsum(degrees, dim=0)
+
+    xadj_np = xadj.cpu().numpy()
+    adjncy_np = v_all.to(torch.int32).cpu().numpy()
+    eweights_np = weights_all.cpu().numpy()
+    assert len(adjncy_np) == len(eweights_np)
+    assert int(xadj_np[-1]) == len(adjncy_np)
     csr_adj = pymetis.CSRAdjacency(
-        adj_starts=xadj.tolist(),
-        adjacent=adjncy.tolist()
+        adj_starts=xadj_np.tolist(),
+        adjacent=adjncy_np.tolist()
     )
-    print("======adj weight building===========")
-    adj_weight = {}
-    unique_u = unique_edges[:, 0].cpu().numpy()
-    unique_v = unique_edges[:, 1].cpu().numpy()
-    unique_w = weights.numpy()
-    for i in tqdm(range(len(unique_u)), desc="adj weight"):
-        adj_weight[(int(unique_u[i]), int(unique_v[i]))] = int(unique_w[i])
-    return csr_adj, eweights.tolist(), adj_weight
+    return csr_adj, eweights_np.tolist(), None
 
 
 def ppr_partition(sorted_ppr_matrix:list[torch.tensor,torch.tensor],flatten_train_idx,num_set:int):

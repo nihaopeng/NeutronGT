@@ -127,6 +127,7 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
             wm=placeholder_wm,
         )
 
+    ppr_start = time.time()
     sorted_ppr_matrix = personal_pagerank(
         edge_index,
         args.ppr_alpha,
@@ -140,8 +141,19 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
         num_nodes=N,
         iter_topk=args.ppr_iter_topk,
     )
+    ppr_time = time.time() - ppr_start
+
+    isolated_start = time.time()
     sorted_ppr_matrix = add_isolated_connections(sorted_ppr_matrix, edge_index, N, connect_prob=connect_prob)
-    csr_adjacency,eweights,adj_weight = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
+    isolated_time = time.time() - isolated_start
+
+    adj_build_start = time.time()
+    csr_adjacency, eweights, _ = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
+    adj_build_time = time.time() - adj_build_start
+    print(f"PPR propagation time: {ppr_time:.3f}s")
+    print(f"Isolated-node merge time: {isolated_time:.3f}s")
+    print(f"Adjacency build time: {adj_build_time:.3f}s")
+
     wm = weightMetis_keepParent(
         csr_adjacency=csr_adjacency, 
         eweights=eweights,

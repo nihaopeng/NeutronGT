@@ -68,8 +68,8 @@ def parser_add_main_args(parser):
                        help='APPNP backend only: number of power-iteration propagation steps')
     parser.add_argument('--ppr_batch_size', type=int, default=8,
                        help='APPNP backend only: number of seed nodes processed per SpMM batch')
-    parser.add_argument('--ppr_iter_topk', type=int, default=None,
-                       help='APPNP backend only: top-k entries kept after each propagation step; defaults to ppr_topk')
+    parser.add_argument('--ppr_iter_topk', type=int, default=0,
+                       help='APPNP backend only: iterative top-k pruning per propagation step; 0 or negative disables pruning and keeps full propagation until the final top-k, positive values enable an approximate mode')
     parser.add_argument('--ppr_eps', type=float, default=1e-6,
                        help='torch_geometric backend only: epsilon used by get_ppr')
     

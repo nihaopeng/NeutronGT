@@ -1,3 +1,5 @@
+import time
+
 import torch
 from tqdm import tqdm
 
@@ -83,7 +85,7 @@ def _build_rowptr_from_rows(rows: torch.Tensor, num_rows: int):
     return rowptr
 
 
-def _segment_topk(rows: torch.Tensor, cols: torch.Tensor, values: torch.Tensor, num_rows: int, keep_k: int):
+def _coo_to_csr_state(rows: torch.Tensor, cols: torch.Tensor, values: torch.Tensor, num_rows: int):
     if rows.numel() == 0:
         empty_rowptr = torch.zeros((num_rows + 1,), dtype=torch.long, device=values.device)
         empty_cols = torch.empty((0,), dtype=torch.long, device=values.device)
@@ -95,27 +97,49 @@ def _segment_topk(rows: torch.Tensor, cols: torch.Tensor, values: torch.Tensor, 
     cols = cols[sort_idx]
     values = values[sort_idx]
     rowptr = _build_rowptr_from_rows(rows, num_rows)
+    return rowptr, cols, values
 
-    topk_cols = []
-    topk_values = []
-    next_rowptr = [0]
-    for row_id in range(num_rows):
-        row_start = int(rowptr[row_id].item())
-        row_end = int(rowptr[row_id + 1].item())
+
+def _segment_topk_from_csr(rowptr: torch.Tensor, cols: torch.Tensor, values: torch.Tensor, keep_k: int | None):
+    num_rows = int(rowptr.numel() - 1)
+    if cols.numel() == 0 or keep_k is None:
+        return rowptr, cols, values
+
+    keep_k = int(keep_k)
+    if keep_k <= 0:
+        return rowptr, cols, values
+
+    row_lengths = rowptr[1:] - rowptr[:-1]
+    if row_lengths.numel() == 0 or int(row_lengths.max().item()) <= keep_k:
+        return rowptr, cols, values
+
+    kept_counts = torch.clamp(row_lengths, max=keep_k)
+    next_rowptr = torch.zeros((num_rows + 1,), dtype=torch.long, device=values.device)
+    next_rowptr[1:] = torch.cumsum(kept_counts, dim=0)
+
+    total_kept = int(next_rowptr[-1].item())
+    topk_cols = torch.empty((total_kept,), dtype=torch.long, device=values.device)
+    topk_values = torch.empty((total_kept,), dtype=values.dtype, device=values.device)
+
+    for row_id in torch.nonzero(row_lengths, as_tuple=False).flatten().tolist():
+        row_start = int(rowptr[row_id])
+        row_end = int(rowptr[row_id + 1])
         row_cols = cols[row_start:row_end]
         row_values = values[row_start:row_end]
         if row_values.numel() > keep_k:
             row_values, top_idx = torch.topk(row_values, k=keep_k, largest=True, sorted=True)
             row_cols = row_cols[top_idx]
-        topk_cols.append(row_cols)
-        topk_values.append(row_values)
-        next_rowptr.append(next_rowptr[-1] + int(row_cols.numel()))
+        out_start = int(next_rowptr[row_id])
+        out_end = int(next_rowptr[row_id + 1])
+        topk_cols[out_start:out_end] = row_cols
+        topk_values[out_start:out_end] = row_values
 
-    return (
-        torch.tensor(next_rowptr, dtype=torch.long, device=values.device),
-        torch.cat(topk_cols, dim=0) if topk_cols else torch.empty((0,), dtype=torch.long, device=values.device),
-        torch.cat(topk_values, dim=0) if topk_values else torch.empty((0,), dtype=values.dtype, device=values.device),
-    )
+    return next_rowptr, topk_cols, topk_values
+
+
+def _segment_topk(rows: torch.Tensor, cols: torch.Tensor, values: torch.Tensor, num_rows: int, keep_k: int | None):
+    rowptr, cols, values = _coo_to_csr_state(rows, cols, values, num_rows)
+    return _segment_topk_from_csr(rowptr, cols, values, keep_k)
 
 
 def _state_to_dgl_sparse(rowptr: torch.Tensor, col: torch.Tensor, values: torch.Tensor, num_rows: int, num_cols: int):
@@ -124,13 +148,12 @@ def _state_to_dgl_sparse(rowptr: torch.Tensor, col: torch.Tensor, values: torch.
     return dglsp.from_csr(rowptr, col, values, shape=(num_rows, num_cols))
 
 
-def _dgl_sparse_to_state(spmat, num_rows: int, keep_k: int):
+def _dgl_sparse_to_state(spmat, num_rows: int, keep_k: int | None):
     rowptr, col, value_idx = spmat.csr()
     values = spmat.val
     if value_idx is not None:
         values = values[value_idx]
-    rows = _rowptr_to_rows(rowptr)
-    return _segment_topk(rows, col, values, num_rows, keep_k)
+    return _segment_topk_from_csr(rowptr, col, values, keep_k)
 
 
 def _build_transition_dgl_sparse(graph_rowptr: torch.Tensor, graph_col: torch.Tensor, degree: torch.Tensor, num_nodes: int):
@@ -141,20 +164,44 @@ def _build_transition_dgl_sparse(graph_rowptr: torch.Tensor, graph_col: torch.Te
     return dglsp.from_csr(graph_rowptr, graph_col, values, shape=(num_nodes, num_nodes))
 
 
-def _dgl_spgemm_iteration(state_rowptr, state_col, state_values, transition_sparse, teleport_sparse, num_rows, num_nodes, alpha, iter_topk):
+def _dgl_spgemm_iteration(state_rowptr, state_col, state_values, transition_sparse, teleport_rows, teleport_cols, teleport_values, num_rows, num_nodes, alpha, iter_topk, timing_stats=None):
+    step_start = time.perf_counter()
     state_sparse = _state_to_dgl_sparse(state_rowptr, state_col, state_values, num_rows, num_nodes)
-    # propagated_sparse = dglsp.matmul(state_sparse, transition_sparse)
+    if timing_stats is not None:
+        timing_stats["state_to_sparse"] += time.perf_counter() - step_start
+
+    step_start = time.perf_counter()
     propagated_sparse = dglsp.spspmm(state_sparse, transition_sparse)
     propagated_sparse = dglsp.val_like(propagated_sparse, propagated_sparse.val * (1.0 - alpha))
-    prop_row, prop_col = propagated_sparse.coo()
-    tele_row, tele_col = teleport_sparse.coo()
-    merged_indices = torch.stack([
-        torch.cat([prop_row, tele_row], dim=0),
-        torch.cat([prop_col, tele_col], dim=0),
-    ], dim=0)
-    merged_values = torch.cat([propagated_sparse.val, teleport_sparse.val], dim=0)
-    merged_sparse = dglsp.spmatrix(merged_indices, merged_values, shape=(num_rows, num_nodes)).coalesce()
-    return _dgl_sparse_to_state(merged_sparse, num_rows, iter_topk)
+    if timing_stats is not None:
+        timing_stats["spmm"] += time.perf_counter() - step_start
+
+    step_start = time.perf_counter()
+    prop_rowptr, prop_col, value_idx = propagated_sparse.csr()
+    prop_values = propagated_sparse.val
+    if value_idx is not None:
+        prop_values = prop_values[value_idx]
+    prop_rows = _rowptr_to_rows(prop_rowptr)
+    merged_rows = torch.cat([prop_rows, teleport_rows], dim=0)
+    merged_cols = torch.cat([prop_col, teleport_cols], dim=0)
+    merged_values = torch.cat([prop_values, teleport_values], dim=0)
+    merged_rows, merged_cols, merged_values = _aggregate_sparse_entries(
+        merged_rows,
+        merged_cols,
+        merged_values,
+        num_nodes,
+    )
+    if timing_stats is not None:
+        timing_stats["merge"] += time.perf_counter() - step_start
+
+    step_start = time.perf_counter()
+    if iter_topk is None:
+        next_state = _coo_to_csr_state(merged_rows, merged_cols, merged_values, num_rows)
+    else:
+        next_state = _segment_topk(merged_rows, merged_cols, merged_values, num_rows, iter_topk)
+    if timing_stats is not None:
+        timing_stats["segment_topk"] += time.perf_counter() - step_start
+    return next_state
 
 
 def _expand_batch_neighbors(batch_rows, batch_nodes, batch_values, graph_rowptr, graph_col, degree, alpha):
@@ -240,11 +287,20 @@ def personal_pagerank_appnp(
         return empty_index, empty_value
 
     topk = min(int(topk), num_nodes)
-    iter_topk = topk if iter_topk is None else min(max(1, int(iter_topk)), num_nodes)
+    iter_topk = topk if iter_topk is None else int(iter_topk)
+    iter_topk = None if iter_topk <= 0 else min(iter_topk, num_nodes)
     transition_sparse = _build_transition_dgl_sparse(graph_rowptr, graph_col, degree, num_nodes) if dglsp is not None else None
     use_dgl_spgemm = transition_sparse is not None
     logged_backend = False
     logged_fallback = False
+    timing_stats = {
+        "state_to_sparse": 0.0,
+        "spmm": 0.0,
+        "merge": 0.0,
+        "segment_topk": 0.0,
+        "fallback": 0.0,
+        "final_topk": 0.0,
+    }
 
     edge_index_batches = []
     edge_value_batches = []
@@ -252,7 +308,13 @@ def personal_pagerank_appnp(
     for start in tqdm(range(0, num_nodes, batch_size), desc="appnp ppr"):
         if not logged_backend:
             backend_name = "dgl_spgemm" if use_dgl_spgemm else "fallback"
+            iter_topk_desc = "disabled" if iter_topk is None else str(iter_topk)
             print(f"[APPNP] propagation backend: {backend_name}")
+            print(f"[APPNP] iter_topk: {iter_topk_desc}")
+            if iter_topk is None:
+                print("[APPNP] iterative pruning: disabled, keep full propagation state until final top-k")
+            else:
+                print("[APPNP] iterative pruning: enabled approximate mode, intermediate nodes outside iter_topk are discarded")
             logged_backend = True
         end = min(start + batch_size, num_nodes)
         seed_nodes = torch.arange(start, end, dtype=torch.long, device=device)
@@ -265,13 +327,6 @@ def personal_pagerank_appnp(
         teleport_rows = torch.arange(num_rows, dtype=torch.long, device=device)
         teleport_cols = seed_nodes
         teleport_values = torch.full((num_rows,), alpha, dtype=torch.float32, device=device)
-        teleport_sparse = _state_to_dgl_sparse(
-            torch.arange(0, num_rows + 1, dtype=torch.long, device=device),
-            teleport_cols,
-            teleport_values,
-            num_rows,
-            num_nodes,
-        ) if dglsp is not None else None
 
         for _ in range(num_iterations):
             if use_dgl_spgemm:
@@ -281,11 +336,14 @@ def personal_pagerank_appnp(
                         state_col,
                         state_values,
                         transition_sparse,
-                        teleport_sparse,
+                        teleport_rows,
+                        teleport_cols,
+                        teleport_values,
                         num_rows,
                         num_nodes,
                         alpha,
                         iter_topk,
+                        timing_stats=timing_stats,
                     )
                     continue
                 except RuntimeError as exc:
@@ -293,6 +351,7 @@ def personal_pagerank_appnp(
                     if not logged_fallback:
                         print(f"[APPNP] fallback triggered, switch to manual sparse propagation: {exc}")
                         logged_fallback = True
+            fallback_start = time.perf_counter()
             state_rowptr, state_col, state_values = _fallback_iteration(
                 state_rowptr,
                 state_col,
@@ -308,17 +367,18 @@ def personal_pagerank_appnp(
                 alpha,
                 iter_topk,
             )
+            timing_stats["fallback"] += time.perf_counter() - fallback_start
 
-        final_keep = min(topk, iter_topk)
-        if final_keep < iter_topk:
-            state_rows = _rowptr_to_rows(state_rowptr)
-            state_rowptr, state_col, state_values = _segment_topk(
-                state_rows,
+        final_keep = topk if iter_topk is None else min(topk, iter_topk)
+        if final_keep is not None:
+            final_topk_start = time.perf_counter()
+            state_rowptr, state_col, state_values = _segment_topk_from_csr(
+                state_rowptr,
                 state_col,
                 state_values,
-                num_rows,
                 final_keep,
             )
+            timing_stats["final_topk"] += time.perf_counter() - final_topk_start
 
         row_lengths = state_rowptr[1:] - state_rowptr[:-1]
         batch_sources = seed_nodes.repeat_interleave(row_lengths)
@@ -328,4 +388,13 @@ def personal_pagerank_appnp(
         if device.type == "cuda" and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
+    print(
+        "[APPNP][timing] "
+        f"state_to_sparse={timing_stats['state_to_sparse']:.3f}s "
+        f"spmm={timing_stats['spmm']:.3f}s "
+        f"merge={timing_stats['merge']:.3f}s "
+        f"segment_topk={timing_stats['segment_topk']:.3f}s "
+        f"fallback={timing_stats['fallback']:.3f}s "
+        f"final_topk={timing_stats['final_topk']:.3f}s"
+    )
     return torch.cat(edge_index_batches, dim=1), torch.cat(edge_value_batches, dim=0)
