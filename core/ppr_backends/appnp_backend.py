@@ -8,6 +8,13 @@ try:
 except ImportError:  # pragma: no cover - runtime availability depends on the environment
     dglsp = None
 
+_FATAL_CUDA_ERROR_MARKERS = (
+    "illegal memory access",
+    "device-side assert",
+    "unspecified launch failure",
+    "misaligned address",
+)
+
 
 def _normalize_device(device) -> torch.device:
     if isinstance(device, torch.device):
@@ -168,6 +175,11 @@ def _build_transition_dgl_sparse(graph_rowptr: torch.Tensor, graph_col: torch.Te
     return dglsp.from_csr(graph_rowptr, graph_col, values, shape=(num_nodes, num_nodes))
 
 
+def _is_fatal_cuda_runtime_error(exc: RuntimeError) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in _FATAL_CUDA_ERROR_MARKERS)
+
+
 def _dgl_spgemm_iteration(state_rowptr, state_col, state_values, transition_sparse, teleport_rows, teleport_cols, teleport_values, num_rows, num_nodes, alpha, iter_topk, timing_stats=None):
     step_start = time.perf_counter()
     state_sparse = _state_to_dgl_sparse(state_rowptr, state_col, state_values, num_rows, num_nodes)
@@ -304,7 +316,8 @@ def personal_pagerank_appnp(
     iter_topk = None if iter_topk <= 0 else min(iter_topk, num_nodes)
     transition_sparse = _build_transition_dgl_sparse(graph_rowptr, graph_col, degree, num_nodes) if dglsp is not None else None
     use_dgl_spgemm = transition_sparse is not None
-    logged_fallback = False
+    if not use_dgl_spgemm:
+        raise RuntimeError("APPNP requires dgl.sparse and automatic fallback is disabled.")
     timing_stats = {
         "state_to_sparse": 0.0,
         "spmm": 0.0,
@@ -349,27 +362,16 @@ def personal_pagerank_appnp(
                     )
                     continue
                 except RuntimeError as exc:
-                    use_dgl_spgemm = False
-                    if not logged_fallback:
-                        print(f"[APPNP] fallback triggered, switch to manual sparse propagation: {exc}")
-                        logged_fallback = True
-            fallback_start = time.perf_counter()
-            state_rowptr, state_col, state_values = _fallback_iteration(
-                state_rowptr,
-                state_col,
-                state_values,
-                graph_rowptr,
-                graph_col,
-                degree,
-                teleport_rows,
-                teleport_cols,
-                teleport_values,
-                num_rows,
-                num_nodes,
-                alpha,
-                iter_topk,
-            )
-            timing_stats["fallback"] += time.perf_counter() - fallback_start
+                    if _is_fatal_cuda_runtime_error(exc):
+                        raise RuntimeError(
+                            "DGL sparse CUDA path failed with a fatal runtime error and the CUDA context is no longer safe to reuse. "
+                            "Please restart the process and investigate the DGL backend failure. "
+                            f"Original error: {exc}"
+                        ) from exc
+                    raise RuntimeError(
+                        "DGL sparse propagation failed "
+                        f"Original error: {exc}"
+                    ) from exc
 
         final_keep = topk if iter_topk is None else min(topk, iter_topk)
         if final_keep is not None:

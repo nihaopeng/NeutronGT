@@ -46,14 +46,115 @@ def build_zero_loss(model: torch.nn.Module, device: str):
     return zero_loss
 
 
-def load_optional_edge_csr(dataset_dir: str, dataset_name: str):
-    edge_csr_path = os.path.join(dataset_dir, dataset_name, "edge_index_csr.pt")
-    if not os.path.exists(edge_csr_path):
-        return None
-    edge_csr = torch.load(edge_csr_path, map_location="cpu")
+def _validate_edge_csr(edge_csr: dict, edge_csr_path: str):
     if not isinstance(edge_csr, dict) or "rowptr" not in edge_csr or "col" not in edge_csr:
         raise KeyError(f"Unsupported CSR format in {edge_csr_path}; expected keys rowptr and col")
     return edge_csr
+
+
+def _dedup_csr_on_cpu(edge_csr: dict, chunk_edge_budget: int = 10_000_000):
+    rowptr = torch.as_tensor(edge_csr["rowptr"], dtype=torch.long, device="cpu")
+    col = torch.as_tensor(edge_csr["col"], dtype=torch.long, device="cpu")
+    if rowptr.dim() != 1 or col.dim() != 1:
+        raise ValueError("CSR rowptr and col must be 1-D")
+
+    num_nodes = int(rowptr.numel() - 1)
+    if num_nodes < 0:
+        raise ValueError("CSR rowptr must contain at least one element")
+    if col.numel() == 0 or num_nodes == 0:
+        return {"rowptr": rowptr, "col": col, "deduped": True}
+
+    dedup_col_chunks = []
+    dedup_count_chunks = []
+    total_edges = int(col.numel())
+    start_row = 0
+    while start_row < num_nodes:
+        start_edge = int(rowptr[start_row].item())
+        target_edge = min(start_edge + chunk_edge_budget, total_edges)
+        boundary = torch.tensor([target_edge], dtype=rowptr.dtype)
+        end_row = int(torch.searchsorted(rowptr, boundary, right=True).item()) - 1
+        end_row = max(start_row + 1, min(end_row, num_nodes))
+        end_edge = int(rowptr[end_row].item())
+
+        local_lengths = rowptr[start_row + 1:end_row + 1] - rowptr[start_row:end_row]
+        local_col = col[start_edge:end_edge]
+        if local_col.numel() == 0:
+            dedup_count_chunks.append(torch.zeros((end_row - start_row,), dtype=torch.long))
+            start_row = end_row
+            continue
+
+        local_rows = torch.arange(end_row - start_row, dtype=torch.long).repeat_interleave(local_lengths)
+        key = local_rows * num_nodes + local_col
+        unique_key = torch.unique(key, sorted=True)
+        local_dedup_rows = torch.div(unique_key, num_nodes, rounding_mode="floor")
+        local_dedup_cols = unique_key % num_nodes
+        local_counts = torch.bincount(local_dedup_rows, minlength=end_row - start_row)
+
+        dedup_col_chunks.append(local_dedup_cols)
+        dedup_count_chunks.append(local_counts)
+        start_row = end_row
+
+    dedup_counts = torch.cat(dedup_count_chunks, dim=0) if dedup_count_chunks else torch.empty((0,), dtype=torch.long)
+    dedup_rowptr = torch.zeros((num_nodes + 1,), dtype=torch.long)
+    if dedup_counts.numel() > 0:
+        dedup_rowptr[1:] = torch.cumsum(dedup_counts, dim=0)
+    dedup_col = torch.cat(dedup_col_chunks, dim=0) if dedup_col_chunks else torch.empty((0,), dtype=torch.long)
+    return {"rowptr": dedup_rowptr, "col": dedup_col, "deduped": True}
+
+
+def load_optional_edge_csr(dataset_dir: str, dataset_name: str, rank: int = 0, world_size: int = 1):
+    dataset_path = os.path.join(dataset_dir, dataset_name)
+    dedup_edge_csr_path = os.path.join(dataset_path, "edge_index_csr_dedup.pt")
+    raw_edge_csr_path = os.path.join(dataset_path, "edge_index_csr.pt")
+
+    if os.path.exists(dedup_edge_csr_path):
+        return _validate_edge_csr(torch.load(dedup_edge_csr_path, map_location="cpu"), dedup_edge_csr_path)
+    if not os.path.exists(raw_edge_csr_path):
+        return None
+
+    distributed = world_size > 1 and dist.is_available() and dist.is_initialized()
+    if rank == 0:
+        raw_edge_csr = _validate_edge_csr(torch.load(raw_edge_csr_path, map_location="cpu"), raw_edge_csr_path)
+        if raw_edge_csr.get("deduped", False):
+            dedup_edge_csr = {
+                "rowptr": torch.as_tensor(raw_edge_csr["rowptr"], dtype=torch.long, device="cpu"),
+                "col": torch.as_tensor(raw_edge_csr["col"], dtype=torch.long, device="cpu"),
+                "deduped": True,
+            }
+        else:
+            print(f"[rank 0] Building deduplicated CSR cache at {dedup_edge_csr_path}")
+            dedup_edge_csr = _dedup_csr_on_cpu(raw_edge_csr)
+        torch.save(dedup_edge_csr, dedup_edge_csr_path)
+
+    if distributed:
+        dist.barrier()
+    return _validate_edge_csr(torch.load(dedup_edge_csr_path, map_location="cpu"), dedup_edge_csr_path)
+
+
+def _csr_to_edge_index(edge_csr: dict):
+    rowptr = torch.as_tensor(edge_csr["rowptr"], dtype=torch.long, device="cpu")
+    col = torch.as_tensor(edge_csr["col"], dtype=torch.long, device="cpu")
+    if rowptr.numel() <= 1 or col.numel() == 0:
+        return torch.empty((2, 0), dtype=torch.long)
+    row_lengths = rowptr[1:] - rowptr[:-1]
+    rows = torch.arange(row_lengths.numel(), dtype=torch.long).repeat_interleave(row_lengths)
+    return torch.stack([rows, col], dim=0)
+
+
+def _get_node_degrees_from_csr(edge_csr: dict, num_nodes: int):
+    rowptr = torch.as_tensor(edge_csr["rowptr"], dtype=torch.long, device="cpu")
+    col = torch.as_tensor(edge_csr["col"], dtype=torch.long, device="cpu")
+    out_degree = (rowptr[1:] - rowptr[:-1]).to(torch.long)
+    in_degree = torch.bincount(col, minlength=num_nodes).to(torch.long)
+    return in_degree + 1, out_degree + 1
+
+
+def _ensure_edge_index(edge_index, edge_csr_data):
+    if edge_index is not None:
+        return edge_index
+    if edge_csr_data is None:
+        raise ValueError("edge_index is required when CSR graph data is unavailable")
+    return _csr_to_edge_index(edge_csr_data)
 
 
 class StructInfo:
@@ -120,43 +221,42 @@ def gather_ppr_shards(local_ppr: tuple[torch.Tensor, torch.Tensor], rank: int, w
     if world_size <= 1:
         return edge_index, edge_value
 
-    device = edge_value.device
-    local_edge_count = torch.tensor([edge_value.numel()], dtype=torch.long, device=device)
-    gathered_counts = [torch.zeros_like(local_edge_count) for _ in range(world_size)]
-    dist.all_gather(gathered_counts, local_edge_count)
-    edge_counts = [int(item.item()) for item in gathered_counts]
-    max_edges = max(edge_counts, default=0)
+    local_payload = (
+        edge_index.detach().cpu(),
+        edge_value.detach().cpu(),
+    )
+    try:
+        dist.barrier()
+    except Exception as exc:
+        raise RuntimeError(
+            "Distributed PPR shard synchronization failed before gather. This usually means at least one rank did not finish local APPNP propagation cleanly."
+        ) from exc
 
-    if max_edges == 0:
-        empty_index = torch.empty((2, 0), dtype=torch.long, device=device)
-        empty_value = torch.empty((0,), dtype=edge_value.dtype, device=device)
-        return (empty_index, empty_value) if rank == 0 else None
-
-    padded_edge_index = torch.zeros((2, max_edges), dtype=torch.long, device=device)
-    padded_edge_value = torch.zeros((max_edges,), dtype=edge_value.dtype, device=device)
-    if edge_value.numel() > 0:
-        padded_edge_index[:, :edge_value.numel()] = edge_index
-        padded_edge_value[:edge_value.numel()] = edge_value
-
-    gathered_edge_index = [torch.empty_like(padded_edge_index) for _ in range(world_size)]
-    gathered_edge_value = [torch.empty_like(padded_edge_value) for _ in range(world_size)]
-    dist.all_gather(gathered_edge_index, padded_edge_index)
-    dist.all_gather(gathered_edge_value, padded_edge_value)
+    gathered_payloads = [None for _ in range(world_size)] if rank == 0 else None
+    try:
+        dist.gather_object(local_payload, object_gather_list=gathered_payloads, dst=0)
+    except Exception as exc:
+        raise RuntimeError(
+            "Distributed PPR shard gather failed. Check earlier rank-local logs for the first rank that crashed or stalled before entering gather."
+        ) from exc
 
     if rank != 0:
         return None
 
     edge_index_parts = []
     edge_value_parts = []
-    for shard_edge_index, shard_edge_value, shard_count in zip(gathered_edge_index, gathered_edge_value, edge_counts):
-        if shard_count <= 0:
+    for payload in gathered_payloads:
+        if payload is None:
             continue
-        edge_index_parts.append(shard_edge_index[:, :shard_count])
-        edge_value_parts.append(shard_edge_value[:shard_count])
+        shard_edge_index, shard_edge_value = payload
+        if shard_edge_value.numel() <= 0:
+            continue
+        edge_index_parts.append(shard_edge_index)
+        edge_value_parts.append(shard_edge_value)
 
     if not edge_index_parts:
-        empty_index = torch.empty((2, 0), dtype=torch.long, device=device)
-        empty_value = torch.empty((0,), dtype=edge_value.dtype, device=device)
+        empty_index = torch.empty((2, 0), dtype=torch.long)
+        empty_value = torch.empty((0,), dtype=edge_value.dtype)
         return empty_index, empty_value
     return torch.cat(edge_index_parts, dim=1), torch.cat(edge_value_parts, dim=0)
 
@@ -189,7 +289,10 @@ def broadcast_window_state(args, structInfo: StructInfo, feature: torch.Tensor, 
 def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,n_parts=50,related_nodes_topk_rate=5,connect_prob=0.01,edge_csr_data=None):
     graph_in_degree, graph_out_degree = None, None
     if args.struct_enc == "True":
-        graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
+        if edge_csr_data is not None:
+            graph_in_degree, graph_out_degree = _get_node_degrees_from_csr(edge_csr_data, N)
+        else:
+            graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
 
     distributed_appnp_ppr = world_size > 1 and args.ppr_backend == "appnp"
     if world_size > 1 and not distributed_appnp_ppr and args.rank != 0:
@@ -239,8 +342,10 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
         if args.rank != 0:
             return build_placeholder_struct_info(graph_in_degree, graph_out_degree)
 
+    graph_edge_index = _ensure_edge_index(edge_index, edge_csr_data)
+
     isolated_start = time.time()
-    sorted_ppr_matrix = add_isolated_connections(sorted_ppr_matrix, edge_index, N, connect_prob=connect_prob)
+    sorted_ppr_matrix = add_isolated_connections(sorted_ppr_matrix, graph_edge_index, N, connect_prob=connect_prob)
     isolated_time = time.time() - isolated_start
 
     adj_build_start = time.time()
@@ -257,7 +362,7 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
         eweights=eweights,
         n_parts=n_parts,
         feature=feature,
-        edge_index=edge_index,
+        edge_index=graph_edge_index,
         related_nodes_topk_rate=related_nodes_topk_rate,
         attn_type=args.attn_type,
         sorted_ppr_matrix=sorted_ppr_matrix)
@@ -578,8 +683,8 @@ def main():
     
     feature = torch.load(args.dataset_dir + args.dataset + '/x.pt')
     y = torch.load(args.dataset_dir + args.dataset + '/y.pt')
-    edge_index = torch.load(args.dataset_dir + args.dataset + '/edge_index.pt')
-    edge_csr_data = load_optional_edge_csr(args.dataset_dir, args.dataset) if args.ppr_backend == 'appnp' else None
+    edge_csr_data = load_optional_edge_csr(args.dataset_dir, args.dataset, rank=args.rank, world_size=args.world_size) if args.ppr_backend == 'appnp' else None
+    edge_index = None if edge_csr_data is not None else torch.load(args.dataset_dir + args.dataset + '/edge_index.pt')
     N = feature.shape[0]
 
     if args.dataset == 'pokec':
