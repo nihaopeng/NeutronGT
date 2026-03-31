@@ -12,6 +12,7 @@ import os
 import time
 import random
 import pandas as pd
+from types import SimpleNamespace
 import torch.distributed as dist
 from gt_sp.initialize import (
     initialize_distributed,
@@ -27,7 +28,7 @@ from gt_sp.reducer import sync_params_and_buffers, Reducer
 from gt_sp.evaluate import calc_acc
 from gt_sp.utils import LossStagnationDetector, compute_graphormer_spatial_pos_only, get_node_degrees, random_split_idx
 from utils.parser_node_level import parser_add_main_args
-from core.pprPartition import add_isolated_connections, personal_pagerank,build_adj_fromat
+from core.ppr_preprocess import add_isolated_connections, personal_pagerank,build_adj_fromat
 from utils.vis import vis_interface
 import utils.vis as vis
 import utils.logger as logger
@@ -109,10 +110,23 @@ def broadcast_window_state(args, structInfo: StructInfo, feature: torch.Tensor, 
         build_dup_cache_metadata(structInfo.wm, feature, device)
 
 def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,n_parts=50,related_nodes_topk_rate=5,connect_prob=0.01,edge_csr_data=None):
-    # --------------------计算结构信息------------------------------------------------------------
-    # =================== ppr partition =========================
-    # partitioned_results = []
-    # if args.rank == 0:
+    graph_in_degree, graph_out_degree = None, None
+    if args.struct_enc == "True":
+        graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
+
+    if world_size > 1 and args.rank != 0:
+        placeholder_wm = SimpleNamespace(
+            partitioned_results=[],
+            sub_edge_index_for_partition_results=[],
+            dup_nodes_per_partition=[],
+        )
+        return StructInfo(
+            graph_in_degree=graph_in_degree,
+            graph_out_degree=graph_out_degree,
+            sorted_ppr_matrix=None,
+            wm=placeholder_wm,
+        )
+
     sorted_ppr_matrix = personal_pagerank(
         edge_index,
         args.ppr_alpha,
@@ -137,11 +151,6 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
         related_nodes_topk_rate=related_nodes_topk_rate,
         attn_type=args.attn_type,
         sorted_ppr_matrix=sorted_ppr_matrix)
-    
-    # ===== 计算centrality encoding =====
-    graph_in_degree, graph_out_degree = None, None
-    if args.struct_enc == "True":
-        graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
 
     print("node len:",end="")
     sum_nodes_in_compute = 0 
@@ -154,7 +163,7 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
         print(len(p[0]),end="|")
         sum_edges_in_compute += len(p[0])
     print(f"\nsum nodes in compute:{sum_nodes_in_compute},sum edges in compute:{sum_edges_in_compute}")
-    
+
     return StructInfo(
         graph_in_degree=graph_in_degree,
         graph_out_degree=graph_out_degree,
@@ -531,7 +540,7 @@ def main():
     structInfo:StructInfo = build_graph_struct_info(
             args,N,edge_index,feature,seq_parallel_world_size,device,
             topk=args.ppr_topk,
-            n_parts=10,
+            n_parts=50,
             related_nodes_topk_rate=2,
             edge_csr_data=edge_csr_data
         )
@@ -555,9 +564,11 @@ def main():
     if seq_parallel_world_size > 1:
         sync_params_and_buffers(model)
 
-    ppr_tuple = (structInfo.sorted_ppr_matrix[0], structInfo.sorted_ppr_matrix[1])
+    ppr_tuple = None
+    if structInfo.sorted_ppr_matrix is not None:
+        ppr_tuple = (structInfo.sorted_ppr_matrix[0], structInfo.sorted_ppr_matrix[1])
     spatial_pos_preprocess_time = 0.0
-    if args.struct_enc=="True":
+    if args.struct_enc=="True" and args.rank == 0:
         sync_device(device)
         spatial_pos_preprocess_start = time.time()
         structInfo.spatial_pos_by_pid,_ = compute_graphormer_spatial_pos_only(ppr_tuple, wm.partitioned_results, N, max_dist=args.max_dist)

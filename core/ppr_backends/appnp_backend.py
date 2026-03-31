@@ -1,6 +1,11 @@
 import torch
 from tqdm import tqdm
 
+try:
+    import dgl.sparse as dglsp
+except ImportError:  # pragma: no cover - runtime availability depends on the environment
+    dglsp = None
+
 
 def _normalize_device(device) -> torch.device:
     if isinstance(device, torch.device):
@@ -52,66 +57,159 @@ def _build_csr_from_edge_index(edge_index: torch.Tensor, device, num_nodes: int 
     return rowptr, dst, degree, int(num_nodes)
 
 
-def _collect_neighbors(col: torch.Tensor, rowptr: torch.Tensor, node_ids: torch.Tensor):
-    neighbor_chunks = []
-    lengths = []
-    for node in node_ids.tolist():
-        start = int(rowptr[node].item())
-        end = int(rowptr[node + 1].item())
-        neighbors = col[start:end]
-        neighbor_chunks.append(neighbors)
-        lengths.append(neighbors.numel())
-    return neighbor_chunks, lengths
+def _rowptr_to_rows(rowptr: torch.Tensor):
+    lengths = rowptr[1:] - rowptr[:-1]
+    if lengths.numel() == 0:
+        return torch.empty((0,), dtype=torch.long, device=rowptr.device)
+    return torch.arange(lengths.numel(), dtype=torch.long, device=rowptr.device).repeat_interleave(lengths)
 
 
-def _propagate_single_seed(
-    seed: int,
-    current_nodes: torch.Tensor,
-    current_values: torch.Tensor,
-    rowptr: torch.Tensor,
-    col: torch.Tensor,
-    degree: torch.Tensor,
-    alpha: float,
-    iter_topk: int,
-    device,
-):
-    if current_nodes.numel() == 0:
-        return (
-            torch.tensor([seed], dtype=torch.long, device=device),
-            torch.tensor([alpha], dtype=torch.float32, device=device),
-        )
+def _aggregate_sparse_entries(rows: torch.Tensor, cols: torch.Tensor, values: torch.Tensor, num_nodes: int):
+    if rows.numel() == 0:
+        return rows, cols, values
+    key = rows.to(torch.long) * int(num_nodes) + cols.to(torch.long)
+    unique_key, inverse = torch.unique(key, sorted=False, return_inverse=True)
+    aggregated_values = torch.zeros(unique_key.numel(), dtype=values.dtype, device=values.device)
+    aggregated_values.scatter_add_(0, inverse, values)
+    aggregated_rows = torch.div(unique_key, int(num_nodes), rounding_mode="floor")
+    aggregated_cols = unique_key % int(num_nodes)
+    return aggregated_rows, aggregated_cols, aggregated_values
 
-    neighbor_chunks, lengths = _collect_neighbors(col, rowptr, current_nodes)
-    non_empty_chunks = [chunk for chunk in neighbor_chunks if chunk.numel() > 0]
 
-    all_nodes_parts = []
-    all_values_parts = []
-    if non_empty_chunks:
-        valid_lengths = torch.as_tensor(lengths, dtype=torch.long, device=device)
-        repeated_values = ((1.0 - alpha) * current_values / degree[current_nodes]).repeat_interleave(valid_lengths)
-        all_nodes_parts.append(torch.cat(non_empty_chunks, dim=0))
-        all_values_parts.append(repeated_values)
+def _build_rowptr_from_rows(rows: torch.Tensor, num_rows: int):
+    row_counts = torch.bincount(rows, minlength=num_rows)
+    rowptr = torch.zeros((num_rows + 1,), dtype=torch.long, device=rows.device)
+    rowptr[1:] = torch.cumsum(row_counts, dim=0)
+    return rowptr
 
-    all_nodes_parts.append(torch.tensor([seed], dtype=torch.long, device=device))
-    all_values_parts.append(torch.tensor([alpha], dtype=torch.float32, device=device))
 
-    all_nodes = torch.cat(all_nodes_parts, dim=0)
-    all_values = torch.cat(all_values_parts, dim=0)
+def _segment_topk(rows: torch.Tensor, cols: torch.Tensor, values: torch.Tensor, num_rows: int, keep_k: int):
+    if rows.numel() == 0:
+        empty_rowptr = torch.zeros((num_rows + 1,), dtype=torch.long, device=values.device)
+        empty_cols = torch.empty((0,), dtype=torch.long, device=values.device)
+        empty_values = torch.empty((0,), dtype=values.dtype, device=values.device)
+        return empty_rowptr, empty_cols, empty_values
 
-    unique_nodes, inverse = torch.unique(all_nodes, sorted=False, return_inverse=True)
-    aggregated_values = torch.zeros(unique_nodes.numel(), dtype=torch.float32, device=device)
-    aggregated_values.scatter_add_(0, inverse, all_values)
+    sort_idx = torch.argsort(rows)
+    rows = rows[sort_idx]
+    cols = cols[sort_idx]
+    values = values[sort_idx]
+    rowptr = _build_rowptr_from_rows(rows, num_rows)
 
-    keep_k = min(int(iter_topk), int(unique_nodes.numel()))
-    if keep_k <= 0:
-        return (
-            torch.tensor([seed], dtype=torch.long, device=device),
-            torch.tensor([alpha], dtype=torch.float32, device=device),
-        )
+    topk_cols = []
+    topk_values = []
+    next_rowptr = [0]
+    for row_id in range(num_rows):
+        row_start = int(rowptr[row_id].item())
+        row_end = int(rowptr[row_id + 1].item())
+        row_cols = cols[row_start:row_end]
+        row_values = values[row_start:row_end]
+        if row_values.numel() > keep_k:
+            row_values, top_idx = torch.topk(row_values, k=keep_k, largest=True, sorted=True)
+            row_cols = row_cols[top_idx]
+        topk_cols.append(row_cols)
+        topk_values.append(row_values)
+        next_rowptr.append(next_rowptr[-1] + int(row_cols.numel()))
 
-    top_values, top_idx = torch.topk(aggregated_values, k=keep_k, largest=True, sorted=True)
-    top_nodes = unique_nodes[top_idx]
-    return top_nodes, top_values
+    return (
+        torch.tensor(next_rowptr, dtype=torch.long, device=values.device),
+        torch.cat(topk_cols, dim=0) if topk_cols else torch.empty((0,), dtype=torch.long, device=values.device),
+        torch.cat(topk_values, dim=0) if topk_values else torch.empty((0,), dtype=values.dtype, device=values.device),
+    )
+
+
+def _state_to_dgl_sparse(rowptr: torch.Tensor, col: torch.Tensor, values: torch.Tensor, num_rows: int, num_cols: int):
+    if dglsp is None:
+        raise RuntimeError("dgl.sparse is not available")
+    return dglsp.from_csr(rowptr, col, values, shape=(num_rows, num_cols))
+
+
+def _dgl_sparse_to_state(spmat, num_rows: int, keep_k: int):
+    rowptr, col, value_idx = spmat.csr()
+    values = spmat.val
+    if value_idx is not None:
+        values = values[value_idx]
+    rows = _rowptr_to_rows(rowptr)
+    return _segment_topk(rows, col, values, num_rows, keep_k)
+
+
+def _build_transition_dgl_sparse(graph_rowptr: torch.Tensor, graph_col: torch.Tensor, degree: torch.Tensor, num_nodes: int):
+    if dglsp is None:
+        raise RuntimeError("dgl.sparse is not available")
+    src = _rowptr_to_rows(graph_rowptr)
+    values = (1.0 / degree[src]).to(torch.float32) if src.numel() > 0 else torch.empty((0,), dtype=torch.float32, device=graph_rowptr.device)
+    return dglsp.from_csr(graph_rowptr, graph_col, values, shape=(num_nodes, num_nodes))
+
+
+def _dgl_spgemm_iteration(state_rowptr, state_col, state_values, transition_sparse, teleport_sparse, num_rows, num_nodes, alpha, iter_topk):
+    state_sparse = _state_to_dgl_sparse(state_rowptr, state_col, state_values, num_rows, num_nodes)
+    # propagated_sparse = dglsp.matmul(state_sparse, transition_sparse)
+    propagated_sparse = dglsp.spspmm(state_sparse, transition_sparse)
+    propagated_sparse = dglsp.val_like(propagated_sparse, propagated_sparse.val * (1.0 - alpha))
+    prop_row, prop_col = propagated_sparse.coo()
+    tele_row, tele_col = teleport_sparse.coo()
+    merged_indices = torch.stack([
+        torch.cat([prop_row, tele_row], dim=0),
+        torch.cat([prop_col, tele_col], dim=0),
+    ], dim=0)
+    merged_values = torch.cat([propagated_sparse.val, teleport_sparse.val], dim=0)
+    merged_sparse = dglsp.spmatrix(merged_indices, merged_values, shape=(num_rows, num_nodes)).coalesce()
+    return _dgl_sparse_to_state(merged_sparse, num_rows, iter_topk)
+
+
+def _expand_batch_neighbors(batch_rows, batch_nodes, batch_values, graph_rowptr, graph_col, degree, alpha):
+    if batch_nodes.numel() == 0:
+        empty = torch.empty((0,), dtype=torch.long, device=graph_rowptr.device)
+        empty_values = torch.empty((0,), dtype=torch.float32, device=graph_rowptr.device)
+        return empty, empty, empty_values
+
+    lengths = graph_rowptr[batch_nodes + 1] - graph_rowptr[batch_nodes]
+    valid_mask = lengths > 0
+    if not valid_mask.any():
+        empty = torch.empty((0,), dtype=torch.long, device=graph_rowptr.device)
+        empty_values = torch.empty((0,), dtype=torch.float32, device=graph_rowptr.device)
+        return empty, empty, empty_values
+
+    batch_rows = batch_rows[valid_mask]
+    batch_nodes = batch_nodes[valid_mask]
+    batch_values = batch_values[valid_mask]
+    lengths = lengths[valid_mask]
+    total_nnz = int(lengths.sum().item())
+
+    starts = graph_rowptr[batch_nodes]
+    segment_offsets = torch.cumsum(lengths, dim=0) - lengths
+    repeated_starts = starts.repeat_interleave(lengths)
+    repeated_offsets = segment_offsets.repeat_interleave(lengths)
+    local_offsets = torch.arange(total_nnz, dtype=torch.long, device=graph_rowptr.device) - repeated_offsets
+    gather_positions = repeated_starts + local_offsets
+
+    expanded_rows = batch_rows.repeat_interleave(lengths)
+    expanded_cols = graph_col[gather_positions]
+    expanded_values = ((1.0 - alpha) * batch_values / degree[batch_nodes]).repeat_interleave(lengths)
+    return expanded_rows, expanded_cols, expanded_values
+
+
+def _fallback_iteration(state_rowptr, state_col, state_values, graph_rowptr, graph_col, degree, teleport_rows, teleport_cols, teleport_values, num_rows, num_nodes, alpha, iter_topk):
+    state_rows = _rowptr_to_rows(state_rowptr)
+    propagated_rows, propagated_cols, propagated_values = _expand_batch_neighbors(
+        state_rows,
+        state_col,
+        state_values,
+        graph_rowptr,
+        graph_col,
+        degree,
+        alpha,
+    )
+    merged_rows = torch.cat([propagated_rows, teleport_rows], dim=0)
+    merged_cols = torch.cat([propagated_cols, teleport_cols], dim=0)
+    merged_values = torch.cat([propagated_values, teleport_values], dim=0)
+    merged_rows, merged_cols, merged_values = _aggregate_sparse_entries(
+        merged_rows,
+        merged_cols,
+        merged_values,
+        num_nodes,
+    )
+    return _segment_topk(merged_rows, merged_cols, merged_values, num_rows, iter_topk)
 
 
 def personal_pagerank_appnp(
@@ -130,11 +228,11 @@ def personal_pagerank_appnp(
     num_iterations = max(1, int(num_iterations))
 
     if csr_data is not None:
-        rowptr, col, degree, num_nodes = _load_csr_graph(csr_data, device=device, num_nodes=num_nodes)
+        graph_rowptr, graph_col, degree, num_nodes = _load_csr_graph(csr_data, device=device, num_nodes=num_nodes)
     else:
         if edge_index is None:
             raise ValueError("edge_index must be provided when csr_data is None")
-        rowptr, col, degree, num_nodes = _build_csr_from_edge_index(edge_index, device=device, num_nodes=num_nodes)
+        graph_rowptr, graph_col, degree, num_nodes = _build_csr_from_edge_index(edge_index, device=device, num_nodes=num_nodes)
 
     if num_nodes == 0:
         empty_index = torch.empty((2, 0), dtype=torch.long, device=device)
@@ -143,68 +241,89 @@ def personal_pagerank_appnp(
 
     topk = min(int(topk), num_nodes)
     iter_topk = topk if iter_topk is None else min(max(1, int(iter_topk)), num_nodes)
+    transition_sparse = _build_transition_dgl_sparse(graph_rowptr, graph_col, degree, num_nodes) if dglsp is not None else None
+    use_dgl_spgemm = transition_sparse is not None
+    logged_backend = False
+    logged_fallback = False
 
     edge_index_batches = []
     edge_value_batches = []
 
     for start in tqdm(range(0, num_nodes, batch_size), desc="appnp ppr"):
+        if not logged_backend:
+            backend_name = "dgl_spgemm" if use_dgl_spgemm else "fallback"
+            print(f"[APPNP] propagation backend: {backend_name}")
+            logged_backend = True
         end = min(start + batch_size, num_nodes)
-        seed_nodes = torch.arange(start, end, device=device, dtype=torch.long)
+        seed_nodes = torch.arange(start, end, dtype=torch.long, device=device)
+        num_rows = seed_nodes.numel()
 
-        current_rowptr = torch.arange(0, seed_nodes.numel() + 1, dtype=torch.long, device=device)
-        current_col = seed_nodes.clone()
-        current_values = torch.ones(seed_nodes.numel(), dtype=torch.float32, device=device)
+        state_rowptr = torch.arange(0, num_rows + 1, dtype=torch.long, device=device)
+        state_col = seed_nodes.clone()
+        state_values = torch.ones(num_rows, dtype=torch.float32, device=device)
+
+        teleport_rows = torch.arange(num_rows, dtype=torch.long, device=device)
+        teleport_cols = seed_nodes
+        teleport_values = torch.full((num_rows,), alpha, dtype=torch.float32, device=device)
+        teleport_sparse = _state_to_dgl_sparse(
+            torch.arange(0, num_rows + 1, dtype=torch.long, device=device),
+            teleport_cols,
+            teleport_values,
+            num_rows,
+            num_nodes,
+        ) if dglsp is not None else None
 
         for _ in range(num_iterations):
-            next_rowptr = [0]
-            next_cols = []
-            next_values = []
-            for local_seed_idx, seed in enumerate(seed_nodes.tolist()):
-                row_start = int(current_rowptr[local_seed_idx].item())
-                row_end = int(current_rowptr[local_seed_idx + 1].item())
-                top_nodes, top_values = _propagate_single_seed(
-                    seed=seed,
-                    current_nodes=current_col[row_start:row_end],
-                    current_values=current_values[row_start:row_end],
-                    rowptr=rowptr,
-                    col=col,
-                    degree=degree,
-                    alpha=alpha,
-                    iter_topk=iter_topk,
-                    device=device,
-                )
-                next_cols.append(top_nodes)
-                next_values.append(top_values)
-                next_rowptr.append(next_rowptr[-1] + int(top_nodes.numel()))
-
-            current_rowptr = torch.tensor(next_rowptr, dtype=torch.long, device=device)
-            current_col = torch.cat(next_cols, dim=0) if next_cols else torch.empty((0,), dtype=torch.long, device=device)
-            current_values = torch.cat(next_values, dim=0) if next_values else torch.empty((0,), dtype=torch.float32, device=device)
+            if use_dgl_spgemm:
+                try:
+                    state_rowptr, state_col, state_values = _dgl_spgemm_iteration(
+                        state_rowptr,
+                        state_col,
+                        state_values,
+                        transition_sparse,
+                        teleport_sparse,
+                        num_rows,
+                        num_nodes,
+                        alpha,
+                        iter_topk,
+                    )
+                    continue
+                except RuntimeError as exc:
+                    use_dgl_spgemm = False
+                    if not logged_fallback:
+                        print(f"[APPNP] fallback triggered, switch to manual sparse propagation: {exc}")
+                        logged_fallback = True
+            state_rowptr, state_col, state_values = _fallback_iteration(
+                state_rowptr,
+                state_col,
+                state_values,
+                graph_rowptr,
+                graph_col,
+                degree,
+                teleport_rows,
+                teleport_cols,
+                teleport_values,
+                num_rows,
+                num_nodes,
+                alpha,
+                iter_topk,
+            )
 
         final_keep = min(topk, iter_topk)
         if final_keep < iter_topk:
-            final_rowptr = [0]
-            final_cols = []
-            final_values = []
-            for local_seed_idx in range(seed_nodes.numel()):
-                row_start = int(current_rowptr[local_seed_idx].item())
-                row_end = int(current_rowptr[local_seed_idx + 1].item())
-                row_nodes = current_col[row_start:row_end]
-                row_values = current_values[row_start:row_end]
-                if row_values.numel() > final_keep:
-                    row_values, top_idx = torch.topk(row_values, k=final_keep, largest=True, sorted=True)
-                    row_nodes = row_nodes[top_idx]
-                final_cols.append(row_nodes)
-                final_values.append(row_values)
-                final_rowptr.append(final_rowptr[-1] + int(row_nodes.numel()))
-            current_rowptr = torch.tensor(final_rowptr, dtype=torch.long, device=device)
-            current_col = torch.cat(final_cols, dim=0) if final_cols else torch.empty((0,), dtype=torch.long, device=device)
-            current_values = torch.cat(final_values, dim=0) if final_values else torch.empty((0,), dtype=torch.float32, device=device)
+            state_rows = _rowptr_to_rows(state_rowptr)
+            state_rowptr, state_col, state_values = _segment_topk(
+                state_rows,
+                state_col,
+                state_values,
+                num_rows,
+                final_keep,
+            )
 
-        row_lengths = current_rowptr[1:] - current_rowptr[:-1]
+        row_lengths = state_rowptr[1:] - state_rowptr[:-1]
         batch_sources = seed_nodes.repeat_interleave(row_lengths)
-        edge_index_batches.append(torch.stack([batch_sources, current_col], dim=0))
-        edge_value_batches.append(current_values)
+        edge_index_batches.append(torch.stack([batch_sources, state_col], dim=0))
+        edge_value_batches.append(state_values)
 
         if device.type == "cuda" and torch.cuda.is_available():
             torch.cuda.empty_cache()

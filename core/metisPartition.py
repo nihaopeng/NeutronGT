@@ -2,7 +2,7 @@ import pymetis
 import torch
 from tqdm import tqdm
 from torch_geometric.utils import subgraph
-from core.pprPartition import build_adj_fromat, personal_pagerank
+from core.ppr_preprocess import build_adj_fromat, personal_pagerank
 from collections import Counter
 
 class weightMetis_keepParent:
