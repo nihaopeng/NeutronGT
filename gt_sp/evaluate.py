@@ -404,7 +404,7 @@ def sparse_eval_gpu(args, model, x, y, sub_idx, attn_bias, edge_index, device):
         
         x_i, y_i, edge_index_i = x_i.to(device), y_i.to(device), edge_index_i.to(device)
 
-        pred = model(x_i, attn_bias, edge_index_i, attn_type=attn_type)
+        pred,rt_score = model(x_i, attn_bias, edge_index_i, attn_type=attn_type)
         loss = F.nll_loss(pred, y_i.long())
         loss_list.append(loss.item())
         

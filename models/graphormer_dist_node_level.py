@@ -86,6 +86,7 @@ class CoreAttention(nn.Module):
         src = k[edge_index[0].to(torch.long)] 
         dest = q[edge_index[1].to(torch.long)] 
         score = torch.mul(src, dest)  # element-wise multiplication
+        rt_score = score
             
         # Scale scores by sqrt(d)
         score = score / self.scale
@@ -122,7 +123,7 @@ class CoreAttention(nn.Module):
 
         x = wV / (Z + 1e-6)
         
-        return x
+        return x,rt_score
 
 
     def full_attention(self, k, q, v, attn_bias):
@@ -148,7 +149,8 @@ class CoreAttention(nn.Module):
         # Raw attention scores. [b * np, sq+1, sk+1]
         x = torch.matmul(q.transpose(0, 1), # [b * np, sq+1, hn]
                          k.transpose(0, 1).transpose(1, 2))  # [b * np, hn, sk+1]
-
+        rt_score = x
+        
         # change view to [b, np, sq+1, sk+1]
         x = x.view(*output_size)
 
@@ -191,7 +193,7 @@ class CoreAttention(nn.Module):
         # [b, sq+1, np, hn] --> [b, sq+1, hp]
         x = x.view(output_size[0], output_size[2], -1)
 
-        return x
+        return x,rt_score
 
 
     def forward(self, q, k, v, attn_bias=None, edge_index=None, attn_type=None):
@@ -201,10 +203,11 @@ class CoreAttention(nn.Module):
         # q, k, v: [b, s+1, np, hn]
         batch_size, s_len = q.size(0), q.size(1)
         
+        rt_score = None
         if attn_type == "full":
-            x = self.full_attention(k, q, v, attn_bias)
+            x,rt_score = self.full_attention(k, q, v, attn_bias)
         elif attn_type == "sparse":
-            x = self.sparse_attention_bias(k, q, v, edge_index, attn_bias)
+            x,rt_score = self.sparse_attention_bias(k, q, v, edge_index, attn_bias)
             # x = x.float()
         elif attn_type == "flash":
             q = q.half()
@@ -216,7 +219,7 @@ class CoreAttention(nn.Module):
         # [b, s+1, hp]
         x = x.view(batch_size, s_len, -1)
 
-        return x
+        return x,rt_score
 
 
 class MultiHeadAttention(nn.Module):
@@ -259,7 +262,7 @@ class MultiHeadAttention(nn.Module):
         # ==================================
 
         # [b, s/p+1, h]
-        x = self.dist_attn(q, k, v, attn_bias, edge_index, attn_type)
+        x,rt_score = self.dist_attn(q, k, v, attn_bias, edge_index, attn_type)
 
         # =================
         # linear
@@ -268,7 +271,7 @@ class MultiHeadAttention(nn.Module):
         # [b, s/p+1, h]
         x = self.output_layer(x)  
 
-        return x
+        return x,rt_score
 
 
 class EncoderLayer(nn.Module):
@@ -297,7 +300,7 @@ class EncoderLayer(nn.Module):
         # ==================================     
           
         y = self.self_attention_norm(x) # x: [b, s/p+1, h]
-        y = self.self_attention(y, attn_bias, edge_index, attn_type=attn_type)
+        y,rt_score = self.self_attention(y, attn_bias, edge_index, attn_type=attn_type)
         y = self.self_attention_dropout(y)
         x = x + y
         
@@ -309,7 +312,7 @@ class EncoderLayer(nn.Module):
         y = self.ffn(y)
         y = self.ffn_dropout(y)
         x = x + y
-        return x
+        return x,rt_score
     
 
 class Graphormer(nn.Module):
@@ -384,12 +387,15 @@ class Graphormer(nn.Module):
             graph_attn_bias = attn_bias
         
         # transfomrer encoder
-        for enc_layer in self.layers:
-            output = enc_layer(output, attn_bias=graph_attn_bias, edge_index=edge_index, attn_type=attn_type)
+        score = None
+        for i,enc_layer in enumerate(self.layers):
+            output,rt_score = enc_layer(output, attn_bias=graph_attn_bias, edge_index=edge_index, attn_type=attn_type)
+            if i==len(self.layers)-1:
+                score = rt_score
         output = self.final_ln(output)
 
         # output part
         output = self.downstream_out_proj(output[0, 1:, :])
-        return F.log_softmax(output, dim=1)
+        return F.log_softmax(output, dim=1),score
 
 

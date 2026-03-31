@@ -26,6 +26,8 @@ from gt_sp.utils import random_split_idx, get_batch_reorder_blockize, check_cond
 from utils.parser_node_level import parser_add_main_args
 from collections import deque
 
+from utils.vis import analyze_full_vs_mini, save_model_output
+
 def main():
     parser = argparse.ArgumentParser(description='TorchGT node-level training arguments.')
     parser_add_main_args(parser)
@@ -185,6 +187,8 @@ def main():
     compare_ldr = deque([0, 0, 0, 0, 0]) 
     beta_coeffi_list = [0, 1, 1.5, 5, 7, 10, '1']
     beta_max, beta_idx  = 1, 1
+    
+    final_score = None
 
     for epoch in range(1, args.epochs + 1):
         model.to(device)
@@ -210,9 +214,7 @@ def main():
             packed_data = get_batch_reorder_blockize(args, feature, y, idx_i.to("cpu"), sub_split_seq_lens, device, edge_index, N, k=8, block_size=16, beta_coeffi=beta_coeffi_list[beta_idx])
             t_reorder_end = time.time()
 
-            x_i, y_i, edge_index_i, attn_bias = packed_data
-            
-            # print(f"x device:{x_i.device},edge_index device:{edge_index_i.device}")
+            x_i, y_i, edge_index_i, attn_bias, current_global_ids = packed_data
             t_transfer_start = time.time()
             if attn_bias is not None:
                 x_i, y_i, edge_index_i, attn_bias = x_i.to(device), y_i.to(device), edge_index_i.to(device), attn_bias.to(device)
@@ -241,7 +243,12 @@ def main():
                 #     attn_type = "full"       
             
                 
-            out_i = model(x_i, attn_bias, edge_index_i, attn_type=attn_type)    
+            out_i,score_i = model(x_i, attn_bias, edge_index_i, attn_type=attn_type)
+            # print(f"shape score:{score_i.shape}")
+            # avg_attn = score_i.mean(dim=0).detach().cpu().numpy()
+            if epoch == args.epochs:
+                final_score = score_i
+            
             loss = F.nll_loss(out_i, y_i.long())
             optimizer.zero_grad(set_to_none=True) 
             loss.backward()
@@ -254,8 +261,8 @@ def main():
                         dist.all_reduce(param.grad, op=dist.ReduceOp.SUM, group=get_sequence_parallel_group())
 
             optimizer.step()  
-            torch.cuda.synchronize()   
-            t2 = time.time() 
+            torch.cuda.synchronize()
+            t2 = time.time()
             iter_reorder_t_list.append(t_reorder_end - t0)
             iter_cpu2gpu_t_list.append(t1 - t_transfer_start)
             iter_t_list.append(t2 - t1) 
@@ -319,7 +326,7 @@ def main():
             
             val_acc_list.append(val_acc)
             test_acc_list.append(test_acc)
-
+        
         # Adaptive beta
         if args.rank == 0:
             if epoch == 1:
@@ -359,6 +366,14 @@ def main():
             dist.broadcast(beta_idx_broad, src_rank, group=group)
         beta_idx = int(beta_idx_broad.item())
 
+    if args.rank == 0:
+        if args.seq_len < N:
+            # 这里的 current_global_ids 必须是通过相同的 reorder 逻辑得到的
+            save_model_output(args, final_score, current_global_ids, N,best_test, prefix="mini")
+            analyze_full_vs_mini(args.dataset)
+        elif args.seq_len >= N:
+            save_model_output(args, final_score, current_global_ids, N,best_test, prefix="full")
+    
     if args.rank == 0:
         print("Best validation accuracy: {:.2%}, test accuracy: {:.2%}".format(best_val, best_test))
 

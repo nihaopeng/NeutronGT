@@ -536,18 +536,22 @@ class DistributedAttentionNoMerge(torch.nn.Module):
             attn_bias_layer = attn_bias
     
         # [b, s+p, hp]
-        context_layer = self.local_attn(query_layer, key_layer, value_layer, attn_bias_layer, edge_index, attn_type, *args)
+        context_layer,rt_score_layer = self.local_attn(query_layer, key_layer, value_layer, attn_bias_layer, edge_index, attn_type, *args)
+        
+        rt_score = None
         
         if self.training:
             # [b, s+p, hp] -> [b, s+p, hp]
             context_layer = copy_global_token0(context_layer, extend_dim=1)
             # [b, s+p, hp] -> [b, s/p+1, h]
             output = _SeqAllToAll.apply(self.spg, context_layer, self.gather_idx, self.scatter_idx)
+            rt_score = _SeqAllToAll.apply(self.spg, rt_score_layer, self.gather_idx, self.scatter_idx)
         else:
-            output = context_layer
+            output,rt_score = context_layer,rt_score_layer
 
         # out e.g., [b, s/p+1, h]
-        return output
+        assert rt_score is not None, "rt_score is None!"
+        return output,rt_score
 
 
 DistributedAttentionAll2allNoMerge = DistributedAttentionNoMerge
