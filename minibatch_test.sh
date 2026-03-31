@@ -1,0 +1,1 @@
+python main-batch.py --dataset $1 --metric acc --method nodeformer --lr 1e-2 --weight_decay 0. --num_layers 3 --hidden_channels 64 --num_heads 1 --rb_order 1 --rb_trans identity --lamda 0.1 --M 50 --K 5 --use_bn --use_residual --use_gumbel --use_act --use_jk --batch_size $2 --runs 1 --epochs 200 --eval_step 9 --device 0 --protocol supervised --rand_split
