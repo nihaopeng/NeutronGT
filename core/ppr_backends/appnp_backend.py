@@ -121,16 +121,20 @@ def _segment_topk_from_csr(rowptr: torch.Tensor, cols: torch.Tensor, values: tor
     topk_cols = torch.empty((total_kept,), dtype=torch.long, device=values.device)
     topk_values = torch.empty((total_kept,), dtype=values.dtype, device=values.device)
 
-    for row_id in torch.nonzero(row_lengths, as_tuple=False).flatten().tolist():
-        row_start = int(rowptr[row_id])
-        row_end = int(rowptr[row_id + 1])
+    rowptr_list = rowptr.tolist()
+    next_rowptr_list = next_rowptr.tolist()
+    nonzero_rows = torch.nonzero(row_lengths, as_tuple=False).flatten().tolist()
+    for row_id in nonzero_rows:
+        row_start = rowptr_list[row_id]
+        row_end = rowptr_list[row_id + 1]
+        out_start = next_rowptr_list[row_id]
+        out_end = next_rowptr_list[row_id + 1]
+
         row_cols = cols[row_start:row_end]
         row_values = values[row_start:row_end]
         if row_values.numel() > keep_k:
             row_values, top_idx = torch.topk(row_values, k=keep_k, largest=True, sorted=True)
             row_cols = row_cols[top_idx]
-        out_start = int(next_rowptr[row_id])
-        out_end = int(next_rowptr[row_id + 1])
         topk_cols[out_start:out_end] = row_cols
         topk_values[out_start:out_end] = row_values
 
@@ -300,7 +304,6 @@ def personal_pagerank_appnp(
     iter_topk = None if iter_topk <= 0 else min(iter_topk, num_nodes)
     transition_sparse = _build_transition_dgl_sparse(graph_rowptr, graph_col, degree, num_nodes) if dglsp is not None else None
     use_dgl_spgemm = transition_sparse is not None
-    logged_backend = False
     logged_fallback = False
     timing_stats = {
         "state_to_sparse": 0.0,
@@ -315,16 +318,6 @@ def personal_pagerank_appnp(
     edge_value_batches = []
 
     for start in tqdm(range(source_start, source_end, batch_size), desc="appnp ppr"):
-        if not logged_backend:
-            backend_name = "dgl_spgemm" if use_dgl_spgemm else "fallback"
-            iter_topk_desc = "disabled" if iter_topk is None else str(iter_topk)
-            print(f"[APPNP] propagation backend: {backend_name}")
-            print(f"[APPNP] iter_topk: {iter_topk_desc}")
-            if iter_topk is None:
-                print("[APPNP] iterative pruning: disabled, keep full propagation state until final top-k")
-            else:
-                print("[APPNP] iterative pruning: enabled approximate mode, intermediate nodes outside iter_topk are discarded")
-            logged_backend = True
         end = min(start + batch_size, source_end)
         seed_nodes = torch.arange(start, end, dtype=torch.long, device=device)
         num_rows = seed_nodes.numel()
@@ -397,13 +390,4 @@ def personal_pagerank_appnp(
         if device.type == "cuda" and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    print(
-        "[APPNP][timing] "
-        f"state_to_sparse={timing_stats['state_to_sparse']:.3f}s "
-        f"spmm={timing_stats['spmm']:.3f}s "
-        f"merge={timing_stats['merge']:.3f}s "
-        f"segment_topk={timing_stats['segment_topk']:.3f}s "
-        f"fallback={timing_stats['fallback']:.3f}s "
-        f"final_topk={timing_stats['final_topk']:.3f}s"
-    )
     return torch.cat(edge_index_batches, dim=1), torch.cat(edge_value_batches, dim=0)
