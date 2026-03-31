@@ -151,9 +151,13 @@ def personal_pagerank(
     csr_data=None,
     num_nodes: int | None = None,
     iter_topk: int | None = None,
+    source_start: int | None = None,
+    source_end: int | None = None,
 ) -> tuple:
     """为所有节点计算个性化PageRank。"""
     if backend == "torch_geometric":
+        if source_start is not None or source_end is not None:
+            raise NotImplementedError("torch_geometric backend does not support distributed source sharding")
         return personal_pagerank_torch_geometric(edge_index, alpha, topk=topk, eps=eps, device=device)
     if backend == "appnp":
         if num_iterations is None:
@@ -168,6 +172,8 @@ def personal_pagerank(
             csr_data=csr_data,
             num_nodes=num_nodes,
             iter_topk=iter_topk,
+            source_start=source_start,
+            source_end=source_end,
         )
     raise ValueError(f"Unsupported PPR backend: {backend}")
 

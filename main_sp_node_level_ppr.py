@@ -73,15 +73,92 @@ def build_local_partitions(wm: weightMetis_keepParent, rank: int, world_size: in
 
 
 def build_dup_cache_metadata(wm: weightMetis_keepParent, feature: torch.Tensor, device: str):
-    all_dup_nodes = torch.cat(wm.dup_nodes_per_partition)
+    if not getattr(wm, "dup_nodes_per_partition", None):
+        wm.dup_indices = []
+        wm.dup_nodes_per_partition_feature = feature.new_empty((0, feature.shape[1])).to(device)
+        return torch.empty((0,), dtype=torch.long)
+
+    non_empty_dup_nodes = [dup for dup in wm.dup_nodes_per_partition if dup.numel() > 0]
+    if not non_empty_dup_nodes:
+        wm.dup_indices = [[] for _ in wm.dup_nodes_per_partition]
+        wm.dup_nodes_per_partition_feature = feature.new_empty((0, feature.shape[1])).to(device)
+        return torch.empty((0,), dtype=torch.long)
+
+    all_dup_nodes = torch.cat(non_empty_dup_nodes)
     dup_unique_sorted = torch.unique(all_dup_nodes, sorted=True).flip(0)
     hash_index = {int(node): i for i, node in enumerate(dup_unique_sorted)}
     wm.dup_indices = [
-        [hash_index[int(node)] for node in partition]
+        [hash_index[int(node)] for node in partition if int(node) in hash_index]
         for partition in wm.dup_nodes_per_partition
     ]
-    wm.dup_nodes_per_partition_feature = feature[torch.tensor(dup_unique_sorted)].to(device)
+    wm.dup_nodes_per_partition_feature = feature[dup_unique_sorted.cpu()].to(device)
     return dup_unique_sorted
+
+
+def build_placeholder_struct_info(graph_in_degree, graph_out_degree):
+    placeholder_wm = SimpleNamespace(
+        partitioned_results=[],
+        sub_edge_index_for_partition_results=[],
+        dup_nodes_per_partition=[],
+    )
+    return StructInfo(
+        graph_in_degree=graph_in_degree,
+        graph_out_degree=graph_out_degree,
+        sorted_ppr_matrix=None,
+        wm=placeholder_wm,
+    )
+
+
+def get_rank_source_range(num_nodes: int, rank: int, world_size: int):
+    start = (num_nodes * rank) // world_size
+    end = (num_nodes * (rank + 1)) // world_size
+    return start, end
+
+
+def gather_ppr_shards(local_ppr: tuple[torch.Tensor, torch.Tensor], rank: int, world_size: int):
+    edge_index, edge_value = local_ppr
+    if world_size <= 1:
+        return edge_index, edge_value
+
+    device = edge_value.device
+    local_edge_count = torch.tensor([edge_value.numel()], dtype=torch.long, device=device)
+    gathered_counts = [torch.zeros_like(local_edge_count) for _ in range(world_size)]
+    dist.all_gather(gathered_counts, local_edge_count)
+    edge_counts = [int(item.item()) for item in gathered_counts]
+    max_edges = max(edge_counts, default=0)
+
+    if max_edges == 0:
+        empty_index = torch.empty((2, 0), dtype=torch.long, device=device)
+        empty_value = torch.empty((0,), dtype=edge_value.dtype, device=device)
+        return (empty_index, empty_value) if rank == 0 else None
+
+    padded_edge_index = torch.zeros((2, max_edges), dtype=torch.long, device=device)
+    padded_edge_value = torch.zeros((max_edges,), dtype=edge_value.dtype, device=device)
+    if edge_value.numel() > 0:
+        padded_edge_index[:, :edge_value.numel()] = edge_index
+        padded_edge_value[:edge_value.numel()] = edge_value
+
+    gathered_edge_index = [torch.empty_like(padded_edge_index) for _ in range(world_size)]
+    gathered_edge_value = [torch.empty_like(padded_edge_value) for _ in range(world_size)]
+    dist.all_gather(gathered_edge_index, padded_edge_index)
+    dist.all_gather(gathered_edge_value, padded_edge_value)
+
+    if rank != 0:
+        return None
+
+    edge_index_parts = []
+    edge_value_parts = []
+    for shard_edge_index, shard_edge_value, shard_count in zip(gathered_edge_index, gathered_edge_value, edge_counts):
+        if shard_count <= 0:
+            continue
+        edge_index_parts.append(shard_edge_index[:, :shard_count])
+        edge_value_parts.append(shard_edge_value[:shard_count])
+
+    if not edge_index_parts:
+        empty_index = torch.empty((2, 0), dtype=torch.long, device=device)
+        empty_value = torch.empty((0,), dtype=edge_value.dtype, device=device)
+        return empty_index, empty_value
+    return torch.cat(edge_index_parts, dim=1), torch.cat(edge_value_parts, dim=0)
 
 
 def broadcast_window_state(args, structInfo: StructInfo, feature: torch.Tensor, device: str):
@@ -114,21 +191,18 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
     if args.struct_enc == "True":
         graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
 
-    if world_size > 1 and args.rank != 0:
-        placeholder_wm = SimpleNamespace(
-            partitioned_results=[],
-            sub_edge_index_for_partition_results=[],
-            dup_nodes_per_partition=[],
-        )
-        return StructInfo(
-            graph_in_degree=graph_in_degree,
-            graph_out_degree=graph_out_degree,
-            sorted_ppr_matrix=None,
-            wm=placeholder_wm,
-        )
+    distributed_appnp_ppr = world_size > 1 and args.ppr_backend == "appnp"
+    if world_size > 1 and not distributed_appnp_ppr and args.rank != 0:
+        return build_placeholder_struct_info(graph_in_degree, graph_out_degree)
 
-    ppr_start = time.time()
-    sorted_ppr_matrix = personal_pagerank(
+    source_start, source_end = 0, N
+    if distributed_appnp_ppr:
+        source_start, source_end = get_rank_source_range(N, args.rank, world_size)
+        print(f"[rank {args.rank}] PPR source range: [{source_start}, {source_end})")
+
+    sync_device(device)
+    local_ppr_start = time.time()
+    local_sorted_ppr_matrix = personal_pagerank(
         edge_index,
         args.ppr_alpha,
         topk=topk,
@@ -140,8 +214,30 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
         csr_data=edge_csr_data,
         num_nodes=N,
         iter_topk=args.ppr_iter_topk,
+        source_start=source_start if distributed_appnp_ppr else None,
+        source_end=source_end if distributed_appnp_ppr else None,
     )
-    ppr_time = time.time() - ppr_start
+    sync_device(device)
+    local_ppr_time = time.time() - local_ppr_start
+    local_edge_count = int(local_sorted_ppr_matrix[1].numel())
+    print(f"[rank {args.rank}] Local PPR propagation time: {local_ppr_time:.3f}s")
+    print(f"[rank {args.rank}] Local PPR edge count: {local_edge_count}")
+
+    sorted_ppr_matrix = local_sorted_ppr_matrix
+    ppr_time = local_ppr_time
+    gather_time = 0.0
+    if distributed_appnp_ppr:
+        sync_device(device)
+        gather_start = time.time()
+        sorted_ppr_matrix = gather_ppr_shards(local_sorted_ppr_matrix, rank=args.rank, world_size=world_size)
+        sync_device(device)
+        gather_time = time.time() - gather_start
+        if args.rank == 0 and sorted_ppr_matrix is not None:
+            ppr_time += gather_time
+            print(f"[rank 0] Gather PPR shards time: {gather_time:.3f}s")
+            print(f"[rank 0] Gathered PPR edge count: {int(sorted_ppr_matrix[1].numel())}")
+        if args.rank != 0:
+            return build_placeholder_struct_info(graph_in_degree, graph_out_degree)
 
     isolated_start = time.time()
     sorted_ppr_matrix = add_isolated_connections(sorted_ppr_matrix, edge_index, N, connect_prob=connect_prob)
@@ -151,6 +247,8 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
     csr_adjacency, eweights, _ = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
     adj_build_time = time.time() - adj_build_start
     print(f"PPR propagation time: {ppr_time:.3f}s")
+    if distributed_appnp_ppr:
+        print(f"PPR shard gather time: {gather_time:.3f}s")
     print(f"Isolated-node merge time: {isolated_time:.3f}s")
     print(f"Adjacency build time: {adj_build_time:.3f}s")
 
@@ -595,7 +693,7 @@ def main():
             print("Spatial position preprocess time: {:.3f}s".format(spatial_pos_preprocess_time))
         print("====================================================================================")
 
-    if args.use_cache:
+    if args.use_cache and (args.world_size <= 1 or args.rank == 0):
         dup_unique_sorted = build_dup_cache_metadata(wm, feature, device)
         if args.rank == 0:
             print("\n" + "="*80)
@@ -603,7 +701,7 @@ def main():
             print("="*80)
             total_dup_nodes = len(dup_unique_sorted)
             total_nodes = N
-            dup_ratio_global = total_dup_nodes / total_nodes * 100
+            dup_ratio_global = total_dup_nodes / total_nodes * 100 if total_nodes > 0 else 0.0
             print(f"全局统计:")
             print(f"  - 总节点数: {total_nodes}")
             print(f"  - 重复节点数: {total_dup_nodes}")
@@ -660,12 +758,14 @@ def main():
             if args.rank == 0 and hasattr(wm, 'dup_nodes_per_partition'):
                 print(f"\n[窗口调整后] 重复节点统计:")
                 total_dup_nodes = sum(len(dup_nodes) for dup_nodes in wm.dup_nodes_per_partition)
-                unique_dup_nodes = len(torch.unique(torch.cat(wm.dup_nodes_per_partition)))
+                non_empty_dup_nodes = [dup for dup in wm.dup_nodes_per_partition if len(dup) > 0]
+                unique_dup_nodes = len(torch.unique(torch.cat(non_empty_dup_nodes))) if non_empty_dup_nodes else 0
                 total_partition_nodes = sum(len(partition) for partition in wm.partitioned_results)
                 print(f"  - 总分区节点数: {total_partition_nodes}")
                 print(f"  - 重复节点出现次数: {total_dup_nodes}")
                 print(f"  - 唯一重复节点数: {unique_dup_nodes}")
-                print(f"  - 平均重复度: {total_dup_nodes/unique_dup_nodes:.2f}")
+                avg_dup = total_dup_nodes / unique_dup_nodes if unique_dup_nodes > 0 else 0.0
+                print(f"  - 平均重复度: {avg_dup:.2f}")
             if seq_parallel_world_size > 1:
                 dist.barrier()
             sync_device(device)

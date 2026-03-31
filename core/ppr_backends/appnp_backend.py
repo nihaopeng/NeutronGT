@@ -269,6 +269,8 @@ def personal_pagerank_appnp(
     csr_data=None,
     num_nodes: int | None = None,
     iter_topk: int | None = None,
+    source_start: int | None = None,
+    source_end: int | None = None,
 ) -> tuple:
     device = _normalize_device(device)
     batch_size = max(1, int(batch_size))
@@ -282,6 +284,13 @@ def personal_pagerank_appnp(
         graph_rowptr, graph_col, degree, num_nodes = _build_csr_from_edge_index(edge_index, device=device, num_nodes=num_nodes)
 
     if num_nodes == 0:
+        empty_index = torch.empty((2, 0), dtype=torch.long, device=device)
+        empty_value = torch.empty((0,), dtype=torch.float32, device=device)
+        return empty_index, empty_value
+
+    source_start = 0 if source_start is None else max(0, min(int(source_start), num_nodes))
+    source_end = num_nodes if source_end is None else max(source_start, min(int(source_end), num_nodes))
+    if source_start >= source_end:
         empty_index = torch.empty((2, 0), dtype=torch.long, device=device)
         empty_value = torch.empty((0,), dtype=torch.float32, device=device)
         return empty_index, empty_value
@@ -305,7 +314,7 @@ def personal_pagerank_appnp(
     edge_index_batches = []
     edge_value_batches = []
 
-    for start in tqdm(range(0, num_nodes, batch_size), desc="appnp ppr"):
+    for start in tqdm(range(source_start, source_end, batch_size), desc="appnp ppr"):
         if not logged_backend:
             backend_name = "dgl_spgemm" if use_dgl_spgemm else "fallback"
             iter_topk_desc = "disabled" if iter_topk is None else str(iter_topk)
@@ -316,7 +325,7 @@ def personal_pagerank_appnp(
             else:
                 print("[APPNP] iterative pruning: enabled approximate mode, intermediate nodes outside iter_topk are discarded")
             logged_backend = True
-        end = min(start + batch_size, num_nodes)
+        end = min(start + batch_size, source_end)
         seed_nodes = torch.arange(start, end, dtype=torch.long, device=device)
         num_rows = seed_nodes.numel()
 
