@@ -211,6 +211,8 @@ def main():
             t_reorder_end = time.time()
 
             x_i, y_i, edge_index_i, attn_bias = packed_data
+            
+            # print(f"x device:{x_i.device},edge_index device:{edge_index_i.device}")
             t_transfer_start = time.time()
             if attn_bias is not None:
                 x_i, y_i, edge_index_i, attn_bias = x_i.to(device), y_i.to(device), edge_index_i.to(device), attn_bias.to(device)
