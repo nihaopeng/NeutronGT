@@ -3,17 +3,9 @@ import time
 import torch
 from tqdm import tqdm
 
-try:
-    import dgl.sparse as dglsp
-except ImportError:  # pragma: no cover - runtime availability depends on the environment
-    dglsp = None
+from .cusparse_ops import csr_spgemm
 
-_FATAL_CUDA_ERROR_MARKERS = (
-    "illegal memory access",
-    "device-side assert",
-    "unspecified launch failure",
-    "misaligned address",
-)
+_INT32_MAX = 2**31 - 1
 
 
 def _normalize_device(device) -> torch.device:
@@ -153,50 +145,38 @@ def _segment_topk(rows: torch.Tensor, cols: torch.Tensor, values: torch.Tensor, 
     return _segment_topk_from_csr(rowptr, cols, values, keep_k)
 
 
-def _state_to_dgl_sparse(rowptr: torch.Tensor, col: torch.Tensor, values: torch.Tensor, num_rows: int, num_cols: int):
-    if dglsp is None:
-        raise RuntimeError("dgl.sparse is not available")
-    return dglsp.from_csr(rowptr, col, values, shape=(num_rows, num_cols))
+def _ensure_cusparse_indexable(num_nodes: int, rowptr: torch.Tensor, col: torch.Tensor, name: str):
+    nnz = int(col.numel())
+    if num_nodes > _INT32_MAX:
+        raise RuntimeError(f"{name} num_nodes={num_nodes} exceeds cuSPARSE int32 index limit")
+    if nnz > _INT32_MAX:
+        raise RuntimeError(f"{name} nnz={nnz} exceeds cuSPARSE int32 index limit")
+    if rowptr.numel() > 0 and int(rowptr[-1].item()) > _INT32_MAX:
+        raise RuntimeError(f"{name} rowptr[-1]={int(rowptr[-1].item())} exceeds cuSPARSE int32 index limit")
 
 
-def _dgl_sparse_to_state(spmat, num_rows: int, keep_k: int | None):
-    rowptr, col, value_idx = spmat.csr()
-    values = spmat.val
-    if value_idx is not None:
-        values = values[value_idx]
-    return _segment_topk_from_csr(rowptr, col, values, keep_k)
-
-
-def _build_transition_dgl_sparse(graph_rowptr: torch.Tensor, graph_col: torch.Tensor, degree: torch.Tensor, num_nodes: int):
-    if dglsp is None:
-        raise RuntimeError("dgl.sparse is not available")
+def _build_transition_csr_values(graph_rowptr: torch.Tensor, graph_col: torch.Tensor, degree: torch.Tensor):
     src = _rowptr_to_rows(graph_rowptr)
-    values = (1.0 / degree[src]).to(torch.float32) if src.numel() > 0 else torch.empty((0,), dtype=torch.float32, device=graph_rowptr.device)
-    return dglsp.from_csr(graph_rowptr, graph_col, values, shape=(num_nodes, num_nodes))
+    if src.numel() == 0:
+        return torch.empty((0,), dtype=torch.float32, device=graph_rowptr.device)
+    return (1.0 / degree[src]).to(torch.float32)
 
 
-def _is_fatal_cuda_runtime_error(exc: RuntimeError) -> bool:
-    message = str(exc).lower()
-    return any(marker in message for marker in _FATAL_CUDA_ERROR_MARKERS)
-
-
-def _dgl_spgemm_iteration(state_rowptr, state_col, state_values, transition_sparse, teleport_rows, teleport_cols, teleport_values, num_rows, num_nodes, alpha, iter_topk, timing_stats=None):
+def _cusparse_spgemm_iteration(state_rowptr, state_col, state_values, transition_rowptr, transition_col, transition_values, teleport_rows, teleport_cols, teleport_values, num_rows, num_nodes, alpha, iter_topk, timing_stats=None):
     step_start = time.perf_counter()
-    state_sparse = _state_to_dgl_sparse(state_rowptr, state_col, state_values, num_rows, num_nodes)
-    if timing_stats is not None:
-        timing_stats["state_to_sparse"] += time.perf_counter() - step_start
-
-    step_start = time.perf_counter()
-    propagated_sparse = dglsp.spspmm(state_sparse, transition_sparse)
-    propagated_sparse = dglsp.val_like(propagated_sparse, propagated_sparse.val * (1.0 - alpha))
+    prop_rowptr, prop_col, prop_values = csr_spgemm(
+        state_rowptr,
+        state_col,
+        state_values,
+        transition_rowptr,
+        transition_col,
+        transition_values,
+    )
+    prop_values = prop_values * (1.0 - alpha)
     if timing_stats is not None:
         timing_stats["spmm"] += time.perf_counter() - step_start
 
     step_start = time.perf_counter()
-    prop_rowptr, prop_col, value_idx = propagated_sparse.csr()
-    prop_values = propagated_sparse.val
-    if value_idx is not None:
-        prop_values = prop_values[value_idx]
     prop_rows = _rowptr_to_rows(prop_rowptr)
     merged_rows = torch.cat([prop_rows, teleport_rows], dim=0)
     merged_cols = torch.cat([prop_col, teleport_cols], dim=0)
@@ -220,61 +200,6 @@ def _dgl_spgemm_iteration(state_rowptr, state_col, state_values, transition_spar
     return next_state
 
 
-def _expand_batch_neighbors(batch_rows, batch_nodes, batch_values, graph_rowptr, graph_col, degree, alpha):
-    if batch_nodes.numel() == 0:
-        empty = torch.empty((0,), dtype=torch.long, device=graph_rowptr.device)
-        empty_values = torch.empty((0,), dtype=torch.float32, device=graph_rowptr.device)
-        return empty, empty, empty_values
-
-    lengths = graph_rowptr[batch_nodes + 1] - graph_rowptr[batch_nodes]
-    valid_mask = lengths > 0
-    if not valid_mask.any():
-        empty = torch.empty((0,), dtype=torch.long, device=graph_rowptr.device)
-        empty_values = torch.empty((0,), dtype=torch.float32, device=graph_rowptr.device)
-        return empty, empty, empty_values
-
-    batch_rows = batch_rows[valid_mask]
-    batch_nodes = batch_nodes[valid_mask]
-    batch_values = batch_values[valid_mask]
-    lengths = lengths[valid_mask]
-    total_nnz = int(lengths.sum().item())
-
-    starts = graph_rowptr[batch_nodes]
-    segment_offsets = torch.cumsum(lengths, dim=0) - lengths
-    repeated_starts = starts.repeat_interleave(lengths)
-    repeated_offsets = segment_offsets.repeat_interleave(lengths)
-    local_offsets = torch.arange(total_nnz, dtype=torch.long, device=graph_rowptr.device) - repeated_offsets
-    gather_positions = repeated_starts + local_offsets
-
-    expanded_rows = batch_rows.repeat_interleave(lengths)
-    expanded_cols = graph_col[gather_positions]
-    expanded_values = ((1.0 - alpha) * batch_values / degree[batch_nodes]).repeat_interleave(lengths)
-    return expanded_rows, expanded_cols, expanded_values
-
-
-def _fallback_iteration(state_rowptr, state_col, state_values, graph_rowptr, graph_col, degree, teleport_rows, teleport_cols, teleport_values, num_rows, num_nodes, alpha, iter_topk):
-    state_rows = _rowptr_to_rows(state_rowptr)
-    propagated_rows, propagated_cols, propagated_values = _expand_batch_neighbors(
-        state_rows,
-        state_col,
-        state_values,
-        graph_rowptr,
-        graph_col,
-        degree,
-        alpha,
-    )
-    merged_rows = torch.cat([propagated_rows, teleport_rows], dim=0)
-    merged_cols = torch.cat([propagated_cols, teleport_cols], dim=0)
-    merged_values = torch.cat([propagated_values, teleport_values], dim=0)
-    merged_rows, merged_cols, merged_values = _aggregate_sparse_entries(
-        merged_rows,
-        merged_cols,
-        merged_values,
-        num_nodes,
-    )
-    return _segment_topk(merged_rows, merged_cols, merged_values, num_rows, iter_topk)
-
-
 def personal_pagerank_appnp(
     edge_index,
     alpha,
@@ -289,6 +214,8 @@ def personal_pagerank_appnp(
     source_end: int | None = None,
 ) -> tuple:
     device = _normalize_device(device)
+    if device.type != "cuda":
+        raise RuntimeError("APPNP cuSPARSE backend requires a CUDA device")
     batch_size = max(1, int(batch_size))
     num_iterations = max(1, int(num_iterations))
 
@@ -304,6 +231,11 @@ def personal_pagerank_appnp(
         empty_value = torch.empty((0,), dtype=torch.float32, device=device)
         return empty_index, empty_value
 
+    _ensure_cusparse_indexable(num_nodes, graph_rowptr, graph_col, "graph_csr")
+    transition_rowptr = graph_rowptr
+    transition_col = graph_col
+    transition_values = _build_transition_csr_values(graph_rowptr, graph_col, degree)
+
     source_start = 0 if source_start is None else max(0, min(int(source_start), num_nodes))
     source_end = num_nodes if source_end is None else max(source_start, min(int(source_end), num_nodes))
     if source_start >= source_end:
@@ -314,16 +246,10 @@ def personal_pagerank_appnp(
     topk = min(int(topk), num_nodes)
     iter_topk = topk if iter_topk is None else int(iter_topk)
     iter_topk = None if iter_topk <= 0 else min(iter_topk, num_nodes)
-    transition_sparse = _build_transition_dgl_sparse(graph_rowptr, graph_col, degree, num_nodes) if dglsp is not None else None
-    use_dgl_spgemm = transition_sparse is not None
-    if not use_dgl_spgemm:
-        raise RuntimeError("APPNP requires dgl.sparse and automatic fallback is disabled.")
     timing_stats = {
-        "state_to_sparse": 0.0,
         "spmm": 0.0,
         "merge": 0.0,
         "segment_topk": 0.0,
-        "fallback": 0.0,
         "final_topk": 0.0,
     }
 
@@ -344,34 +270,23 @@ def personal_pagerank_appnp(
         teleport_values = torch.full((num_rows,), alpha, dtype=torch.float32, device=device)
 
         for _ in range(num_iterations):
-            if use_dgl_spgemm:
-                try:
-                    state_rowptr, state_col, state_values = _dgl_spgemm_iteration(
-                        state_rowptr,
-                        state_col,
-                        state_values,
-                        transition_sparse,
-                        teleport_rows,
-                        teleport_cols,
-                        teleport_values,
-                        num_rows,
-                        num_nodes,
-                        alpha,
-                        iter_topk,
-                        timing_stats=timing_stats,
-                    )
-                    continue
-                except RuntimeError as exc:
-                    if _is_fatal_cuda_runtime_error(exc):
-                        raise RuntimeError(
-                            "DGL sparse CUDA path failed with a fatal runtime error and the CUDA context is no longer safe to reuse. "
-                            "Please restart the process and investigate the DGL backend failure. "
-                            f"Original error: {exc}"
-                        ) from exc
-                    raise RuntimeError(
-                        "DGL sparse propagation failed "
-                        f"Original error: {exc}"
-                    ) from exc
+            _ensure_cusparse_indexable(num_nodes, state_rowptr, state_col, "state_csr")
+            state_rowptr, state_col, state_values = _cusparse_spgemm_iteration(
+                state_rowptr,
+                state_col,
+                state_values,
+                transition_rowptr,
+                transition_col,
+                transition_values,
+                teleport_rows,
+                teleport_cols,
+                teleport_values,
+                num_rows,
+                num_nodes,
+                alpha,
+                iter_topk,
+                timing_stats=timing_stats,
+            )
 
         final_keep = topk if iter_topk is None else min(topk, iter_topk)
         if final_keep is not None:

@@ -46,89 +46,27 @@ def build_zero_loss(model: torch.nn.Module, device: str):
     return zero_loss
 
 
-def _validate_edge_csr(edge_csr: dict, edge_csr_path: str):
-    if not isinstance(edge_csr, dict) or "rowptr" not in edge_csr or "col" not in edge_csr:
-        raise KeyError(f"Unsupported CSR format in {edge_csr_path}; expected keys rowptr and col")
-    return edge_csr
-
-
-def _dedup_csr_on_cpu(edge_csr: dict, chunk_edge_budget: int = 10_000_000):
-    rowptr = torch.as_tensor(edge_csr["rowptr"], dtype=torch.long, device="cpu")
-    col = torch.as_tensor(edge_csr["col"], dtype=torch.long, device="cpu")
-    if rowptr.dim() != 1 or col.dim() != 1:
-        raise ValueError("CSR rowptr and col must be 1-D")
-
-    num_nodes = int(rowptr.numel() - 1)
-    if num_nodes < 0:
-        raise ValueError("CSR rowptr must contain at least one element")
-    if col.numel() == 0 or num_nodes == 0:
-        return {"rowptr": rowptr, "col": col, "deduped": True}
-
-    dedup_col_chunks = []
-    dedup_count_chunks = []
-    total_edges = int(col.numel())
-    start_row = 0
-    while start_row < num_nodes:
-        start_edge = int(rowptr[start_row].item())
-        target_edge = min(start_edge + chunk_edge_budget, total_edges)
-        boundary = torch.tensor([target_edge], dtype=rowptr.dtype)
-        end_row = int(torch.searchsorted(rowptr, boundary, right=True).item()) - 1
-        end_row = max(start_row + 1, min(end_row, num_nodes))
-        end_edge = int(rowptr[end_row].item())
-
-        local_lengths = rowptr[start_row + 1:end_row + 1] - rowptr[start_row:end_row]
-        local_col = col[start_edge:end_edge]
-        if local_col.numel() == 0:
-            dedup_count_chunks.append(torch.zeros((end_row - start_row,), dtype=torch.long))
-            start_row = end_row
-            continue
-
-        local_rows = torch.arange(end_row - start_row, dtype=torch.long).repeat_interleave(local_lengths)
-        key = local_rows * num_nodes + local_col
-        unique_key = torch.unique(key, sorted=True)
-        local_dedup_rows = torch.div(unique_key, num_nodes, rounding_mode="floor")
-        local_dedup_cols = unique_key % num_nodes
-        local_counts = torch.bincount(local_dedup_rows, minlength=end_row - start_row)
-
-        dedup_col_chunks.append(local_dedup_cols)
-        dedup_count_chunks.append(local_counts)
-        start_row = end_row
-
-    dedup_counts = torch.cat(dedup_count_chunks, dim=0) if dedup_count_chunks else torch.empty((0,), dtype=torch.long)
-    dedup_rowptr = torch.zeros((num_nodes + 1,), dtype=torch.long)
-    if dedup_counts.numel() > 0:
-        dedup_rowptr[1:] = torch.cumsum(dedup_counts, dim=0)
-    dedup_col = torch.cat(dedup_col_chunks, dim=0) if dedup_col_chunks else torch.empty((0,), dtype=torch.long)
-    return {"rowptr": dedup_rowptr, "col": dedup_col, "deduped": True}
-
-
-def load_optional_edge_csr(dataset_dir: str, dataset_name: str, rank: int = 0, world_size: int = 1):
+def load_optional_edge_csr(dataset_dir: str, dataset_name: str):
     dataset_path = os.path.join(dataset_dir, dataset_name)
-    dedup_edge_csr_path = os.path.join(dataset_path, "edge_index_csr_dedup.pt")
-    raw_edge_csr_path = os.path.join(dataset_path, "edge_index_csr.pt")
-
-    if os.path.exists(dedup_edge_csr_path):
-        return _validate_edge_csr(torch.load(dedup_edge_csr_path, map_location="cpu"), dedup_edge_csr_path)
-    if not os.path.exists(raw_edge_csr_path):
+    edge_csr_path = os.path.join(dataset_path, "edge_index_csr.pt")
+    if not os.path.exists(edge_csr_path):
         return None
-
-    distributed = world_size > 1 and dist.is_available() and dist.is_initialized()
-    if rank == 0:
-        raw_edge_csr = _validate_edge_csr(torch.load(raw_edge_csr_path, map_location="cpu"), raw_edge_csr_path)
-        if raw_edge_csr.get("deduped", False):
-            dedup_edge_csr = {
-                "rowptr": torch.as_tensor(raw_edge_csr["rowptr"], dtype=torch.long, device="cpu"),
-                "col": torch.as_tensor(raw_edge_csr["col"], dtype=torch.long, device="cpu"),
-                "deduped": True,
-            }
-        else:
-            print(f"[rank 0] Building deduplicated CSR cache at {dedup_edge_csr_path}")
-            dedup_edge_csr = _dedup_csr_on_cpu(raw_edge_csr)
-        torch.save(dedup_edge_csr, dedup_edge_csr_path)
-
-    if distributed:
-        dist.barrier()
-    return _validate_edge_csr(torch.load(dedup_edge_csr_path, map_location="cpu"), dedup_edge_csr_path)
+    edge_csr = torch.load(edge_csr_path, map_location="cpu")
+    if not isinstance(edge_csr, dict) or "rowptr" not in edge_csr or "col" not in edge_csr:
+        raise KeyError(f"Invalid CSR data in {edge_csr_path}: expected dict with rowptr and col")
+    rowptr = edge_csr["rowptr"]
+    col = edge_csr["col"]
+    if rowptr.dim() != 1 or col.dim() != 1:
+        raise ValueError(f"Invalid CSR tensor shapes in {edge_csr_path}: rowptr dim={rowptr.dim()}, col dim={col.dim()}")
+    if rowptr.numel() == 0:
+        raise ValueError(f"Invalid CSR rowptr in {edge_csr_path}: rowptr must contain at least one element")
+    if int(rowptr[0].item()) != 0:
+        raise ValueError(f"Invalid CSR rowptr in {edge_csr_path}: rowptr[0] must be 0")
+    if int(rowptr[-1].item()) != int(col.numel()):
+        raise ValueError(
+            f"Invalid CSR tensors in {edge_csr_path}: rowptr[-1]={int(rowptr[-1].item())} does not match col.numel()={int(col.numel())}"
+        )
+    return {"rowptr": rowptr, "col": col}
 
 
 def _csr_to_edge_index(edge_csr: dict):
@@ -683,7 +621,7 @@ def main():
     
     feature = torch.load(args.dataset_dir + args.dataset + '/x.pt')
     y = torch.load(args.dataset_dir + args.dataset + '/y.pt')
-    edge_csr_data = load_optional_edge_csr(args.dataset_dir, args.dataset, rank=args.rank, world_size=args.world_size) if args.ppr_backend == 'appnp' else None
+    edge_csr_data = load_optional_edge_csr(args.dataset_dir, args.dataset) if args.ppr_backend == 'appnp' else None
     edge_index = None if edge_csr_data is not None else torch.load(args.dataset_dir + args.dataset + '/edge_index.pt')
     N = feature.shape[0]
 
