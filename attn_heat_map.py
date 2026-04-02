@@ -1,4 +1,4 @@
-def draw_heat_map(score, ids, prefix="full", topk=None, max_display=100, normalize=True):
+def draw_heat_map(score, ids, prefix="full", topk=None, max_display=100, normalize=True,ax=None):
     import matplotlib.pyplot as plt
     import seaborn as sns
     import numpy as np
@@ -41,20 +41,35 @@ def draw_heat_map(score, ids, prefix="full", topk=None, max_display=100, normali
         ids_np = ids_np[::step]
     # 5. 构建 DataFrame 并绘图
     df = pd.DataFrame(score_np, index=ids_np, columns=ids_np)
-    plt.rcParams.update({'font.size': 20})
-    plt.figure(figsize=(15, 12))
+    # plt.rcParams.update({'font.size': 30}) # 提到 30 甚至更高
+    # plt.figure(figsize=(24, 18)) # 进一步加大画布
     # 使用 robust=True 可以自动处理异常值点，让颜色映射更集中在主体数据
     # 如果已经归一化到 0-1，可以固定 vmin=0, vmax=1
-    sns.heatmap(df,cbar=False, cmap='YlGnBu', robust=True, vmin=0 if normalize else None)
+    num_ticks = len(ids_np)
+    tick_step = max(1, num_ticks // 30)
+    sns.heatmap(
+        df,
+        ax=ax,
+        cbar=False, 
+        cmap='YlGnBu', 
+        robust=True, 
+        vmin=0 if normalize else None,
+        xticklabels=tick_step,
+        yticklabels=tick_step
+    )
     # plt.title(f'Attention Score Heatmap ({prefix.upper()}) {"- Normalized" if normalize else ""}')
-    # plt.xlabel('Target Node ID')
-    # plt.ylabel('Source Node ID')
-    plt.tight_layout()
-    plt.savefig(f'attn_heatmap_{prefix}.png')
-    plt.close()
-    print(f"✅ 已保存热力图: attn_heatmap_{prefix}.png")
+    ax.set_title(f'{prefix}', fontsize=50, pad=30, y=-0.20) # 标题给 50
+    ax.set_xlabel('DST Node ID', fontsize=40, labelpad=20)
+    ax.set_ylabel('SRC Node ID', fontsize=40, labelpad=20)
+    # 强制放大坐标轴上的数字
+    ax.tick_params(axis='x', labelsize=25, rotation=90)   # x轴横向
+    ax.tick_params(axis='y', labelsize=25, rotation=0)  # y轴竖向
+    # plt.tight_layout()
+    # plt.savefig(f'attn_heatmap_{prefix}.png')
+    # plt.close()
+    # print(f"✅ 已保存热力图: attn_heatmap_{prefix}.png")
     
-def draw_heat_map_binary(score, ids, prefix="full", topk=None, max_display=100, normalize=True):
+def draw_heat_map_binary(score, ids, prefix="full", topk=None, max_display=100, normalize=True,ax=None):
     import matplotlib.pyplot as plt
     import seaborn as sns
     import numpy as np
@@ -66,8 +81,7 @@ def draw_heat_map_binary(score, ids, prefix="full", topk=None, max_display=100, 
     # 2. 处理多头注意力 (Heads)
     if score_np.ndim == 3:
         # 建议取平均值更能代表整体注意力分布
-        score_np = score_np.mean(axis=0) 
-
+        score_np = score_np[0] 
     # 3. 核心：切片对齐
     num_nodes = len(ids_np)
     if score_np.shape[0] != num_nodes or score_np.shape[1] != num_nodes:
@@ -96,21 +110,33 @@ def draw_heat_map_binary(score, ids, prefix="full", topk=None, max_display=100, 
         step = len(ids_np) // max_display
         score_np = score_np[::step, ::step]
         ids_np = ids_np[::step]
-
     # 5. 构建 DataFrame 并绘图
     df = pd.DataFrame(score_np, index=ids_np, columns=ids_np)   
-    plt.rcParams.update({'font.size': 20})
-    plt.figure(figsize=(15, 12))
-
+    # plt.rcParams.update({'font.size': 30}) # 提到 30 甚至更高
+    # plt.figure(figsize=(24, 18)) # 进一步加大画布
     # 使用 robust=True 可以自动处理异常值点，让颜色映射更集中在主体数据
     # 如果已经归一化到 0-1，可以固定 vmin=0, vmax=1
-    sns.heatmap(df,cbar=False, cmap='YlGnBu', robust=True, vmin=0 if normalize else None)
-
+    num_ticks = len(ids_np)
+    tick_step = max(1, num_ticks // 30)
+    sns.heatmap(
+        df,
+        ax=ax,
+        cbar=False, 
+        cmap='YlGnBu', 
+        robust=True, 
+        vmin=0 if normalize else None,
+        xticklabels=tick_step,
+        yticklabels=tick_step
+    )
     # plt.title(f'Attention Score Heatmap ({prefix.upper()}) {"- Normalized" if normalize else ""}')
-    # plt.xlabel('Target Node ID')
-    # plt.ylabel('Source Node ID')
-    plt.tight_layout()
-
-    plt.savefig(f'attn_heatmap_{prefix}.png')
-    plt.close()
-    print(f"✅ 已保存热力图: attn_heatmap_{prefix}.png")
+    # 单独加粗并放大标题和标签
+    ax.set_title(f'{prefix}', fontsize=50, pad=30, y=-0.20) # 标题给 50
+    ax.set_xlabel('DST Node ID', fontsize=40, labelpad=20)
+    ax.set_ylabel('SRC Node ID', fontsize=40, labelpad=20)
+    # 强制放大坐标轴上的数字
+    ax.tick_params(axis='x', labelsize=25, rotation=90)   # x轴横向
+    ax.tick_params(axis='y', labelsize=25, rotation=0)  # y轴竖向
+    # plt.tight_layout()
+    # plt.savefig(f'attn_heatmap_{prefix}.png')
+    # plt.close()
+    # print(f"✅ 已保存热力图: attn_heatmap_{prefix}.png")

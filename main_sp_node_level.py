@@ -1,3 +1,4 @@
+import copy
 from attn_heat_map import draw_heat_map,draw_heat_map_binary
 import torch
 import torch.nn.functional as F
@@ -33,6 +34,8 @@ import numpy as np
 import torch
 import igraph as ig
 
+import matplotlib.pyplot as plt
+
 def reorder_matrix_for_batch(score_matrix, ids, top_percent=0.1):
     """
     使用 igraph 的社区发现算法（如 Leiden）对注意力矩阵进行重排。
@@ -41,26 +44,29 @@ def reorder_matrix_for_batch(score_matrix, ids, top_percent=0.1):
     working_score = score_matrix[0, :-1, :-1].cpu().detach().numpy()
     working_ids = ids.cpu().detach().numpy()
     
-    origin_scores = score_matrix
-    th = 0.1
-    origin_scores[origin_scores < th] = 0
-    origin_scores[origin_scores >= th] = 1
-    draw_heat_map(
-        origin_scores,
-        ids,
-        prefix="original_sample",
-        topk=None,
-        max_display=100,
-        normalize=False
-    )
-    # draw_heat_map_binary(
+    # origin_scores = score_matrix
+    threshold = np.percentile(np.abs(score_matrix.cpu().detach().numpy()), 100 * (1 - top_percent))
+    origin_scores = np.where(np.abs(score_matrix.cpu().detach().numpy()) >= threshold, 1.0, 0.0)
+    
+    fig, (ax_left, ax_right) = plt.subplots(1, 2, figsize=(40, 18))
+    # draw_heat_map(
     #     origin_scores,
     #     ids,
-    #     prefix="original_full",
+    #     prefix="(a)",
     #     topk=None,
     #     max_display=3000,
-    #     normalize=False
+    #     normalize=False,
+    #     ax=ax_left
     # )
+    draw_heat_map_binary(
+        torch.from_numpy(origin_scores), 
+        ids, 
+        prefix="(a)", 
+        max_display=3000,
+        topk=None,
+        normalize=False,
+        ax=ax_left
+    )
     n_nodes = working_score.shape[0]
     # 2. 构建图结构
     abs_score = np.abs(working_score)
@@ -93,12 +99,16 @@ def reorder_matrix_for_batch(score_matrix, ids, top_percent=0.1):
     draw_heat_map_binary(
         torch.from_numpy(binary_reordered_score), 
         torch.from_numpy(reordered_ids), 
-        prefix="reordered", 
+        prefix="(b)", 
         max_display=3000,
         topk=None,
-        normalize=False
+        normalize=False,
+        ax=ax_right
     )
-    
+    plt.tight_layout() # 为下方的标题留出空间
+    plt.savefig('combined_analysis.png', dpi=200)
+    plt.show()
+    print(f"reordered_ids: {reordered_ids.shape}, reordered_score: {reordered_score.shape}")
     return reordered_ids
 
 def main():
@@ -218,8 +228,36 @@ def main():
             ffn_dim=args.ffn_dim,
             num_global_node=args.num_global_node
         ).to(device)
+        new_model = Graphormer(
+           n_layers=args.n_layers,
+            num_heads=args.num_heads,
+            input_dim=feature.shape[1],
+            hidden_dim=args.hidden_dim,
+            # output_dim=y.max().item()+1,
+            output_dim = num_classes,
+            attn_bias_dim=args.attn_bias_dim,
+            dropout_rate=args.dropout_rate,
+            input_dropout_rate=args.input_dropout_rate,
+            attention_dropout_rate=args.attention_dropout_rate,
+            ffn_dim=args.ffn_dim,
+            num_global_node=args.num_global_node
+        ).to(device)
     elif args.model == "gt":
         model = GT(
+           n_layers=args.n_layers,
+            num_heads=args.num_heads,
+            input_dim=feature.shape[1],
+            hidden_dim=args.hidden_dim,
+            # output_dim=y.max().item()+1,
+            output_dim = num_classes,
+            attn_bias_dim=args.attn_bias_dim,
+            dropout_rate=args.dropout_rate,
+            input_dropout_rate=args.input_dropout_rate,
+            attention_dropout_rate=args.attention_dropout_rate,
+            ffn_dim=args.ffn_dim,
+            num_global_node=args.num_global_node
+        ).to(device)
+        new_model = GT(
            n_layers=args.n_layers,
             num_heads=args.num_heads,
             input_dim=feature.shape[1],
@@ -279,6 +317,10 @@ def main():
             if se==1 and epoch == 1:
                 flatten_train_idx = reorder_matrix_for_batch(final_score, final_score_current_global_ids)
                 flatten_train_idx = torch.from_numpy(flatten_train_idx).to(device)
+                model = new_model.to(device)
+                args.seq_len = flatten_train_idx.shape[0] // 2
+                num_batch = flatten_train_idx.size(0) // args.seq_len + 1
+                input("continue?")
             for i in range(num_batch):
                 idx_i = flatten_train_idx[i*args.seq_len: (i+1)*args.seq_len]
                 t0 = time.time()
@@ -412,16 +454,16 @@ def main():
                 dist.broadcast(beta_idx_broad, src_rank, group=group)
             beta_idx = int(beta_idx_broad.item())
 
-    if args.rank == 0:
-        # if args.seq_len < N:
-        #     # 这里的 current_global_ids 必须是通过相同的 reorder 逻辑得到的
-        #     save_model_output(args, final_score, current_global_ids, N,test_acc, prefix="mini")
-        #     analyze_full_vs_mini(args.dataset)
-        # elif args.seq_len >= N:
-        #     save_model_output(args, final_score, current_global_ids, N,test_acc, prefix="full")
-        pass
-        # attn score
-        draw_heat_map(final_score, current_global_ids, prefix=f"{args.attn_type}", topk=None,max_display=3000)
+    # if args.rank == 0:
+    #     # if args.seq_len < N:
+    #     #     # 这里的 current_global_ids 必须是通过相同的 reorder 逻辑得到的
+    #     #     save_model_output(args, final_score, current_global_ids, N,test_acc, prefix="mini")
+    #     #     analyze_full_vs_mini(args.dataset)
+    #     # elif args.seq_len >= N:
+    #     #     save_model_output(args, final_score, current_global_ids, N,test_acc, prefix="full")
+    #     pass
+    #     # attn score
+    #     draw_heat_map(final_score, current_global_ids, prefix=f"{args.attn_type}", topk=None,max_display=3000)
         
     
     if args.rank == 0:
