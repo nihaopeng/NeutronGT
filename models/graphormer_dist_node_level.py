@@ -86,43 +86,58 @@ class CoreAttention(nn.Module):
         src = k[edge_index[0].to(torch.long)] 
         dest = q[edge_index[1].to(torch.long)] 
         score = torch.mul(src, dest)  # element-wise multiplication
-        rt_score = score
-            
+        
         # Scale scores by sqrt(d)
         score = score / self.scale
-
         # Use available edge features to modify the scores for edges
         # -> [total_edges, np, 1] 
         score = score.sum(-1, keepdim=True).clamp(-5, 5)
-
         # [b, s+p, s+p, np] -> [b, s+p, s+p, np] -> [b, s+p, b, s+p, np]
         if attn_bias is not None:
             # attn_bias = attn_bias.repeat(1, 1, 1, num_heads)
             attn_bias = attn_bias.unsqueeze(2).repeat(1, 1, batch_size, 1, 1)  
             attn_bias = attn_bias.view(batch_size*node_num, batch_size*node_num, -1)
-    
             score = score + \
                     attn_bias[edge_index[0].to(torch.long), edge_index[1].to(torch.long), :] 
-
         # softmax -> [total_edges, np, 1]
         score = torch.exp(score) 
-
+        # --- 重点：在这里进行稠密矩阵转换 ---
+        score_exp = score
+        Z_sparse = score_exp.new_zeros(v.size(0), num_heads, 1)
+        from torch_scatter import scatter
+        scatter(score_exp, edge_index[1], dim=0, out=Z_sparse, reduce='add')
+        attn_weights_sparse = score_exp / (Z_sparse[edge_index[1]] + 1e-6) # [n_edges, np, 1]
+        full_attn_dense = torch.zeros(batch_size * node_num, batch_size * node_num, num_heads, 
+                                      device=k.device, dtype=k.dtype)
+        
+        # 填充归一化后的权重
+        full_attn_dense[edge_index[0].long(), edge_index[1].long(), :] = attn_weights_sparse.squeeze(-1)
+        
+        # 转换维度并提取样本内部矩阵
+        # 原形状: [B, N, B, N, Head]
+        rt_score_5d = full_attn_dense.view(batch_size, node_num, batch_size, node_num, num_heads)
+        # 提取对角块 (Sample i to Sample i) 并整理维度为 [Batch, Head, N, N]
+        rt_score_list = []
+        for b in range(batch_size):
+            # 取出 [N, N, Head] -> [Head, N, N]
+            rt_score_list.append(rt_score_5d[b, :, b, :, :].permute(2, 0, 1))
+        rt_score = torch.stack(rt_score_list, dim=0)
+        # 如果 batch_size=1，去掉第一维得到 [Head, N, N]
+        if batch_size == 1:
+            rt_score = rt_score[0]
+            
         # Apply attention score to each source node to create edge messages
         # -> [total_edges, np, hn]
         msg = v[edge_index[0].to(torch.long)] * score
-        
         # Add-up real msgs in destination nodes as given by edge_index[1]
         # -> [total_s, np, hn]
         wV = torch.zeros_like(v)  
         scatter(msg, edge_index[1], dim=0, out=wV, reduce='add')
-
         # Compute attention normalization coefficient
         # -> [total_s, np, 1]
         Z = score.new_zeros(v.size(0), num_heads, 1)    
         scatter(score, edge_index[1], dim=0, out=Z, reduce='add')
-
         x = wV / (Z + 1e-6)
-        
         return x,rt_score
 
 

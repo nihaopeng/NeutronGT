@@ -355,9 +355,10 @@ def main():
                 # else:
                 #     attn_type = "full"       
             
-                
-            out_i,score = model(x_i, attn_bias, edge_index_i, attn_type=attn_type)    
-
+            if args.model == "graphormer":
+                out_i,score = model(x_i, attn_bias, edge_index_i, attn_type=attn_type)    
+            else:
+                out_i = model(x_i, attn_bias, edge_index_i, attn_type=attn_type)
             # print(out_i.shape[0], y_i.shape[0])
             # print(train_mask.sum().item(), split_idx['train'].shape[0])
             # print(out_i[train_mask].shape[0])

@@ -7,12 +7,16 @@ def save_model_output(args, score, global_ids, N,acc,prefix="full"):
     score_cpu = score.detach().cpu()
     ids_cpu = global_ids.detach().cpu()
     
-    # 1. 移除 Padding，获取有效节点及其对应的 ID
-    valid_mask = ids_cpu >= 0
-    final_ids = ids_cpu[valid_mask]
-    
-    # 2. 截取有效的注意力矩阵 [Heads, Valid_N, Valid_N]
-    final_score = score_cpu[:, valid_mask, :][:, :, valid_mask]
+    # 在 save_model_output 内部
+    valid_mask_ids = ids_cpu >= 0  # 假设得到 1624 个 True/False
+    final_ids = ids_cpu[valid_mask_ids] 
+
+    # 关键：为 Score 创建一个匹配 1625 长度的 mask
+    # 假设第 0 位是虚拟节点，我们跳过它
+    score_mask = torch.cat([torch.tensor([False]), valid_mask_ids], dim=0)
+
+    # 这样 [1625] 的 mask 就能完美索引 [8, 1625, 1625] 的 Tensor 了
+    final_score = score_cpu[:, score_mask, :][:, :, score_mask]
     
     # 3. 两个文件成对保存
     acc_with_high_score = {
@@ -21,7 +25,6 @@ def save_model_output(args, score, global_ids, N,acc,prefix="full"):
         "acc":acc
     }
     torch.save(acc_with_high_score, path_score)
-        
     print(f"✅ [{prefix.upper()}] 已保存 Score ({final_score.shape}) 和 ID ({final_ids.shape})")
 
     if torch.distributed.is_initialized():
