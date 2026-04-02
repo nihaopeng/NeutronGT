@@ -18,6 +18,9 @@ class StructInfo:
         self.graph_out_degree = kwargs["graph_out_degree"]
         self.sorted_ppr_matrix = kwargs["sorted_ppr_matrix"]  # tuple[torch.Tensor, torch.Tensor]
         self.wm = kwargs["wm"]
+        self.graph_edge_index = kwargs.get("graph_edge_index")
+        self.graph_csr_data = kwargs.get("graph_csr_data")
+        self.num_nodes = kwargs.get("num_nodes")
         self.spatial_pos_by_pid = None
         self.sub_edge_index_list = None
         self.local_partition_ids = []
@@ -27,8 +30,11 @@ class StructInfo:
         self.local_spatial_pos_by_pid = []
         self.local_dup_indices = []
         self.local_dup_nodes_per_partition_feature = None
+        self.global_partitioned_results_cpu = None
+        self.global_sub_edge_index_for_partition_results_cpu = None
+        self.window_state_version = 0
 
-def build_placeholder_struct_info(graph_in_degree, graph_out_degree):
+def build_placeholder_struct_info(graph_in_degree, graph_out_degree, edge_index=None, edge_csr_data=None, num_nodes=None):
     placeholder_wm = SimpleNamespace(
         partitioned_results=[],
         sub_edge_index_for_partition_results=[],
@@ -39,6 +45,9 @@ def build_placeholder_struct_info(graph_in_degree, graph_out_degree):
         graph_out_degree=graph_out_degree,
         sorted_ppr_matrix=None,
         wm=placeholder_wm,
+        graph_edge_index=edge_index,
+        graph_csr_data=edge_csr_data,
+        num_nodes=num_nodes,
     )
 
 def get_rank_source_range(num_nodes: int, rank: int, world_size: int):
@@ -100,7 +109,7 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
 
     distributed_appnp_ppr = world_size > 1 and args.ppr_backend == "appnp"
     if world_size > 1 and not distributed_appnp_ppr and args.rank != 0:
-        return build_placeholder_struct_info(graph_in_degree, graph_out_degree)
+        return build_placeholder_struct_info(graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
 
     source_start, source_end = 0, N
     if distributed_appnp_ppr:
@@ -144,7 +153,7 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
             print(f"[rank 0] Gather PPR shards time: {gather_time:.3f}s")
             print(f"[rank 0] Gathered PPR edge count: {int(sorted_ppr_matrix[1].numel())}")
         if args.rank != 0:
-            return build_placeholder_struct_info(graph_in_degree, graph_out_degree)
+            return build_placeholder_struct_info(graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
 
     graph_edge_index = _ensure_edge_index(edge_index, edge_csr_data)
 
@@ -187,4 +196,7 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
         graph_in_degree=graph_in_degree,
         graph_out_degree=graph_out_degree,
         sorted_ppr_matrix=sorted_ppr_matrix,
-        wm=wm)
+        wm=wm,
+        graph_edge_index=graph_edge_index,
+        graph_csr_data=edge_csr_data,
+        num_nodes=N)

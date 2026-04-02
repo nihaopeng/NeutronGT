@@ -15,7 +15,7 @@ from gt_sp.initialize import (
     set_last_batch_global_token_indices,
 )
 from gt_sp.reducer import sync_params_and_buffers
-from gt_sp.utils import LossStagnationDetector, compute_graphormer_spatial_pos_only, random_split_idx
+from gt_sp.utils import LossStagnationDetector, random_split_idx
 from utils.lr import PolynomialDecayLR
 from utils.parser_node_level import parser_add_main_args
 import utils.logger as logger
@@ -23,12 +23,12 @@ import utils.vis as vis
 from core.node_level_pipeline import (
     StructInfo,
     broadcast_window_state,
-    build_dup_cache_metadata,
     build_graph_struct_info,
     build_local_partitions,
     build_model,
     eval_epoch,
     load_optional_edge_csr,
+    restore_global_window_state,
     sync_device,
     train_epoch,
 )
@@ -129,10 +129,12 @@ def main():
     structInfo:StructInfo = build_graph_struct_info(
             args,N,edge_index,feature,seq_parallel_world_size,device,
             topk=args.ppr_topk,
-            n_parts=50,
+            n_parts=200,
             related_nodes_topk_rate=2,
             edge_csr_data=edge_csr_data
         )
+    sync_device(device)
+    graph_preprocess_total_time = time.time() - graph_preprocess_start
     wm:weightMetis_keepParent = structInfo.wm
 
     model = build_model(args,feature,device,y,graph_in_degree=structInfo.graph_in_degree,graph_out_degree=structInfo.graph_out_degree)
@@ -153,26 +155,22 @@ def main():
     if seq_parallel_world_size > 1:
         sync_params_and_buffers(model)
 
-    ppr_tuple = None
-    if structInfo.sorted_ppr_matrix is not None:
-        ppr_tuple = (structInfo.sorted_ppr_matrix[0], structInfo.sorted_ppr_matrix[1])
-    spatial_pos_preprocess_time = 0.0
-    if args.struct_enc=="True" and args.rank == 0:
-        sync_device(device)
-        spatial_pos_preprocess_start = time.time()
-        structInfo.spatial_pos_by_pid,_ = compute_graphormer_spatial_pos_only(ppr_tuple, wm.partitioned_results, N, max_dist=args.max_dist)
-        sync_device(device)
-        spatial_pos_preprocess_time = time.time() - spatial_pos_preprocess_start
+    window_state_timing = broadcast_window_state(args, structInfo, feature, device)
     sync_device(device)
-    graph_preprocess_total_time = time.time() - graph_preprocess_start
     if args.rank == 0:
         print("====================================================================================")
         print("Graph preprocess total time: {:.3f}s".format(graph_preprocess_total_time))
-        if args.struct_enc == "True":
-            print("Spatial position preprocess time: {:.3f}s".format(spatial_pos_preprocess_time))
+        print("Window state distribution total time: {:.3f}s".format(window_state_timing['window_state_total_time']))
+        print("Window bundle write time: {:.3f}s".format(window_state_timing['bundle_write_time']))
         print("====================================================================================")
+    print(
+        f"[rank {args.rank}] Window rebuild: load={window_state_timing['bundle_load_time']:.3f}s, "
+        f"dup={window_state_timing['local_dup_cache_rebuild_time']:.3f}s, "
+        f"subgraph={window_state_timing['local_subgraph_rebuild_time']:.3f}s, "
+        f"spatial={window_state_timing['local_spatial_rebuild_time']:.3f}s, "
+        f"total={window_state_timing['window_state_total_time']:.3f}s"
+    )
 
-    broadcast_window_state(args, structInfo, feature, device)
     local_partition_ids, local_partitions = build_local_partitions(structInfo, args.rank, seq_parallel_world_size)
     if args.use_cache and args.rank == 0:
         total_local_dup_nodes = int(sum(int(part.numel()) for part in structInfo.local_dup_nodes_per_partition))
@@ -209,14 +207,15 @@ def main():
             gathered_scores = [None for _ in range(args.world_size)]
             dist.all_gather_object(gathered_scores, scores_by_pid)
             if args.rank == 0:
+                restore_global_window_state(structInfo)
                 merged_scores_by_pid = {}
                 for item in gathered_scores:
                     merged_scores_by_pid.update(item)
                 ordered_scores = [merged_scores_by_pid[pid] for pid in range(len(wm.partitioned_results))]
                 wm.node_out(ordered_scores,remove_ratio=0.3)
                 wm.node_in()
-                if args.struct_enc=="True":
-                    structInfo.spatial_pos_by_pid,_ = compute_graphormer_spatial_pos_only(ppr_tuple, wm.partitioned_results, N, max_dist=args.max_dist)
+            if args.rank == 0:
+                structInfo.window_state_version += 1
             broadcast_window_state(args, structInfo, feature, device)
             local_partition_ids, local_partitions = build_local_partitions(structInfo, args.rank, seq_parallel_world_size)
             if args.rank == 0 and hasattr(wm, 'dup_nodes_per_partition'):

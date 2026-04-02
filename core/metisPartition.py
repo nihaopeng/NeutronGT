@@ -68,15 +68,25 @@ class weightMetis_keepParent:
             # self.child_partitions = [[tensor,tensor,...],[tensor,tensor,...]]
             # TOD:将另一个父分区中特征相似的并入。√
             # TOD:将对外有联系的对端节点合并入分区。√
+        self.child_partition_centroids = []
+        for parent_group in self.child_partitions:
+            centroid_group = []
+            for part in parent_group:
+                if part.numel() == 0:
+                    centroid_group.append(None)
+                else:
+                    centroid_group.append(self.feature[part.long()].mean(dim=0))
+            self.child_partition_centroids.append(centroid_group)
+
         expanded_child_partitions = []
         for parent_id, parent_group in enumerate(self.child_partitions):
             expanded_group = []
-            for part in parent_group:
+            for child_idx, part in enumerate(parent_group):
                 halo_extended = torch.tensor([])
                 # halo: partition包括原本partition的节点和邻居节点
                 halo_extended = self._merge_related_nodes(part,related_nodes_topk_rate)
-                # feature: partition包括原本的partition的节点和另一个parent分区中和本parent分区中相似度高的node
-                feature_extended,expanded_edge_p = self._merge_feature_sim(part.long(), n_nodes=1, current_parent_id=parent_id)
+                # feature: partition包括原本的partition的节点和对侧最相似窗口中采样的节点
+                feature_extended,expanded_edge_p = self._merge_feature_sim(part.long(), n_nodes=1, current_parent_id=parent_id, current_child_idx=child_idx)
                 merged = torch.cat([halo_extended, feature_extended], dim=0)
                 merged = torch.unique(merged)  # 自动排序 + 去重
                 expanded_group.append(merged)
@@ -391,34 +401,51 @@ class weightMetis_keepParent:
         partition: torch.Tensor,
         n_nodes: int,
         current_parent_id: int,
+        current_child_idx: int | None = None,
         connect_prob: float = 0.01
     ) -> tuple[torch.Tensor, torch.Tensor]:
         print("==正在合并特征相似节点==")
         assert current_parent_id in (0, 1), "Only two parent partitions supported."
         other_parent_id = 1 - current_parent_id
-        other_parent_nodes = self.parent_partition[other_parent_id]
         if partition.numel() == 0:
             return partition, torch.empty((2, 0), dtype=torch.long)
-        # Step 1: 选最相似的 n_nodes 个节点
-        centroid = self.feature[partition].mean(dim=0)  # (D,)  本分区的质心
-        other_features = self.feature[other_parent_nodes]  # (M, D)  另一个父分区的所有向量
-        distances = torch.norm(other_features - centroid, dim=1)  # (M,) 表示other_feature的每个点的特征和质心向量的距离
-        num_to_select = min(n_nodes, len(other_parent_nodes))
-        _, top_indices = torch.topk(distances, num_to_select, largest=False)# 距离前 num_to_select近的向量的索引
-        selected_nodes = other_parent_nodes[top_indices]  # 全局索引
-        # 合并节点
+
+        if current_child_idx is not None and self.child_partition_centroids[current_parent_id][current_child_idx] is not None:
+            centroid = self.child_partition_centroids[current_parent_id][current_child_idx]
+        else:
+            centroid = self.feature[partition].mean(dim=0)
+
+        candidate_centroids = []
+        candidate_child_indices = []
+        for child_idx, child_centroid in enumerate(self.child_partition_centroids[other_parent_id]):
+            if child_centroid is None:
+                continue
+            candidate_centroids.append(child_centroid)
+            candidate_child_indices.append(child_idx)
+
+        if not candidate_centroids:
+            return partition, torch.empty((2, 0), dtype=torch.long)
+
+        centroid_matrix = torch.stack(candidate_centroids, dim=0)
+        distances = torch.norm(centroid_matrix - centroid, dim=1)
+        best_child_idx = candidate_child_indices[int(torch.argmin(distances).item())]
+        matched_window_nodes = self.child_partitions[other_parent_id][best_child_idx]
+        if matched_window_nodes.numel() == 0:
+            return partition, torch.empty((2, 0), dtype=torch.long)
+
+        num_to_select = min(n_nodes, int(matched_window_nodes.numel()))
+        sampled_indices = torch.randperm(matched_window_nodes.numel())[:num_to_select]
+        selected_nodes = matched_window_nodes[sampled_indices]
         merged = torch.unique(torch.cat([partition, selected_nodes], dim=0))
-        # Step 2: 生成虚拟边（仅新边，无向）
+
         virtual_edges = []
         for new_node in selected_nodes.tolist():
             for old_node in partition.tolist():
                 if torch.rand(1).item() < connect_prob:
-                    # 无向边：双向
                     virtual_edges.append([old_node, new_node])
                     virtual_edges.append([new_node, old_node])
-        # 转为 edge_index
         if virtual_edges:
-            virtual_edge_index = torch.tensor(virtual_edges, dtype=torch.long).t()  # [2, E]
+            virtual_edge_index = torch.tensor(virtual_edges, dtype=torch.long).t()
         else:
             virtual_edge_index = torch.empty((2, 0), dtype=torch.long)
         return merged, virtual_edge_index
