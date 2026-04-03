@@ -72,6 +72,8 @@ def parser_add_main_args(parser):
                        help='APPNP backend only: iterative top-k pruning per propagation step; positive values are strongly recommended for large graphs, while 0 or negative disables pruning and may cause high memory usage')
     parser.add_argument('--ppr_eps', type=float, default=1e-6,
                        help='torch_geometric backend only: epsilon used by get_ppr')
+    parser.add_argument('--n_parts', type=int, default=50,
+                       help='number of graph partitions/windows used during Metis partitioning')
     
     # distributed args
     parser.add_argument('--rank', type=int, default=None,

@@ -286,7 +286,7 @@ def broadcast_window_state(args, structInfo: StructInfo, feature: torch.Tensor, 
         timing_stats['window_state_total_time'] = time.time() - overall_start
         return timing_stats
 
-    version = structInfo.window_state_version
+    version = structInfo.window_state_version # 这是窗口状态版本号，避免 node_out/node_in 重新分发时覆盖混淆
 
     # 对每个 rank 生成一个 bundle,including
     # local_partition_ids、local_partitions、如果开结构编码，再加 local_ppr_sub_edge_index_list
@@ -303,7 +303,7 @@ def broadcast_window_state(args, structInfo: StructInfo, feature: torch.Tensor, 
     bundle_load_start = time.time()
     bundle = torch.load(_bundle_path(args, version, args.rank), map_location='cpu')
     timing_stats['bundle_load_time'] = time.time() - bundle_load_start
-    _assign_local_window_bundle(structInfo, bundle)
+    _assign_local_window_bundle(structInfo, bundle)     # 把本 rank 的 local 数据写进自己进程内的 structInfo，不会冲突
     local_ppr_sub_edge_index_list = bundle.get('local_ppr_sub_edge_index_list', [])
     rebuild_stats = _rebuild_local_window_structures(args, structInfo, feature, device, local_ppr_sub_edge_index_list)
     timing_stats.update(rebuild_stats)

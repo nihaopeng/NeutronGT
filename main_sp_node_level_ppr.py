@@ -129,7 +129,7 @@ def main():
     structInfo:StructInfo = build_graph_struct_info(
             args,N,edge_index,feature,seq_parallel_world_size,device,
             topk=args.ppr_topk,
-            n_parts=200,
+            n_parts=args.n_parts,
             related_nodes_topk_rate=2,
             edge_csr_data=edge_csr_data
         )
