@@ -15,6 +15,30 @@ from models.gt_dist_node_level_single_window import GT_SW
 from .runtime import sync_device
 
 
+def _supports_peak_memory_metrics(device) -> bool:
+    return torch.cuda.is_available() and str(device).startswith("cuda")
+
+
+def _get_cuda_device_index(device) -> int:
+    dev = torch.device(device)
+    return torch.cuda.current_device() if dev.index is None else dev.index
+
+
+def _reset_peak_memory_stats(device) -> None:
+    if not _supports_peak_memory_metrics(device):
+        return
+    torch.cuda.reset_peak_memory_stats(_get_cuda_device_index(device))
+
+
+def _get_peak_memory_mb(device):
+    if not _supports_peak_memory_metrics(device):
+        return 0.0, 0.0
+    device_index = _get_cuda_device_index(device)
+    allocated_mb = torch.cuda.max_memory_allocated(device_index) / (1024 ** 2)
+    reserved_mb = torch.cuda.max_memory_reserved(device_index) / (1024 ** 2)
+    return allocated_mb, reserved_mb
+
+
 def build_zero_loss(model: torch.nn.Module, device: str):
     zero_loss = torch.zeros((), device=device)
     for param in model.parameters():
@@ -192,6 +216,7 @@ def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitio
         max_window_steps = max(int(item.item()) for item in gathered_window_counts)
 
     sync_device(device)
+    _reset_peak_memory_stats(device)
     epoch_train_start = time.time()
 
     kv_cache_per_partition = None
@@ -277,6 +302,15 @@ def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitio
     lr_scheduler.step()
     sync_device(device)
     epoch_train_total_time = time.time() - epoch_train_start
+    local_peak_allocated_mb, local_peak_reserved_mb = _get_peak_memory_mb(device)
+    max_peak_allocated_mb = local_peak_allocated_mb
+    max_peak_reserved_mb = local_peak_reserved_mb
+    if world_size > 1:
+        peak_tensor = torch.tensor([local_peak_allocated_mb, local_peak_reserved_mb], device=device, dtype=torch.float64)
+        dist.all_reduce(peak_tensor, op=dist.ReduceOp.MAX)
+        max_peak_allocated_mb = float(peak_tensor[0].item())
+        max_peak_reserved_mb = float(peak_tensor[1].item())
+
     loss_mean = float(np.mean(loss_list)) if loss_list else 0.0
     time_stats = {
         "epoch_train_total_time": epoch_train_total_time,
@@ -284,7 +318,18 @@ def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitio
         "window_forward_backward_total_time": window_forward_backward_total_time,
         "window_forward_backward_avg_time": window_forward_backward_total_time / window_count if window_count > 0 else 0.0,
         "num_processed_windows": window_count,
+        "local_peak_allocated_mb": local_peak_allocated_mb,
+        "local_peak_reserved_mb": local_peak_reserved_mb,
+        "max_peak_allocated_mb": max_peak_allocated_mb,
+        "max_peak_reserved_mb": max_peak_reserved_mb,
     }
+    print(
+        "Peak GPU memory: rank={}, allocated_mb={:.2f}, reserved_mb={:.2f}".format(
+            args.rank,
+            local_peak_allocated_mb,
+            local_peak_reserved_mb,
+        )
+    )
     if args.rank == 0:
         print("------------------------------------------------------------------------------------")
         print(
@@ -297,6 +342,13 @@ def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitio
                 time_stats["window_forward_backward_total_time"],
                 time_stats["num_processed_windows"],
                 max_window_steps,
+            )
+        )
+        print("Training epoch time: {:.3f}s".format(time_stats["epoch_train_total_time"]))
+        print(
+            "Peak GPU memory summary: max_reserved_mb={:.2f}, max_allocated_mb={:.2f}".format(
+                time_stats["max_peak_reserved_mb"],
+                time_stats["max_peak_allocated_mb"],
             )
         )
         print("------------------------------------------------------------------------------------")

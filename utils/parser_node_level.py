@@ -74,6 +74,10 @@ def parser_add_main_args(parser):
                        help='torch_geometric backend only: epsilon used by get_ppr')
     parser.add_argument('--n_parts', type=int, default=50,
                        help='number of graph partitions/windows used during Metis partitioning')
+    parser.add_argument('--related_nodes_topk_rate', type=int, default=2,
+                       help='top-k percent of external related neighbors merged into each partition')
+    parser.add_argument('--preprocess_only', type=int, default=0, choices=[0, 1],
+                       help='when set to 1, stop after graph/window preprocessing and exit before training')
     
     # distributed args
     parser.add_argument('--rank', type=int, default=None,

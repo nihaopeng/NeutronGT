@@ -181,16 +181,38 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
         sorted_ppr_matrix=sorted_ppr_matrix)
 
     print("node len:",end="")
-    sum_nodes_in_compute = 0 
+    sum_nodes_in_compute = 0
+    window_node_counts = []
     for p in wm.partitioned_results:
-        print(len(p),end="|")
-        sum_nodes_in_compute += len(p)
+        part_len = len(p)
+        print(part_len,end="|")
+        sum_nodes_in_compute += part_len
+        window_node_counts.append(part_len)
     print("\nedge len:",end="")
-    sum_edges_in_compute = 0 
+    sum_edges_in_compute = 0
     for p in wm.sub_edge_index_for_partition_results:
         print(len(p[0]),end="|")
         sum_edges_in_compute += len(p[0])
+
+    avg_window_nodes = (sum(window_node_counts) / len(window_node_counts)) if window_node_counts else 0.0
+    max_window_nodes = max(window_node_counts) if window_node_counts else 0
+    dup_counts = [int(dup.numel()) for dup in wm.dup_nodes_per_partition] if wm.dup_nodes_per_partition else []
+    avg_dup_nodes_per_window = (sum(dup_counts) / len(dup_counts)) if dup_counts else 0.0
+    dup_ratios = []
+    for dup_nodes, partition_nodes in zip(wm.dup_nodes_per_partition, wm.partitioned_results):
+        part_size = int(partition_nodes.numel())
+        if part_size > 0:
+            dup_ratios.append(float(dup_nodes.numel()) / float(part_size))
+    avg_dup_ratio_per_window = (sum(dup_ratios) / len(dup_ratios)) if dup_ratios else 0.0
+
     print(f"\nsum nodes in compute:{sum_nodes_in_compute},sum edges in compute:{sum_edges_in_compute}")
+    print(
+        "Window stats: "
+        f"max_window_nodes={max_window_nodes}, "
+        f"avg_window_nodes={avg_window_nodes:.2f}, "
+        f"avg_dup_nodes_per_window={avg_dup_nodes_per_window:.2f}, "
+        f"avg_dup_ratio_per_window={avg_dup_ratio_per_window:.4f}"
+    )
 
     return StructInfo(
         graph_in_degree=graph_in_degree,

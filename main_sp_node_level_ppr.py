@@ -130,30 +130,12 @@ def main():
             args,N,edge_index,feature,seq_parallel_world_size,device,
             topk=args.ppr_topk,
             n_parts=args.n_parts,
-            related_nodes_topk_rate=2,
+            related_nodes_topk_rate=args.related_nodes_topk_rate,
             edge_csr_data=edge_csr_data
         )
     sync_device(device)
     graph_preprocess_total_time = time.time() - graph_preprocess_start
     wm:weightMetis_keepParent = structInfo.wm
-
-    model = build_model(args,feature,device,y,graph_in_degree=structInfo.graph_in_degree,graph_out_degree=structInfo.graph_out_degree)
-
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.peak_lr, weight_decay=args.weight_decay)
-    lr_scheduler = PolynomialDecayLR(
-            optimizer,
-            warmup=args.warmup_updates,
-            tot=args.epochs,
-            lr=args.peak_lr,
-            end_lr=args.end_lr,
-            power=1.0
-    )
-    
-    if args.rank == 0:
-        print('Model params:', sum(p.numel() for p in model.parameters()))
-
-    if seq_parallel_world_size > 1:
-        sync_params_and_buffers(model)
 
     window_state_timing = broadcast_window_state(args, structInfo, feature, device)
     sync_device(device)
@@ -175,13 +157,43 @@ def main():
     if args.use_cache and args.rank == 0:
         total_local_dup_nodes = int(sum(int(part.numel()) for part in structInfo.local_dup_nodes_per_partition))
         unique_local_dup_nodes = int(structInfo.local_dup_nodes_per_partition_feature.shape[0]) if structInfo.local_dup_nodes_per_partition_feature is not None else 0
+        local_window_count = len(local_partition_ids)
+        avg_dup_nodes_per_window = (total_local_dup_nodes / local_window_count) if local_window_count > 0 else 0.0
+        avg_unique_dup_nodes_per_window = (unique_local_dup_nodes / local_window_count) if local_window_count > 0 else 0.0
         print("\n" + "="*80)
         print("本地重复节点缓存统计:")
         print("="*80)
-        print(f"rank {args.rank} local partitions: {len(local_partition_ids)}")
+        print(f"rank {args.rank} local partitions: {local_window_count}")
         print(f"  - 本地重复节点出现次数: {total_local_dup_nodes}")
         print(f"  - 本地唯一重复节点数: {unique_local_dup_nodes}")
+        print(f"  - 每个窗口平均重复节点个数: {avg_dup_nodes_per_window:.2f}")
+        print(f"  - 每个窗口平均唯一重复节点个数: {avg_unique_dup_nodes_per_window:.2f}")
     print(f"rank {args.rank} local_partition_ids: {local_partition_ids}")
+    if args.preprocess_only == 1:
+        if seq_parallel_world_size > 1:
+            torch.distributed.barrier()
+        if args.rank == 0:
+            print("Preprocess-only mode enabled, exiting before model build/training.")
+        return
+
+    model = build_model(args,feature,device,y,graph_in_degree=structInfo.graph_in_degree,graph_out_degree=structInfo.graph_out_degree)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.peak_lr, weight_decay=args.weight_decay)
+    lr_scheduler = PolynomialDecayLR(
+            optimizer,
+            warmup=args.warmup_updates,
+            tot=args.epochs,
+            lr=args.peak_lr,
+            end_lr=args.end_lr,
+            power=1.0
+    )
+    
+    if args.rank == 0:
+        print('Model params:', sum(p.numel() for p in model.parameters()))
+
+    if seq_parallel_world_size > 1:
+        sync_params_and_buffers(model)
+
     loss_mean_list = []
     detector = LossStagnationDetector(cooldown=0)
     
