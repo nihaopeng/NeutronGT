@@ -44,6 +44,7 @@ MAX_TRAIN_VALIDATIONS_PER_CASE=${MAX_TRAIN_VALIDATIONS_PER_CASE:-2}
 WINDOW_TARGET_SOFT_WEIGHT=${WINDOW_TARGET_SOFT_WEIGHT:-6.0}
 DUP_RATIO_SOFT_WEIGHT=${DUP_RATIO_SOFT_WEIGHT:-8.0}
 NPARTS_SOFT_WEIGHT=${NPARTS_SOFT_WEIGHT:-1.0}
+EARLY_STOP_NPARTS=${EARLY_STOP_NPARTS:-1}
 
 GT_N_LAYERS=${GT_N_LAYERS:-4}
 GT_HIDDEN_DIM=${GT_HIDDEN_DIM:-128}
@@ -677,7 +678,11 @@ for dataset in "${DATASETS[@]}"; do
             done
         fi
 
-        n_candidates=$(collect_boundary_n_candidates "$stage1_file" "$upper_n" "$step_n_parts" "$max_n_parts")
+        if [[ "$EARLY_STOP_NPARTS" == "1" && -n "$upper_n" ]]; then
+            n_candidates="$upper_n"
+        else
+            n_candidates=$(collect_boundary_n_candidates "$stage1_file" "$upper_n" "$step_n_parts" "$max_n_parts")
+        fi
         if [[ -z "$n_candidates" ]]; then
             final_status="NO_WINDOW_SIZE_MATCH"
         else

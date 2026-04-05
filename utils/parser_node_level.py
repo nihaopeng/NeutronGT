@@ -50,6 +50,16 @@ def parser_add_main_args(parser):
     parser.add_argument('--save_model', action='store_true', default=False, help='whether to save model')
     parser.add_argument('--load_model', action='store_true', default=False, help='whether to load saved model')
     parser.add_argument('--model_dir', type=str, default='./model_ckpt/')
+    parser.add_argument('--save_checkpoint', action='store_true', default=False,
+                        help='whether to save resumable training checkpoints')
+    parser.add_argument('--checkpoint_dir', type=str, default='',
+                        help='directory used to store resumable training checkpoints; defaults to model_dir when empty')
+    parser.add_argument('--save_checkpoint_every', type=int, default=1,
+                        help='save epoch_{N}.pt every N epochs while always updating last.pt')
+    parser.add_argument('--resume_checkpoint', type=str, default='',
+                        help='path to a checkpoint file used to resume training')
+    parser.add_argument('--resume_latest', action='store_true', default=False,
+                        help='resume from the latest checkpoint under checkpoint_dir/model_dir')
     parser.add_argument('--switch_freq', type=int, default=5)
     parser.add_argument('--reorder', action='store_true', default=False,
                         help='TorchGT mode')

@@ -5,6 +5,7 @@ import time
 
 import numpy as np
 import torch
+import torch.distributed as dist
 
 from gt_sp.initialize import (
     get_sequence_length_per_rank,
@@ -23,14 +24,19 @@ import utils.vis as vis
 from core.node_level_pipeline import (
     StructInfo,
     broadcast_window_state,
+    build_checkpoint_payload,
     build_graph_struct_info,
     build_local_partitions,
     build_model,
+    ensure_checkpoint_dir,
     eval_epoch,
     load_optional_edge_csr,
+    load_training_checkpoint,
     restore_global_window_state,
+    save_training_checkpoint,
     sync_device,
     train_epoch,
+    validate_resume_supported,
 )
 
 
@@ -52,8 +58,13 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
     
+    if args.resume_checkpoint or args.resume_latest:
+        validate_resume_supported(args)
+
     if args.rank == 0:
         os.makedirs(args.model_dir, exist_ok=True)
+        if args.save_checkpoint or args.resume_latest:
+            ensure_checkpoint_dir(args)
     
     feature = torch.load(args.dataset_dir + args.dataset + '/x.pt')
     y = torch.load(args.dataset_dir + args.dataset + '/y.pt')
@@ -194,20 +205,39 @@ def main():
     if seq_parallel_world_size > 1:
         sync_params_and_buffers(model)
 
-    loss_mean_list = []
+    resume_state = load_training_checkpoint(args, model, optimizer, lr_scheduler, device)
+    start_epoch = resume_state.start_epoch
+    loss_mean_list = resume_state.loss_mean_list or []
+    best_val = resume_state.best_val
+    best_test = resume_state.best_test
+    if resume_state.checkpoint_path and args.rank == 0:
+        print(f"Resumed training from: {resume_state.checkpoint_path}")
+        print(f"Resume start epoch: {start_epoch}")
+        print(f"Checkpoint best metrics: best_val={best_val:.5f}, best_test={best_test:.5f}")
+
     detector = LossStagnationDetector(cooldown=0)
     
-    for epoch in range(0, args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         loss_mean,scores_by_pid,updated_kv_cache,time_stats = train_epoch(args,model,local_partition_ids,local_partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
                     epoch=epoch,
                     structInfo=structInfo)
         
+        is_best_checkpoint = False
         if epoch % 20 == 0:
             if args.rank == 0:
                 print(f"epoch {epoch}: lr = {lr_scheduler.get_last_lr()[0]:.2e}")
-            eval_epoch(args,model,local_partition_ids,local_partitions,feature,y,split_idx,device,
+            train_acc, valid_acc, test_acc, _ = eval_epoch(args,model,local_partition_ids,local_partitions,feature,y,split_idx,device,
                     epoch=epoch,
                     structInfo=structInfo)
+            if args.rank == 0 and valid_acc is not None:
+                if valid_acc > best_val:
+                    best_val = valid_acc
+                    best_test = test_acc if test_acc is not None else best_test
+                    is_best_checkpoint = True
+                    if args.save_model:
+                        torch.save(model.state_dict(), os.path.join(args.model_dir, f'{args.dataset}.pkl'))
+                elif test_acc is not None and test_acc > best_test:
+                    best_test = test_acc
         
         loss_mean_list.append(loss_mean)
         if args.use_cache==0 and detector(loss_mean_list):
@@ -249,6 +279,24 @@ def main():
                 print("------------------------------------------------------------------------------------")
                 print("Window Adjust Time: {:.3f}s".format(window_adjust_time))
                 print("------------------------------------------------------------------------------------")
+
+        if args.save_checkpoint:
+            if args.rank == 0:
+                payload = build_checkpoint_payload(
+                    args,
+                    model,
+                    optimizer,
+                    lr_scheduler,
+                    epoch,
+                    loss_mean_list,
+                    structInfo.window_state_version,
+                    best_val,
+                    best_test,
+                )
+                saved_paths = save_training_checkpoint(args, payload, epoch, is_best=is_best_checkpoint)
+                print(f"Saved checkpoint(s): {', '.join(saved_paths)}")
+            if seq_parallel_world_size > 1:
+                dist.barrier()
 
 
 if __name__ == "__main__":
