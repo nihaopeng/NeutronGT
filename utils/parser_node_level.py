@@ -56,6 +56,8 @@ def parser_add_main_args(parser):
                         help='directory used to store resumable training checkpoints; defaults to model_dir when empty')
     parser.add_argument('--save_checkpoint_every', type=int, default=1,
                         help='save epoch_{N}.pt every N epochs while always updating last.pt')
+    parser.add_argument('--save_latest_only', action='store_true', default=False,
+                        help='only keep the latest resumable checkpoint and remove epoch/best checkpoint files when updating it')
     parser.add_argument('--resume_checkpoint', type=str, default='',
                         help='path to a checkpoint file used to resume training')
     parser.add_argument('--resume_latest', action='store_true', default=False,

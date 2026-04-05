@@ -130,11 +130,18 @@ def build_checkpoint_payload(args, model, optimizer, lr_scheduler, epoch: int, l
 
 def save_training_checkpoint(args, payload: dict[str, Any], epoch: int, is_best: bool = False) -> list[str]:
     saved_paths: list[str] = []
-    ensure_checkpoint_dir(args)
+    ckpt_dir = ensure_checkpoint_dir(args)
     paths = checkpoint_paths(args, epoch)
 
     torch.save(payload, paths['last'])
     saved_paths.append(str(paths['last']))
+
+    if args.save_latest_only:
+        for stale_path in ckpt_dir.glob('epoch_*.pt'):
+            if stale_path != paths.get('epoch'):
+                stale_path.unlink(missing_ok=True)
+        paths['best'].unlink(missing_ok=True)
+        return saved_paths
 
     save_every = max(int(args.save_checkpoint_every), 0)
     if save_every > 0 and (epoch + 1) % save_every == 0:
