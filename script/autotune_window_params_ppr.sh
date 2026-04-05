@@ -12,8 +12,6 @@ RUN_DATASETS=${RUN_DATASETS:-all}
 RUN_MODELS=${RUN_MODELS:-all}
 RESULT_DIR=${AUTOTUNE_RESULT_DIR:-"$ROOT_DIR/results/autotune_window_params_ppr"}
 LOG_DIR="$RESULT_DIR/logs"
-TRIALS_CSV="$RESULT_DIR/trials.csv"
-SUMMARY_CSV="$RESULT_DIR/summary.csv"
 DUP_RATIO_MIN=${DUP_RATIO_MIN:-0.10}
 DUP_RATIO_MAX=${DUP_RATIO_MAX:-0.20}
 DUP_RATIO_IDEAL=${DUP_RATIO_IDEAL:-0.15}
@@ -55,10 +53,10 @@ GRAPHORMER_LARGE_NUM_HEADS=${GRAPHORMER_LARGE_NUM_HEADS:-32}
 
 IFS=',' read -r -a VISIBLE_GPU_ARRAY <<< "$CUDA_VISIBLE_DEVICES_LIST"
 GPU_COUNT=${#VISIBLE_GPU_ARRAY[@]}
+[[ "$DATASET_DIR" != */ ]] && DATASET_DIR="${DATASET_DIR}/"
 mkdir -p "$RESULT_DIR" "$LOG_DIR"
 
-printf 'dataset,model_alias,attn_type,n_parts,related_nodes_topk_rate,gpu_total_mem_mb,gpu_budget_mb,dynamic_target_max_window_nodes,max_window_nodes,avg_window_nodes,avg_dup_nodes_per_window,avg_dup_ratio_per_window,peak_gpu_mem_mb,train_epoch_time,status,log_path\n' > "$TRIALS_CSV"
-printf 'dataset,model_alias,attn_type,n_parts,related_nodes_topk_rate,gpu_total_mem_mb,gpu_budget_mb,dynamic_target_max_window_nodes,max_window_nodes,avg_window_nodes,avg_dup_nodes_per_window,avg_dup_ratio_per_window,peak_gpu_mem_mb,train_epoch_time,status,log_path\n' > "$SUMMARY_CSV"
+CSV_HEADER='dataset,model_alias,attn_type,n_parts,related_nodes_topk_rate,gpu_total_mem_mb,gpu_budget_mb,dynamic_target_max_window_nodes,max_window_nodes,avg_window_nodes,avg_dup_nodes_per_window,avg_dup_ratio_per_window,peak_gpu_mem_mb,train_epoch_time,status,log_path'
 
 IFS=',' read -r -a RUN_DATASET_FILTER <<< "$RUN_DATASETS"
 IFS=',' read -r -a RUN_MODEL_FILTER <<< "$RUN_MODELS"
@@ -92,6 +90,31 @@ should_run_model() {
         return 0
     fi
     contains_item "$model" "${RUN_MODEL_FILTER[@]}"
+}
+
+ensure_dataset_csvs() {
+    local dataset="$1"
+    local safe_dataset="${dataset//\//_}"
+    local trials_csv="$RESULT_DIR/trials_${safe_dataset}.csv"
+    local summary_csv="$RESULT_DIR/summary_${safe_dataset}.csv"
+    if [[ ! -f "$trials_csv" ]]; then
+        printf '%s\n' "$CSV_HEADER" > "$trials_csv"
+    fi
+    if [[ ! -f "$summary_csv" ]]; then
+        printf '%s\n' "$CSV_HEADER" > "$summary_csv"
+    fi
+}
+
+get_trials_csv_path() {
+    local dataset="$1"
+    local safe_dataset="${dataset//\//_}"
+    printf '%s/trials_%s.csv' "$RESULT_DIR" "$safe_dataset"
+}
+
+get_summary_csv_path() {
+    local dataset="$1"
+    local safe_dataset="${dataset//\//_}"
+    printf '%s/summary_%s.csv' "$RESULT_DIR" "$safe_dataset"
 }
 
 get_model_args() {
@@ -147,7 +170,6 @@ detect_gpu_total_mem_mb() {
         return
     fi
     python - "$CUDA_VISIBLE_DEVICES_LIST" <<'PY'
-import os
 import subprocess
 import sys
 visible = [item.strip() for item in sys.argv[1].split(',') if item.strip()]
@@ -372,6 +394,10 @@ for dataset in "${DATASETS[@]}"; do
     if ! should_run_dataset "$dataset"; then
         continue
     fi
+    ensure_dataset_csvs "$dataset"
+    TRIALS_CSV=$(get_trials_csv_path "$dataset")
+    SUMMARY_CSV=$(get_summary_csv_path "$dataset")
+
     for model_alias in "${MODELS[@]}"; do
         if ! should_run_model "$model_alias"; then
             continue
@@ -433,7 +459,6 @@ for dataset in "${DATASETS[@]}"; do
             matched_avg_window=""
             matched_avg_dup_nodes=""
             matched_avg_dup_ratio=""
-            matched_log_path=""
 
             for related_topk in 1 2 3 4 5 6; do
                 case_index=$((case_index + 1))
@@ -468,7 +493,6 @@ for dataset in "${DATASETS[@]}"; do
                         matched_avg_window="$avg_window_nodes"
                         matched_avg_dup_nodes="$avg_dup_nodes_per_window"
                         matched_avg_dup_ratio="$avg_dup_ratio_per_window"
-                        matched_log_path="$log_path"
                     else
                         better=$(choose_better_dup_match "$avg_dup_ratio_per_window" "$matched_avg_dup_ratio")
                         if [[ "$better" == "1" ]]; then
@@ -477,7 +501,6 @@ for dataset in "${DATASETS[@]}"; do
                             matched_avg_window="$avg_window_nodes"
                             matched_avg_dup_nodes="$avg_dup_nodes_per_window"
                             matched_avg_dup_ratio="$avg_dup_ratio_per_window"
-                            matched_log_path="$log_path"
                         fi
                     fi
                 else
@@ -570,5 +593,12 @@ for dataset in "${DATASETS[@]}"; do
 done
 
 echo
-echo 'Final recommended parameter table:'
-cat "$SUMMARY_CSV"
+echo 'Final recommended parameter tables by dataset:'
+for dataset in "${DATASETS[@]}"; do
+    if ! should_run_dataset "$dataset"; then
+        continue
+    fi
+    echo "===== $dataset ====="
+    cat "$(get_summary_csv_path "$dataset")"
+    echo
+done
