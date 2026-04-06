@@ -15,6 +15,9 @@ LOG_DIR="$RESULT_DIR/logs"
 DUP_RATIO_MIN=${DUP_RATIO_MIN:-0.15}
 DUP_RATIO_MAX=${DUP_RATIO_MAX:-0.20}
 DUP_RATIO_IDEAL=${DUP_RATIO_IDEAL:-0.15}
+ACCEPTABLE_WINDOW_MIN=${ACCEPTABLE_WINDOW_MIN:-7000}
+ACCEPTABLE_WINDOW_MAX=${ACCEPTABLE_WINDOW_MAX:-10000}
+FINAL_TRAIN_EPOCHS=${FINAL_TRAIN_EPOCHS:-25}
 GPU_MEM_BUDGET_RATIO=${GPU_MEM_BUDGET_RATIO:-0.85}
 TUNE_EPOCHS=${TUNE_EPOCHS:-1}
 MASTER_PORT_BASE=${MASTER_PORT_BASE:-29650}
@@ -40,11 +43,14 @@ END_LR=${END_LR:-1e-9}
 WARMUP_UPDATES=${WARMUP_UPDATES:-0}
 PATIENCE=${PATIENCE:-50}
 NUM_GLOBAL_NODE=${NUM_GLOBAL_NODE:-1}
-MAX_TRAIN_VALIDATIONS_PER_CASE=${MAX_TRAIN_VALIDATIONS_PER_CASE:-2}
+MAX_TRAIN_VALIDATIONS_PER_CASE=${MAX_TRAIN_VALIDATIONS_PER_CASE:-1}
+FAST_APPROX_ONLY=${FAST_APPROX_ONLY:-1}
+FAST_WINDOW_MARGIN_RATIO=${FAST_WINDOW_MARGIN_RATIO:-0.05}
 WINDOW_TARGET_SOFT_WEIGHT=${WINDOW_TARGET_SOFT_WEIGHT:-6.0}
 DUP_RATIO_SOFT_WEIGHT=${DUP_RATIO_SOFT_WEIGHT:-8.0}
 NPARTS_SOFT_WEIGHT=${NPARTS_SOFT_WEIGHT:-1.0}
 EARLY_STOP_NPARTS=${EARLY_STOP_NPARTS:-1}
+MAX_MEMORY_RETRIES_PER_CASE=${MAX_MEMORY_RETRIES_PER_CASE:-3}
 
 GT_N_LAYERS=${GT_N_LAYERS:-4}
 GT_HIDDEN_DIM=${GT_HIDDEN_DIM:-128}
@@ -146,16 +152,16 @@ get_search_config() {
     case "$dataset:$model_alias" in
         ogbn-arxiv:GT) printf '24 8 120' ;;
         ogbn-arxiv:Graphormer-Slim) printf '32 8 128' ;;
-        ogbn-arxiv:Graphormer-Large) printf '96 16 256' ;;
+        ogbn-arxiv:Graphormer-Large) printf '128 16 320' ;;
         reddit:GT) printf '40 8 160' ;;
         reddit:Graphormer-Slim) printf '56 8 192' ;;
-        reddit:Graphormer-Large) printf '128 16 320' ;;
-        AmazonProducts:GT) printf '72 16 224' ;;
-        AmazonProducts:Graphormer-Slim) printf '96 16 256' ;;
-        AmazonProducts:Graphormer-Large) printf '160 32 416' ;;
-        ogbn-products:GT) printf '96 16 288' ;;
-        ogbn-products:Graphormer-Slim) printf '128 16 352' ;;
-        ogbn-products:Graphormer-Large) printf '192 32 512' ;;
+        reddit:Graphormer-Large) printf '160 32 416' ;;
+        AmazonProducts:GT) printf '224 16 320' ;;
+        AmazonProducts:Graphormer-Slim) printf '224 16 352' ;;
+        AmazonProducts:Graphormer-Large) printf '352 32 736' ;;
+        ogbn-products:GT) printf '320 16 416' ;;
+        ogbn-products:Graphormer-Slim) printf '320 16 448' ;;
+        ogbn-products:Graphormer-Large) printf '448 32 896' ;;
         *) return 1 ;;
     esac
 }
@@ -299,7 +305,13 @@ dup_hi = float(sys.argv[7])
 w_window = float(sys.argv[8])
 w_dup = float(sys.argv[9])
 w_nparts = float(sys.argv[10])
-window_penalty = max(0.0, max_window - target) / max(target, 1.0)
+overshoot_ratio = max(0.0, max_window - target) / max(target, 1.0)
+if overshoot_ratio <= 0.10:
+    window_penalty = overshoot_ratio
+elif overshoot_ratio <= 0.30:
+    window_penalty = 0.10 + 8.0 * (overshoot_ratio - 0.10) ** 2
+else:
+    window_penalty = 5.0 + 50.0 * (overshoot_ratio - 0.30) ** 2
 if dup < dup_lo:
     dup_penalty = (dup_lo - dup) / max(dup_hi - dup_lo, 1e-6)
 elif dup > dup_hi:
@@ -335,6 +347,8 @@ run_case() {
     if [[ "$mode" == "preprocess" ]]; then
         epochs=0
         preprocess_only=1
+    elif [[ "$mode" == "train_final" ]]; then
+        epochs="$FINAL_TRAIN_EPOCHS"
     fi
 
     local cmd=(
@@ -393,6 +407,27 @@ print('1' if lo <= value <= hi else '0')
 PY
 }
 
+is_window_in_range() {
+    local value="$1"
+    python - "$value" "$ACCEPTABLE_WINDOW_MIN" "$ACCEPTABLE_WINDOW_MAX" <<'PY'
+import sys
+value = float(sys.argv[1])
+lo = float(sys.argv[2])
+hi = float(sys.argv[3])
+print('1' if lo <= value <= hi else '0')
+PY
+}
+
+window_distance_score() {
+    local value="$1"
+    python - "$value" <<'PY'
+import sys
+value = float(sys.argv[1])
+target = 9500.0
+print(f"{abs(value - target):.6f}")
+PY
+}
+
 is_within_budget() {
     local peak_mem_mb="$1"
     local budget_mb="$2"
@@ -413,7 +448,15 @@ PY
 
 log_contains_oom() {
     local log_path="$1"
-    if grep -q -E 'CUDA out of memory|torch.cuda.OutOfMemoryError|OOM' "$log_path"; then
+    if grep -q -E 'CUDA out of memory|torch.cuda.OutOfMemoryError|OutOfMemoryError|OOM|Killed|signal 9|exit code 137|returned non-zero exit status 137' "$log_path"; then
+        return 0
+    fi
+    return 1
+}
+
+status_is_memory_failure() {
+    local status="$1"
+    if [[ "$status" == "OOM_AT_TRAIN" || "$status" == "COMMAND_FAILED" ]]; then
         return 0
     fi
     return 1
@@ -556,7 +599,7 @@ validate_train_candidate() {
     local train_log="$LOG_DIR/${dataset}_${model_alias}_n${n_parts}_r${related_topk}_train.log"
     case_index=$((case_index + 1))
     local port=$((MASTER_PORT_BASE + case_index))
-    if ! run_case train "$dataset" "$model_alias" "$n_parts" "$related_topk" "$port" "$train_log"; then
+    if ! run_case train_final "$dataset" "$model_alias" "$n_parts" "$related_topk" "$port" "$train_log"; then
         local status="COMMAND_FAILED"
         if log_contains_oom "$train_log"; then
             status="OOM_AT_TRAIN"
@@ -634,7 +677,7 @@ for dataset in "${DATASETS[@]}"; do
             stage1_log="$LOG_DIR/${dataset}_${model_alias}_n${current_n}_r2_stage1.log"
             if evaluate_preprocess_candidate "$dataset" "$model_alias" "$attn_type" "$current_n" 2 "$dynamic_target_max_window_nodes" "$start_n_parts" "WINDOW_BOUNDARY" "stage1_scan" "$stage1_log"; then
                 printf '%s|%s\n' "$PRE_CANDIDATE_SCORE" "$current_n" >> "$stage1_file"
-                if [[ "$PRE_MAX_WINDOW_NODES" -le "$dynamic_target_max_window_nodes" ]]; then
+                if [[ "$PRE_MAX_WINDOW_NODES" -le "$ACCEPTABLE_WINDOW_MAX" ]]; then
                     upper_n="$current_n"
                     break
                 fi
@@ -655,7 +698,7 @@ for dataset in "${DATASETS[@]}"; do
         done
 
         # Stage A2: binary-ish refinement around the first acceptable upper bound
-        if [[ -n "$upper_n" ]]; then
+        if [[ "$FAST_APPROX_ONLY" != "1" && -n "$upper_n" ]]; then
             if [[ -z "$lower_fail_n" ]]; then
                 lower_fail_n=$(( upper_n > step_n_parts ? upper_n - step_n_parts : 1 ))
             fi
@@ -667,7 +710,7 @@ for dataset in "${DATASETS[@]}"; do
                 stage1_log="$LOG_DIR/${dataset}_${model_alias}_n${mid_n}_r2_stage1.log"
                 if evaluate_preprocess_candidate "$dataset" "$model_alias" "$attn_type" "$mid_n" 2 "$dynamic_target_max_window_nodes" "$start_n_parts" "WINDOW_BOUNDARY" "stage1_refine" "$stage1_log"; then
                     printf '%s|%s\n' "$PRE_CANDIDATE_SCORE" "$mid_n" >> "$stage1_file"
-                    if [[ "$PRE_MAX_WINDOW_NODES" -le "$dynamic_target_max_window_nodes" ]]; then
+                    if [[ "$PRE_MAX_WINDOW_NODES" -le "$ACCEPTABLE_WINDOW_MAX" ]]; then
                         upper_n="$mid_n"
                     else
                         lower_fail_n="$mid_n"
@@ -678,7 +721,7 @@ for dataset in "${DATASETS[@]}"; do
             done
         fi
 
-        if [[ "$EARLY_STOP_NPARTS" == "1" && -n "$upper_n" ]]; then
+        if [[ -n "$upper_n" && ( "$EARLY_STOP_NPARTS" == "1" || "$FAST_APPROX_ONLY" == "1" ) ]]; then
             n_candidates="$upper_n"
         else
             n_candidates=$(collect_boundary_n_candidates "$stage1_file" "$upper_n" "$step_n_parts" "$max_n_parts")
@@ -688,82 +731,169 @@ for dataset in "${DATASETS[@]}"; do
         else
             for n_parts in $n_candidates; do
                 coarse_file=$(mktemp)
-                for related_topk in 1 3 5; do
+                if [[ "$FAST_APPROX_ONLY" == "1" ]]; then
+                    r_probe_list="2 3 4"
+                else
+                    r_probe_list="1 3 5"
+                fi
+                for related_topk in $r_probe_list; do
                     log_path="$LOG_DIR/${dataset}_${model_alias}_n${n_parts}_r${related_topk}.log"
                     if evaluate_preprocess_candidate "$dataset" "$model_alias" "$attn_type" "$n_parts" "$related_topk" "$dynamic_target_max_window_nodes" "$start_n_parts" "R_COARSE" "coarse_scan" "$log_path"; then
                         append_preproc_candidate "$preproc_candidate_file" "$n_parts" "$related_topk" "$PRE_MAX_WINDOW_NODES" "$PRE_AVG_WINDOW_NODES" "$PRE_AVG_DUP_NODES_PER_WINDOW" "$PRE_AVG_DUP_RATIO_PER_WINDOW" "$PRE_CANDIDATE_SCORE" "R_COARSE" "coarse_scan" "$log_path"
                         printf '%s|%s|%s\n' "$PRE_CANDIDATE_SCORE" "$related_topk" "$PRE_AVG_DUP_RATIO_PER_WINDOW" >> "$coarse_file"
                     fi
                 done
-                adaptive_rs=$(get_adaptive_r_sequence "$coarse_file")
+                if [[ "$FAST_APPROX_ONLY" != "1" ]]; then
+                    adaptive_rs=$(get_adaptive_r_sequence "$coarse_file")
+                    rm -f "$coarse_file"
+                    for related_topk in $adaptive_rs; do
+                        log_path="$LOG_DIR/${dataset}_${model_alias}_n${n_parts}_r${related_topk}.log"
+                        if evaluate_preprocess_candidate "$dataset" "$model_alias" "$attn_type" "$n_parts" "$related_topk" "$dynamic_target_max_window_nodes" "$start_n_parts" "R_REFINE" "adaptive_refine" "$log_path"; then
+                            append_preproc_candidate "$preproc_candidate_file" "$n_parts" "$related_topk" "$PRE_MAX_WINDOW_NODES" "$PRE_AVG_WINDOW_NODES" "$PRE_AVG_DUP_NODES_PER_WINDOW" "$PRE_AVG_DUP_RATIO_PER_WINDOW" "$PRE_CANDIDATE_SCORE" "R_REFINE" "adaptive_refine" "$log_path"
+                        fi
+                    done
+                fi
                 rm -f "$coarse_file"
-                for related_topk in $adaptive_rs; do
-                    log_path="$LOG_DIR/${dataset}_${model_alias}_n${n_parts}_r${related_topk}.log"
-                    if evaluate_preprocess_candidate "$dataset" "$model_alias" "$attn_type" "$n_parts" "$related_topk" "$dynamic_target_max_window_nodes" "$start_n_parts" "R_REFINE" "adaptive_refine" "$log_path"; then
-                        append_preproc_candidate "$preproc_candidate_file" "$n_parts" "$related_topk" "$PRE_MAX_WINDOW_NODES" "$PRE_AVG_WINDOW_NODES" "$PRE_AVG_DUP_NODES_PER_WINDOW" "$PRE_AVG_DUP_RATIO_PER_WINDOW" "$PRE_CANDIDATE_SCORE" "R_REFINE" "adaptive_refine" "$log_path"
-                    fi
-                done
             done
 
-            top_candidates=$(select_top_candidates "$preproc_candidate_file" "$MAX_TRAIN_VALIDATIONS_PER_CASE")
-            had_preproc_candidates=0
-            had_dup_in_range=0
-            oom_in_train=0
-            best_train_time=""
-            while IFS='|' read -r candidate_score n_parts related_topk max_window_nodes avg_window_nodes avg_dup_nodes_per_window avg_dup_ratio_per_window search_phase selection_reason log_path; do
-                [[ -z "$n_parts" ]] && continue
-                had_preproc_candidates=1
-                if [[ "$(is_dup_ratio_in_range "$avg_dup_ratio_per_window")" == "1" ]]; then
-                    had_dup_in_range=1
+            if [[ "$FAST_APPROX_ONLY" == "1" ]]; then
+                preferred_preproc=$(awk -F'|' '
+                    function abs(v) { return v < 0 ? -v : v }
+                    {
+                        in_window = ($4 >= ENVIRON["ACCEPTABLE_WINDOW_MIN"] && $4 <= ENVIRON["ACCEPTABLE_WINDOW_MAX"])
+                        in_dup = ($7 >= ENVIRON["DUP_RATIO_MIN"] && $7 <= ENVIRON["DUP_RATIO_MAX"])
+                        dist = abs($4 - 9500)
+                        if (in_window && in_dup) {
+                            print $0
+                        }
+                    }
+                ' "$preproc_candidate_file" | sort -t '|' -k1,1g -k4,4g | head -n 1)
+                if [[ -z "$preferred_preproc" ]]; then
+                    preferred_preproc=$(sort -t '|' -k1,1g "$preproc_candidate_file" | head -n 1)
                 fi
-                if validate_train_candidate "$dataset" "$model_alias" "$attn_type" "$n_parts" "$related_topk" "$dynamic_target_max_window_nodes" "$max_window_nodes" "$avg_window_nodes" "$avg_dup_nodes_per_window" "$avg_dup_ratio_per_window" "$candidate_score" "TRAIN_VALIDATE" "selected_for_training"; then
-                    take_candidate=0
-                    if [[ -z "$best_train_time" ]]; then
-                        take_candidate=1
-                    elif [[ "$(is_less_than "$TRAIN_EPOCH_TIME" "$best_train_time")" == "1" ]]; then
-                        take_candidate=1
-                    fi
-                    if [[ "$take_candidate" == "1" ]]; then
-                        best_train_time="$TRAIN_EPOCH_TIME"
+                if [[ -n "$preferred_preproc" ]]; then
+                    IFS='|' read -r final_candidate_score final_n_parts final_related_topk final_max_window final_avg_window final_avg_dup_nodes final_avg_dup_ratio final_search_phase final_selection_reason final_log_path <<< "$preferred_preproc"
+                    if [[ "$(is_window_in_range "$final_max_window")" == "1" && "$(is_dup_ratio_in_range "$final_avg_dup_ratio")" == "1" ]]; then
                         final_status="SUCCESS"
-                        final_n_parts="$n_parts"
-                        final_related_topk="$related_topk"
-                        final_max_window="$max_window_nodes"
-                        final_avg_window="$avg_window_nodes"
-                        final_avg_dup_nodes="$avg_dup_nodes_per_window"
-                        final_avg_dup_ratio="$avg_dup_ratio_per_window"
-                        final_peak_gpu_mem_mb="$TRAIN_PEAK_GPU_MEM_MB"
-                        final_train_epoch_time="$TRAIN_EPOCH_TIME"
-                        final_log_path="$TRAIN_LOG_PATH"
-                        final_candidate_score="$candidate_score"
-                        final_search_phase="TRAIN_VALIDATE"
-                        final_selection_reason="best_train_time_under_budget"
+                    else
+                        final_status="NO_DUP_RATIO_MATCH"
                     fi
-                else
-                    if [[ "$TRAIN_VALIDATE_STATUS" == "OOM_AT_TRAIN" ]]; then
-                        oom_in_train=1
-                    fi
-                fi
-            done <<< "$top_candidates"
+                    final_selection_reason="fast_approx_preprocess_only"
+                    if [[ -n "$final_n_parts" ]]; then
+                        retry_n_parts="$final_n_parts"
+                        retry_attempt=0
+                        while true; do
+                            retry_log="$LOG_DIR/${dataset}_${model_alias}_n${retry_n_parts}_r${final_related_topk}.log"
+                            if ! evaluate_preprocess_candidate "$dataset" "$model_alias" "$attn_type" "$retry_n_parts" "$final_related_topk" "$dynamic_target_max_window_nodes" "$start_n_parts" "R_RECHECK" "stage3_memory_retry_precheck" "$retry_log"; then
+                                final_status="COMMAND_FAILED"
+                                break
+                            fi
+                            final_n_parts="$retry_n_parts"
+                            final_max_window="$PRE_MAX_WINDOW_NODES"
+                            final_avg_window="$PRE_AVG_WINDOW_NODES"
+                            final_avg_dup_nodes="$PRE_AVG_DUP_NODES_PER_WINDOW"
+                            final_avg_dup_ratio="$PRE_AVG_DUP_RATIO_PER_WINDOW"
+                            final_candidate_score="$PRE_CANDIDATE_SCORE"
+                            final_log_path="$retry_log"
 
-            if [[ "$final_status" != "SUCCESS" ]]; then
-                if [[ "$oom_in_train" == "1" ]]; then
-                    final_status="OOM_AT_TRAIN"
-                elif [[ "$had_preproc_candidates" == "1" && "$had_dup_in_range" == "1" ]]; then
-                    final_status="OOM_AT_TRAIN"
-                elif [[ "$had_preproc_candidates" == "1" ]]; then
-                    final_status="NO_DUP_RATIO_MATCH"
-                    best_preproc=$(sort -t '|' -k1,1g "$preproc_candidate_file" | head -n 1)
-                    if [[ -n "$best_preproc" ]]; then
-                        IFS='|' read -r final_candidate_score final_n_parts final_related_topk final_max_window final_avg_window final_avg_dup_nodes final_avg_dup_ratio final_search_phase final_selection_reason final_log_path <<< "$best_preproc"
+                            validate_train_candidate "$dataset" "$model_alias" "$attn_type" "$final_n_parts" "$final_related_topk" "$dynamic_target_max_window_nodes" "$final_max_window" "$final_avg_window" "$final_avg_dup_nodes" "$final_avg_dup_ratio" "$final_candidate_score" "TRAIN_FINAL" "fast_approx_final_train"
+                            if [[ "$TRAIN_VALIDATE_STATUS" == "TRAIN_VALIDATED" ]]; then
+                                final_status="SUCCESS"
+                                final_peak_gpu_mem_mb="$TRAIN_PEAK_GPU_MEM_MB"
+                                final_train_epoch_time="$TRAIN_EPOCH_TIME"
+                                final_log_path="$TRAIN_LOG_PATH"
+                                final_search_phase="TRAIN_FINAL"
+                                final_selection_reason="fast_approx_final_train"
+                                break
+                            fi
+
+                            if status_is_memory_failure "$TRAIN_VALIDATE_STATUS" && [[ "$retry_attempt" -lt "$MAX_MEMORY_RETRIES_PER_CASE" ]]; then
+                                retry_attempt=$((retry_attempt + 1))
+                                next_retry_n_parts=$((retry_n_parts + step_n_parts))
+                                if [[ "$next_retry_n_parts" -gt "$max_n_parts" || "$next_retry_n_parts" -le "$retry_n_parts" ]]; then
+                                    final_status="OOM_AT_TRAIN"
+                                    final_search_phase="TRAIN_FINAL"
+                                    final_selection_reason="memory_retry_limit_reached"
+                                    break
+                                fi
+                                retry_n_parts="$next_retry_n_parts"
+                                continue
+                            fi
+
+                            if status_is_memory_failure "$TRAIN_VALIDATE_STATUS"; then
+                                final_status="OOM_AT_TRAIN"
+                            else
+                                final_status="$TRAIN_VALIDATE_STATUS"
+                            fi
+                            final_search_phase="TRAIN_FINAL"
+                            final_selection_reason="fast_approx_final_train_failed"
+                            break
+                        done
                     fi
                 else
                     final_status="NO_WINDOW_SIZE_MATCH"
-                    best_stage1=$(sort -t '|' -k1,1g "$stage1_file" | head -n 1)
-                    if [[ -n "$best_stage1" ]]; then
-                        IFS='|' read -r final_candidate_score final_n_parts <<< "$best_stage1"
-                        final_search_phase="WINDOW_BOUNDARY"
-                        final_selection_reason="best_stage1_window_candidate"
+                fi
+            else
+                top_candidates=$(select_top_candidates "$preproc_candidate_file" "$MAX_TRAIN_VALIDATIONS_PER_CASE")
+                had_preproc_candidates=0
+                had_dup_in_range=0
+                oom_in_train=0
+                best_train_time=""
+                while IFS='|' read -r candidate_score n_parts related_topk max_window_nodes avg_window_nodes avg_dup_nodes_per_window avg_dup_ratio_per_window search_phase selection_reason log_path; do
+                    [[ -z "$n_parts" ]] && continue
+                    had_preproc_candidates=1
+                    if [[ "$(is_dup_ratio_in_range "$avg_dup_ratio_per_window")" == "1" ]]; then
+                        had_dup_in_range=1
+                    fi
+                    if validate_train_candidate "$dataset" "$model_alias" "$attn_type" "$n_parts" "$related_topk" "$dynamic_target_max_window_nodes" "$max_window_nodes" "$avg_window_nodes" "$avg_dup_nodes_per_window" "$avg_dup_ratio_per_window" "$candidate_score" "TRAIN_VALIDATE" "selected_for_training"; then
+                        take_candidate=0
+                        if [[ -z "$best_train_time" ]]; then
+                            take_candidate=1
+                        elif [[ "$(is_less_than "$TRAIN_EPOCH_TIME" "$best_train_time")" == "1" ]]; then
+                            take_candidate=1
+                        fi
+                        if [[ "$take_candidate" == "1" ]]; then
+                            best_train_time="$TRAIN_EPOCH_TIME"
+                            final_status="SUCCESS"
+                            final_n_parts="$n_parts"
+                            final_related_topk="$related_topk"
+                            final_max_window="$max_window_nodes"
+                            final_avg_window="$avg_window_nodes"
+                            final_avg_dup_nodes="$avg_dup_nodes_per_window"
+                            final_avg_dup_ratio="$avg_dup_ratio_per_window"
+                            final_peak_gpu_mem_mb="$TRAIN_PEAK_GPU_MEM_MB"
+                            final_train_epoch_time="$TRAIN_EPOCH_TIME"
+                            final_log_path="$TRAIN_LOG_PATH"
+                            final_candidate_score="$candidate_score"
+                            final_search_phase="TRAIN_VALIDATE"
+                            final_selection_reason="best_train_time_under_budget"
+                        fi
+                    else
+                        if [[ "$TRAIN_VALIDATE_STATUS" == "OOM_AT_TRAIN" ]]; then
+                            oom_in_train=1
+                        fi
+                    fi
+                done <<< "$top_candidates"
+
+                if [[ "$final_status" != "SUCCESS" ]]; then
+                    if [[ "$oom_in_train" == "1" ]]; then
+                        final_status="OOM_AT_TRAIN"
+                    elif [[ "$had_preproc_candidates" == "1" && "$had_dup_in_range" == "1" ]]; then
+                        final_status="OOM_AT_TRAIN"
+                    elif [[ "$had_preproc_candidates" == "1" ]]; then
+                        final_status="NO_DUP_RATIO_MATCH"
+                        best_preproc=$(sort -t '|' -k1,1g "$preproc_candidate_file" | head -n 1)
+                        if [[ -n "$best_preproc" ]]; then
+                            IFS='|' read -r final_candidate_score final_n_parts final_related_topk final_max_window final_avg_window final_avg_dup_nodes final_avg_dup_ratio final_search_phase final_selection_reason final_log_path <<< "$best_preproc"
+                        fi
+                    else
+                        final_status="NO_WINDOW_SIZE_MATCH"
+                        best_stage1=$(sort -t '|' -k1,1g "$stage1_file" | head -n 1)
+                        if [[ -n "$best_stage1" ]]; then
+                            IFS='|' read -r final_candidate_score final_n_parts <<< "$best_stage1"
+                            final_search_phase="WINDOW_BOUNDARY"
+                            final_selection_reason="best_stage1_window_candidate"
+                        fi
                     fi
                 fi
             fi

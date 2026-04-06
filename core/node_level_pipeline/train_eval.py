@@ -128,41 +128,42 @@ def eval_epoch(args, model, local_partition_ids, local_partitions, feature, y, s
     kv_cache_per_partition = None
     if args.use_cache:
         kv_cache_per_partition = [None] * len(local_partitions)
-    
-    for local_i, global_pid in enumerate(local_partition_ids):
-        idx = local_partitions[local_i]
-        if args.use_cache:
-            dup_index_i = local_dup_indices[local_i]
-            start_of_no_dup = int(dup_index_i.numel())
-            x_i = feature[idx[start_of_no_dup:]].to(device)
-            if start_of_no_dup > 0:
-                x_i = torch.cat([local_dup_feature_cache[dup_index_i], x_i], dim=0)
-        else:
-            x_i = feature[idx].to(device)
 
-        attn_bias,in_degree,out_degree = None,None,None
-        edge_index_i,edge_input_i,mask,spatial_pos_i = local_sub_edge_index_list[local_i].to(device),None,None,None
-        if args.struct_enc=="True":
-            in_degree = graph_in_degree[idx].to(device)
-            out_degree = graph_out_degree[idx].to(device)
-            spatial_pos_i = local_spatial_pos_by_pid[local_i].to(device)
-            assert len(idx) == spatial_pos_i.shape[0], f"rank {args.rank} spatial_pos mismatch for global_pid={global_pid}"
-        current_kv_cache = kv_cache_per_partition[local_i] if kv_cache_per_partition is not None else None
-        
-        out_i,_,_,updated_kv_cache = model(x_i, attn_bias, edge_index_i,in_degree,out_degree, spatial_pos_i,edge_input_i,
-                                          attn_type=args.attn_type,mask=mask,dup_nodes_kv_cache=current_kv_cache,part_id=global_pid)
-        
-        if kv_cache_per_partition is not None and updated_kv_cache is not None:
-            kv_cache_per_partition[local_i] = updated_kv_cache
-        mask_train = torch.isin(idx.to(device), split_idx["train"].to(device)).to('cpu')
-        mask_valid = torch.isin(idx.to(device), split_idx["valid"].to(device)).to('cpu')
-        mask_test = torch.isin(idx.to(device), split_idx["test"].to(device)).to('cpu')
-        y_train_true.append(y[idx][mask_train])
-        y_valid_true.append(y[idx][mask_valid])
-        y_test_true.append(y[idx][mask_test])
-        y_train_pred.append(out_i.argmax(1)[mask_train])
-        y_valid_pred.append(out_i.argmax(1)[mask_valid])
-        y_test_pred.append(out_i.argmax(1)[mask_test])
+    with torch.inference_mode():
+        for local_i, global_pid in enumerate(local_partition_ids):
+            idx = local_partitions[local_i]
+            if args.use_cache:
+                dup_index_i = local_dup_indices[local_i]
+                start_of_no_dup = int(dup_index_i.numel())
+                x_i = feature[idx[start_of_no_dup:]].to(device)
+                if start_of_no_dup > 0:
+                    x_i = torch.cat([local_dup_feature_cache[dup_index_i], x_i], dim=0)
+            else:
+                x_i = feature[idx].to(device)
+
+            attn_bias,in_degree,out_degree = None,None,None
+            edge_index_i,edge_input_i,mask,spatial_pos_i = local_sub_edge_index_list[local_i].to(device),None,None,None
+            if args.struct_enc=="True":
+                in_degree = graph_in_degree[idx].to(device)
+                out_degree = graph_out_degree[idx].to(device)
+                spatial_pos_i = local_spatial_pos_by_pid[local_i].to(device)
+                assert len(idx) == spatial_pos_i.shape[0], f"rank {args.rank} spatial_pos mismatch for global_pid={global_pid}"
+            current_kv_cache = kv_cache_per_partition[local_i] if kv_cache_per_partition is not None else None
+
+            out_i,_,_,updated_kv_cache = model(x_i, attn_bias, edge_index_i,in_degree,out_degree, spatial_pos_i,edge_input_i,
+                                              attn_type=args.attn_type,mask=mask,dup_nodes_kv_cache=current_kv_cache,part_id=global_pid)
+
+            if kv_cache_per_partition is not None and updated_kv_cache is not None:
+                kv_cache_per_partition[local_i] = updated_kv_cache
+            mask_train = torch.isin(idx.to(device), split_idx["train"].to(device)).to('cpu')
+            mask_valid = torch.isin(idx.to(device), split_idx["valid"].to(device)).to('cpu')
+            mask_test = torch.isin(idx.to(device), split_idx["test"].to(device)).to('cpu')
+            y_train_true.append(y[idx][mask_train])
+            y_valid_true.append(y[idx][mask_valid])
+            y_test_true.append(y[idx][mask_test])
+            y_train_pred.append(out_i.argmax(1)[mask_train])
+            y_valid_pred.append(out_i.argmax(1)[mask_valid])
+            y_test_pred.append(out_i.argmax(1)[mask_test])
 
     local_eval = {
         "train_true": torch.cat(y_train_true).cpu() if y_train_true else torch.empty(0, dtype=y.dtype),
