@@ -90,6 +90,10 @@ def parser_add_main_args(parser):
                        help='top-k percent of external related neighbors merged into each partition')
     parser.add_argument('--preprocess_only', type=int, default=0, choices=[0, 1],
                        help='when set to 1, stop after graph/window preprocessing and exit before training')
+    parser.add_argument('--use_preprocess_cache', type=int, default=1, choices=[0, 1],
+                       help='when set to 1, automatically load/save reusable PPR+Metis preprocess cache')
+    parser.add_argument('--refresh_preprocess_cache', type=int, default=0, choices=[0, 1],
+                       help='when set to 1, ignore any existing preprocess cache and rebuild it before saving')
     
     # distributed args
     parser.add_argument('--rank', type=int, default=None,

@@ -13,3 +13,11 @@ from .checkpoint import (
     save_training_checkpoint,
     validate_resume_supported,
 )
+
+from .preprocess_cache import (
+    build_preprocess_cache_payload,
+    compute_preprocess_cache_key,
+    load_preprocess_cache,
+    preprocess_cache_path,
+    save_preprocess_cache,
+)

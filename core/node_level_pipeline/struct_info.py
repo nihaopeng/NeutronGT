@@ -9,14 +9,15 @@ from core.ppr_preprocess import add_isolated_connections, build_adj_fromat, pers
 from gt_sp.utils import get_node_degrees
 
 from .graph_data import _ensure_edge_index, _get_node_degrees_from_csr
+from .preprocess_cache import compute_preprocess_cache_key, load_preprocess_cache, save_preprocess_cache
 from .runtime import sync_device
 
 
 class StructInfo:
-    def __init__(self,**kwargs) -> None:
+    def __init__(self, **kwargs) -> None:
         self.graph_in_degree = kwargs["graph_in_degree"]
         self.graph_out_degree = kwargs["graph_out_degree"]
-        self.sorted_ppr_matrix = kwargs["sorted_ppr_matrix"]  # tuple[torch.Tensor, torch.Tensor]
+        self.sorted_ppr_matrix = kwargs["sorted_ppr_matrix"]
         self.wm = kwargs["wm"]
         self.graph_edge_index = kwargs.get("graph_edge_index")
         self.graph_csr_data = kwargs.get("graph_csr_data")
@@ -34,6 +35,7 @@ class StructInfo:
         self.global_sub_edge_index_for_partition_results_cpu = None
         self.window_state_version = 0
 
+
 def build_placeholder_struct_info(graph_in_degree, graph_out_degree, edge_index=None, edge_csr_data=None, num_nodes=None):
     placeholder_wm = SimpleNamespace(
         partitioned_results=[],
@@ -50,10 +52,12 @@ def build_placeholder_struct_info(graph_in_degree, graph_out_degree, edge_index=
         num_nodes=num_nodes,
     )
 
+
 def get_rank_source_range(num_nodes: int, rank: int, world_size: int):
     start = (num_nodes * rank) // world_size
     end = (num_nodes * (rank + 1)) // world_size
     return start, end
+
 
 def gather_ppr_shards(local_ppr: tuple[torch.Tensor, torch.Tensor], rank: int, world_size: int):
     edge_index, edge_value = local_ppr
@@ -99,7 +103,31 @@ def gather_ppr_shards(local_ppr: tuple[torch.Tensor, torch.Tensor], rank: int, w
         return empty_index, empty_value
     return torch.cat(edge_index_parts, dim=1), torch.cat(edge_value_parts, dim=0)
 
-def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,n_parts=50,related_nodes_topk_rate=5,connect_prob=0.01,edge_csr_data=None):
+
+def _preprocess_cache_enabled(args):
+    return int(getattr(args, 'use_preprocess_cache', 1)) == 1 and int(getattr(args, 'use_cache', 0)) == 1
+
+
+def _build_struct_info_from_cache_payload(payload, graph_in_degree, graph_out_degree, edge_index=None, edge_csr_data=None, num_nodes=None):
+    wm_data = payload['wm']
+    wm = SimpleNamespace(
+        partitioned_results=wm_data['partitioned_results'],
+        sub_edge_index_for_partition_results=wm_data['sub_edge_index_for_partition_results'],
+        dup_nodes_per_partition=wm_data['dup_nodes_per_partition'],
+    )
+    return StructInfo(
+        graph_in_degree=payload.get('graph_in_degree', graph_in_degree),
+        graph_out_degree=payload.get('graph_out_degree', graph_out_degree),
+        sorted_ppr_matrix=payload.get('sorted_ppr_matrix'),
+        wm=wm,
+        graph_edge_index=payload.get('graph_edge_index', edge_index),
+        graph_csr_data=payload.get('graph_csr_data', edge_csr_data),
+        num_nodes=payload.get('num_nodes', num_nodes),
+    )
+
+
+def build_graph_struct_info(args, N, edge_index, feature, world_size, device, topk=50, n_parts=50,
+                            related_nodes_topk_rate=5, connect_prob=0.01, edge_csr_data=None):
     graph_in_degree, graph_out_degree = None, None
     if args.struct_enc == "True":
         if edge_csr_data is not None:
@@ -107,7 +135,59 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
         else:
             graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
 
+    cache_enabled = _preprocess_cache_enabled(args)
+    if int(getattr(args, 'use_preprocess_cache', 1)) == 1 and int(getattr(args, 'use_cache', 0)) != 1 and args.rank == 0:
+        print('Preprocess cache disabled: only supported for fixed-window training with --use_cache 1.')
+
+    cache_key = None
+    cache_path = None
+    cache_args_snapshot = None
     distributed_appnp_ppr = world_size > 1 and args.ppr_backend == "appnp"
+
+    if cache_enabled and int(getattr(args, 'refresh_preprocess_cache', 0)) != 1:
+        if world_size > 1:
+            if args.rank == 0:
+                payload, cache_key, cache_path, cache_args_snapshot, cache_load_time = load_preprocess_cache(
+                    args,
+                    graph_in_degree,
+                    graph_out_degree,
+                    edge_index=edge_index,
+                    edge_csr_data=edge_csr_data,
+                    num_nodes=N,
+                    world_size=world_size,
+                )
+                cache_hit = payload is not None
+                if cache_hit:
+                    print(f"Preprocess cache hit: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s")
+                else:
+                    print(f"Preprocess cache miss: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s")
+                hit_box = [cache_hit]
+                dist.broadcast_object_list(hit_box, src=0)
+                if cache_hit:
+                    return _build_struct_info_from_cache_payload(payload, graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
+            else:
+                hit_box = [False]
+                dist.broadcast_object_list(hit_box, src=0)
+                if hit_box[0]:
+                    return build_placeholder_struct_info(graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
+        else:
+            payload, cache_key, cache_path, cache_args_snapshot, cache_load_time = load_preprocess_cache(
+                args,
+                graph_in_degree,
+                graph_out_degree,
+                edge_index=edge_index,
+                edge_csr_data=edge_csr_data,
+                num_nodes=N,
+                world_size=world_size,
+            )
+            if payload is not None:
+                print(f"Preprocess cache hit: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s")
+                return _build_struct_info_from_cache_payload(payload, graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
+            print(f"Preprocess cache miss: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s")
+    elif cache_enabled and args.rank == 0 and int(getattr(args, 'refresh_preprocess_cache', 0)) == 1:
+        cache_key, cache_args_snapshot = compute_preprocess_cache_key(args, world_size)
+        print(f"Preprocess cache miss: refresh requested, key={cache_key[:12]}")
+
     if world_size > 1 and not distributed_appnp_ppr and args.rank != 0:
         return build_placeholder_struct_info(graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
 
@@ -171,27 +251,28 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
     print(f"Adjacency build time: {adj_build_time:.3f}s")
 
     wm = weightMetis_keepParent(
-        csr_adjacency=csr_adjacency, 
+        csr_adjacency=csr_adjacency,
         eweights=eweights,
         n_parts=n_parts,
         feature=feature,
         edge_index=graph_edge_index,
         related_nodes_topk_rate=related_nodes_topk_rate,
         attn_type=args.attn_type,
-        sorted_ppr_matrix=sorted_ppr_matrix)
+        sorted_ppr_matrix=sorted_ppr_matrix,
+    )
 
-    print("node len:",end="")
+    print("node len:", end="")
     sum_nodes_in_compute = 0
     window_node_counts = []
     for p in wm.partitioned_results:
         part_len = len(p)
-        print(part_len,end="|")
+        print(part_len, end="|")
         sum_nodes_in_compute += part_len
         window_node_counts.append(part_len)
-    print("\nedge len:",end="")
+    print("\nedge len:", end="")
     sum_edges_in_compute = 0
     for p in wm.sub_edge_index_for_partition_results:
-        print(len(p[0]),end="|")
+        print(len(p[0]), end="|")
         sum_edges_in_compute += len(p[0])
 
     avg_window_nodes = (sum(window_node_counts) / len(window_node_counts)) if window_node_counts else 0.0
@@ -214,11 +295,20 @@ def build_graph_struct_info(args,N,edge_index,feature,world_size,device,topk=50,
         f"avg_dup_ratio_per_window={avg_dup_ratio_per_window:.4f}"
     )
 
-    return StructInfo(
+    struct_info = StructInfo(
         graph_in_degree=graph_in_degree,
         graph_out_degree=graph_out_degree,
         sorted_ppr_matrix=sorted_ppr_matrix,
         wm=wm,
         graph_edge_index=graph_edge_index,
         graph_csr_data=edge_csr_data,
-        num_nodes=N)
+        num_nodes=N,
+    )
+
+    if cache_enabled and args.rank == 0:
+        if cache_key is None or cache_args_snapshot is None:
+            cache_key, cache_args_snapshot = compute_preprocess_cache_key(args, world_size)
+        saved_cache_path, cache_save_time = save_preprocess_cache(args, struct_info, cache_key, cache_args_snapshot)
+        print(f"Preprocess cache save: path={saved_cache_path}, key={cache_key[:12]}, save_time={cache_save_time:.3f}s")
+
+    return struct_info
