@@ -27,6 +27,7 @@ class ResumeState:
     best_val: float = float('-inf')
     best_test: float = float('-inf')
     checkpoint_path: str | None = None
+    resume_requested: bool = False
 
 
 def checkpoint_dir(args) -> Path:
@@ -59,7 +60,7 @@ def resolve_resume_path(args) -> str | None:
     epoch_candidates = sorted(paths['dir'].glob('epoch_*.pt'))
     if epoch_candidates:
         return str(epoch_candidates[-1])
-    raise FileNotFoundError(f'No checkpoint found under {paths["dir"]}')
+    return None
 
 
 def validate_resume_supported(args) -> None:
@@ -90,9 +91,10 @@ def _validate_checkpoint_compatibility(args, args_snapshot: dict[str, Any]) -> N
 
 
 def load_training_checkpoint(args, model, optimizer, lr_scheduler, device) -> ResumeState:
+    resume_requested = bool(args.resume_checkpoint or args.resume_latest)
     resume_path = resolve_resume_path(args)
     if resume_path is None:
-        return ResumeState(loss_mean_list=[])
+        return ResumeState(loss_mean_list=[], resume_requested=resume_requested)
 
     validate_resume_supported(args)
     checkpoint = torch.load(resume_path, map_location=device)
@@ -109,6 +111,7 @@ def load_training_checkpoint(args, model, optimizer, lr_scheduler, device) -> Re
         best_val=float(checkpoint.get('best_val', float('-inf'))),
         best_test=float(checkpoint.get('best_test', float('-inf'))),
         checkpoint_path=resume_path,
+        resume_requested=resume_requested,
     )
 
 

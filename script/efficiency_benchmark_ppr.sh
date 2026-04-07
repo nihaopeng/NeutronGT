@@ -161,9 +161,9 @@ get_fixed_params() {
     "AmazonProducts:Graphormer-Slim") printf '60|6' ;;
     "AmazonProducts:Graphormer-Large") printf '400|4' ;;
 
-    "ogbn-products:GT") printf '128|6' ;;
-    "ogbn-products:Graphormer-Slim") printf '128|6' ;;
-    "ogbn-products:Graphormer-Large") printf '512|4' ;;
+    "ogbn-products:GT") printf '60|6' ;;
+    "ogbn-products:Graphormer-Slim") printf '60|6' ;;
+    "ogbn-products:Graphormer-Large") printf '240|4' ;;
     *) fail "No fixed parameters for dataset/model: $1 / $2" ;;
   esac
 }

@@ -1,0 +1,1 @@
+run_tag,dataset,model_alias,model_cli,attn_type,epochs,n_layers,hidden_dim,ffn_dim,num_heads,n_parts,related_nodes_topk_rate,status,last_epoch,last_loss,last_train_time_s,last_cpu_to_gpu_time_s,last_window_fw_bw_avg_time_s,last_window_fw_bw_total_time_s,last_num_windows,last_train_acc,last_valid_acc,last_test_acc,checkpoint_dir,log_path

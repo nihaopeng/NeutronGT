@@ -17,4 +17,6 @@ third_party
 third_party/
 third_party/*
 
+.csv
+.CSV
 *.gz

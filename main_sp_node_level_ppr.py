@@ -210,10 +210,14 @@ def main():
     loss_mean_list = resume_state.loss_mean_list or []
     best_val = resume_state.best_val
     best_test = resume_state.best_test
-    if resume_state.checkpoint_path and args.rank == 0:
-        print(f"Resumed training from: {resume_state.checkpoint_path}")
-        print(f"Resume start epoch: {start_epoch}")
-        print(f"Checkpoint best metrics: best_val={best_val:.5f}, best_test={best_test:.5f}")
+    if args.rank == 0:
+        if resume_state.checkpoint_path:
+            print(f"Resumed training from: {resume_state.checkpoint_path}")
+            print(f"Resume start epoch: {start_epoch}")
+            print(f"Checkpoint best metrics: best_val={best_val:.5f}, best_test={best_test:.5f}")
+        elif resume_state.resume_requested:
+            ckpt_dir = args.checkpoint_dir if args.checkpoint_dir else args.model_dir
+            print(f"No checkpoint found under {ckpt_dir}, starting training from scratch.")
 
     detector = LossStagnationDetector(cooldown=0)
     

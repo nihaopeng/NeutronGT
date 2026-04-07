@@ -1,0 +1,7 @@
+run_tag,dataset,model_alias,epochs,n_parts,related_nodes_topk_rate,status,log_path,checkpoint_dir
+"20260407_020406","reddit","GT","500","32","10","SUCCESS","./logs/accuracy_simple/reddit__GT__20260407_020406.log","./model_ckpt/accuracy_simple/reddit/GT/"
+"20260407_020406","reddit","Graphormer-Slim","500","32","10","SUCCESS","./logs/accuracy_simple/reddit__Graphormer-Slim__20260407_020406.log","./model_ckpt/accuracy_simple/reddit/Graphormer-Slim/"
+"20260407_020406","reddit","Graphormer-Large","200","80","4","SUCCESS","./logs/accuracy_simple/reddit__Graphormer-Large__20260407_020406.log","./model_ckpt/accuracy_simple/reddit/Graphormer-Large/"
+"20260407_020406","ogbn-products","GT","500","128","6","SUCCESS","./logs/accuracy_simple/ogbn-products__GT__20260407_020406.log","./model_ckpt/accuracy_simple/ogbn-products/GT/"
+"20260407_020406","ogbn-products","Graphormer-Slim","500","128","6","SUCCESS","./logs/accuracy_simple/ogbn-products__Graphormer-Slim__20260407_020406.log","./model_ckpt/accuracy_simple/ogbn-products/Graphormer-Slim/"
+"20260407_020406","ogbn-products","Graphormer-Large","200","512","4","SUCCESS","./logs/accuracy_simple/ogbn-products__Graphormer-Large__20260407_020406.log","./model_ckpt/accuracy_simple/ogbn-products/Graphormer-Large/"
