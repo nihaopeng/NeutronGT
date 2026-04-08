@@ -1,3 +1,4 @@
+import subprocess
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -53,7 +54,6 @@ def main():
     N = feature.shape[0]
     split_idx = None
     
-    
     print(f'feature shape {feature.shape}')
     print(f'y shape {y.shape}')
     print(f'edge_index shape {edge_index.shape}')
@@ -71,9 +71,6 @@ def main():
         split_idx['test'] = torch.as_tensor(split_idx['test'], dtype=torch.long)
     else:
         split_idx = random_split_idx(y, frac_train=0.6, frac_valid=0.2, frac_test=0.2, seed=args.seed)
-
-    
-
 
     if args.rank == 0:
         print(args)
@@ -189,6 +186,8 @@ def main():
     beta_max, beta_idx  = 1, 1
     
     final_score = None
+    
+    subprocess.Popen(['/home/pengyt/softwares/miniconda/envs/gt/bin/python','/home/pengyt/projects/torchgt_npu/exp_vis/GPU_utilization_get.py'])
 
     for epoch in range(1, args.epochs + 1):
         model.to(device)

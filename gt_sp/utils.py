@@ -507,7 +507,7 @@ def get_batch_reorder_blockize(args, x, y, idx_batch, rest_split_sizes, device, 
             attn_bias = attn_bias_list[seq_parallel_world_rank] # [s/p, s, d]
         
         last_batch_flag(True)
-        current_global_ids = pad_y(current_global_ids, seq_length, value=-1) # 假设 pad_y 支持指定值
+        current_global_ids = pad_y(current_global_ids, seq_length) # 假设 pad_y 支持指定值
         ids_list = [t for t in torch.split(current_global_ids, afterpad_split_sizes, dim=0)]
         current_global_ids = ids_list[seq_parallel_world_rank]
         

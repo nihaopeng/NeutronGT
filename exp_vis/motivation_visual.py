@@ -137,7 +137,7 @@ def plot_dual_datasets(plot_params, my_params, data1, data2, xticks, y_lim, labe
         # --- 左轴：Accuracy (折线图) ---
         lns1 = ax1.plot(ind, acc_vals, color=my_params['colors'][0], marker='o', 
                         label='Acc', lw=2, markersize=5)
-        ax1.set_ylabel('Accuracy (%)')
+        ax1.set_ylabel('Accuracy (%)',fontweight='bold')
         ax1.set_ylim(*y_lim[i]) # 统一 Acc 范围
         ax1.set_xticks(ind)
         ax1.set_xticklabels(xticks[i])
@@ -173,7 +173,8 @@ if __name__ == '__main__':
         'ytick.labelsize': 15,     # y轴刻度
         'legend.fontsize': 16,     # 图例字体
         'axes.titlesize': 20,      # 子图标题
-        'lines.linewidth': 2
+        'lines.linewidth': 2,
+        'font.weight': 'bold',
     }
 
     my_params = {
