@@ -110,9 +110,9 @@ get_selected_models() {
 
 get_model_args() {
   case "$1" in
-    "GT") printf 'gt_sw|500|4|128|8|128' ;;
-    "Graphormer-Slim") printf 'graphormer|500|4|64|8|64' ;;
-    "Graphormer-Large") printf 'graphormer|200|12|768|32|768' ;;
+    "GT") printf 'gt_sw|505|4|128|8|128' ;;
+    "Graphormer-Slim") printf 'graphormer|505|4|64|8|64' ;;
+    "Graphormer-Large") printf 'graphormer|205|12|768|32|768' ;;
     *) fail "Unknown model alias: $1" ;;
   esac
 }
@@ -120,7 +120,7 @@ get_model_args() {
 # ===== Edit these 6 lines when you want to change the experiment params =====
 get_case_params() {
   case "$1:$2" in
-    "reddit:GT") printf '32|10' ;;
+    "reddit:GT") printf '48|10' ;;
     "reddit:Graphormer-Slim") printf '32|10' ;;
     "reddit:Graphormer-Large") printf '80|4' ;;
     "ogbn-products:GT") printf '128|6' ;;
@@ -212,10 +212,10 @@ run_one() {
     --ppr_iter_topk "$PPR_ITER_TOPK"
     --distributed-timeout-minutes "$DISTRIBUTED_TIMEOUT_MINUTES"
     --num_global_node "$NUM_GLOBAL_NODE"
-    --save_checkpoint
-    --resume_latest
-    --save_latest_only
-    --checkpoint_dir "$checkpoint_dir"
+    # --save_checkpoint
+    # --resume_latest
+    # --save_latest_only
+    # --checkpoint_dir "$checkpoint_dir"
   )
 
   echo "===================================================================================="

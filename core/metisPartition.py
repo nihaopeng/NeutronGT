@@ -1,4 +1,5 @@
 import pymetis
+import time
 import torch
 from tqdm import tqdm
 from torch_geometric.utils import subgraph
@@ -37,7 +38,6 @@ class weightMetis_keepParent:
         self.n_parts = n_parts
         self.global_edge_index = edge_index
         self.partition_num_per_parent = n_parts // 2
-        self.parent_partition = self.partition(torch.arange(0,len(csr_adjacency.adj_starts)-1),self.csr_adjacency,self.eweights,2)
         # print(len(torch.arange(0,len(csr_adjacency.adj_starts)-1)))
         # BUG:假设 n 个节点，csr_adjaceny.adj_starts 长度为 num_node + 1，则第一个参数是tensor: [0,1,2,...,num_node]
         # torch.range 已被弃用，改为torch.arange(0,len(csr_adjacency.adj_starts)-1)
@@ -61,6 +61,21 @@ class weightMetis_keepParent:
         self.sub_edge_index_for_partition_results = []
         self.dup_indices = None
         self.expanded_edge = [[],[]] # format follow the edge index [2,edge_num]
+        self.timing_stats = {
+            'parent_partition_time': 0.0,
+            'child_partition_time': 0.0,
+            'related_nodes_merge_time': 0.0,
+            'feature_sim_merge_time': 0.0,
+            'duplicate_rerange_time': 0.0,
+            'subgraph_build_time': 0.0,
+            'partition_build_total_time': 0.0,
+            'extra_vertex_total_time': 0.0,
+        }
+        partition_build_start = time.time()
+        parent_partition_start = time.time()
+        self.parent_partition = self.partition(torch.arange(0,len(csr_adjacency.adj_starts)-1),self.csr_adjacency,self.eweights,2)
+        self.timing_stats['parent_partition_time'] = time.time() - parent_partition_start
+        child_partition_start = time.time()
         # 对父分区进行再次metis
         for parent_id,parent_partition in enumerate(self.parent_partition):
             csr_adjacency,eweight = self._extract_subgraph_csr_eweight(parent_partition)
@@ -68,6 +83,7 @@ class weightMetis_keepParent:
             # self.child_partitions = [[tensor,tensor,...],[tensor,tensor,...]]
             # TOD:将另一个父分区中特征相似的并入。√
             # TOD:将对外有联系的对端节点合并入分区。√
+        self.timing_stats['child_partition_time'] = time.time() - child_partition_start
         self.child_partition_centroids = []
         for parent_group in self.child_partitions:
             centroid_group = []
@@ -84,9 +100,13 @@ class weightMetis_keepParent:
             for child_idx, part in enumerate(parent_group):
                 halo_extended = torch.tensor([])
                 # halo: partition包括原本partition的节点和邻居节点
+                related_merge_start = time.time()
                 halo_extended = self._merge_related_nodes(part,related_nodes_topk_rate)
+                self.timing_stats['related_nodes_merge_time'] += time.time() - related_merge_start
                 # feature: partition包括原本的partition的节点和对侧最相似窗口中采样的节点
+                feature_merge_start = time.time()
                 feature_extended,expanded_edge_p = self._merge_feature_sim(part.long(), n_nodes=1, current_parent_id=parent_id, current_child_idx=child_idx)
+                self.timing_stats['feature_sim_merge_time'] += time.time() - feature_merge_start
                 merged = torch.cat([halo_extended, feature_extended], dim=0)
                 merged = torch.unique(merged)  # 自动排序 + 去重
                 expanded_group.append(merged)
@@ -95,13 +115,21 @@ class weightMetis_keepParent:
             expanded_child_partitions.append(expanded_group)
         self.child_partitions = expanded_child_partitions
         self.global_edge_index = torch.cat([self.global_edge_index,torch.tensor(self.expanded_edge)],dim=1)
+        self.timing_stats['extra_vertex_total_time'] = (
+            self.timing_stats['related_nodes_merge_time'] + self.timing_stats['feature_sim_merge_time']
+        )
         # TODO:rerange of partition for kv cache √
+        duplicate_start = time.time()
         self.dup_nodes_per_partition = self._find_duplicate_nodes_and_rerange()
+        self.timing_stats['duplicate_rerange_time'] = time.time() - duplicate_start
         self.dup_nodes_per_partition_feature = []
+        subgraph_build_start = time.time()
         for parent_group in self.child_partitions:
             for part in parent_group:
                 self.partitioned_results.append(part)
                 self.sub_edge_index_for_partition_results.append(self._get_sub_edge_index(part))
+        self.timing_stats['subgraph_build_time'] = time.time() - subgraph_build_start
+        self.timing_stats['partition_build_total_time'] = time.time() - partition_build_start
 
     def partition(self,partition:torch.Tensor,csr_adjacency:pymetis.CSRAdjacency,eweights:list[list],n_parts:int):
         try:

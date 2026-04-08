@@ -1,4 +1,0 @@
-run_tag,dataset,model_alias,epochs,n_parts,related_nodes_topk_rate,status,log_path,checkpoint_dir
-"20260407_015012","reddit","GT","500","32","10","FAILED","./logs/accuracy_simple/reddit__GT__20260407_015012.log","./model_ckpt/accuracy_simple/reddit/GT/"
-"20260407_015012","reddit","Graphormer-Slim","500","32","10","FAILED","./logs/accuracy_simple/reddit__Graphormer-Slim__20260407_015012.log","./model_ckpt/accuracy_simple/reddit/Graphormer-Slim/"
-"20260407_015012","reddit","Graphormer-Large","200","80","4","FAILED","./logs/accuracy_simple/reddit__Graphormer-Large__20260407_015012.log","./model_ckpt/accuracy_simple/reddit/Graphormer-Large/"

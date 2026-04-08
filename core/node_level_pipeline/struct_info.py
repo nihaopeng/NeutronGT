@@ -250,6 +250,7 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
     print(f"Isolated-node merge time: {isolated_time:.3f}s")
     print(f"Adjacency build time: {adj_build_time:.3f}s")
 
+    partition_build_start = time.time()
     wm = weightMetis_keepParent(
         csr_adjacency=csr_adjacency,
         eweights=eweights,
@@ -259,6 +260,25 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
         related_nodes_topk_rate=related_nodes_topk_rate,
         attn_type=args.attn_type,
         sorted_ppr_matrix=sorted_ppr_matrix,
+    )
+    partition_build_time = time.time() - partition_build_start
+
+    base_window_build_time = wm.timing_stats.get('parent_partition_time', 0.0) + wm.timing_stats.get('child_partition_time', 0.0)
+    extra_vertex_time = wm.timing_stats.get('extra_vertex_total_time', 0.0)
+    print(f"Window partition build time: {partition_build_time:.3f}s")
+    print(
+        "Window build breakdown: base_partition={:.3f}s, extra_vertices={:.3f}s, duplicate_rerange={:.3f}s, subgraph_build={:.3f}s".format(
+            base_window_build_time,
+            extra_vertex_time,
+            wm.timing_stats.get('duplicate_rerange_time', 0.0),
+            wm.timing_stats.get('subgraph_build_time', 0.0),
+        )
+    )
+    print(
+        "Extra vertex breakdown: related_neighbors={:.3f}s, feature_sim={:.3f}s".format(
+            wm.timing_stats.get('related_nodes_merge_time', 0.0),
+            wm.timing_stats.get('feature_sim_merge_time', 0.0),
+        )
     )
 
     print("node len:", end="")

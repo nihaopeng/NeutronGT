@@ -1,2 +1,0 @@
-run_tag,dataset,model_alias,epochs,n_parts,related_nodes_topk_rate,status,log_path,checkpoint_dir
-"20260407_020059","reddit","GT","500","32","10","FAILED","./logs/accuracy_simple/reddit__GT__20260407_020059.log","./model_ckpt/accuracy_simple/reddit/GT/"
