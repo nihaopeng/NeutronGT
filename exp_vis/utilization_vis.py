@@ -36,7 +36,7 @@ def multi_plot(plot_params, my_params, figpath=None):
             target_ax = ax_secondary if (use_twin and g_idx > 0) else ax
             
             # 绘制折线
-            # print(f"绘制 {g_name} 数据: {y_vals[g_name]} on {'secondary' if (use_twin and g_idx > 0) else 'primary'} axis, positions: {ind}")
+            print(f"绘制 {g_name} 数据: {y_vals[g_name]} on {'secondary' if (use_twin and g_idx > 0) else 'primary'} axis, positions: {ind}")
             line, = target_ax.plot(ind, plot_data, 
                                    color=data['colors'][g_idx],
                                 #    marker=data['markers'][g_idx], 
@@ -66,8 +66,9 @@ def multi_plot(plot_params, my_params, figpath=None):
                 if data.get('y1_log', False): ax.set_yscale('log',base=2)
 
         # 公共设置
-        ax.set_xticks(ind[::10]) # 只显示部分 xticks，避免过密
-        ax.set_xticklabels([xticks[i] for i in range(0, len(xticks), 10)], fontweight=plot_params['font.weight'])
+        ax.set_xticks(ind[::100]) # 只显示部分 xticks，避免过密
+        ax.set_xticklabels([xticks[i]/10 for i in range(0, len(xticks), 100)], fontweight=plot_params['font.weight'])
+        ax.set_xlabel('Time (s)', fontweight=plot_params['font.weight'])
         ax.set_title(titles,y=-0.25, fontweight=plot_params['font.weight'])
         ax.grid(True, linestyle=':', alpha=0.6)
 
@@ -75,7 +76,7 @@ def multi_plot(plot_params, my_params, figpath=None):
         handles, labels = axes[0].get_legend_handles_labels()
         # 在 figure 级别添加图例
         # 修改这一段
-        fig.legend(handles, labels, 
+        fig.legend(handles, labels,
                 loc='upper center', 
                 bbox_to_anchor=(0.5, 1.15), # 稍微调高一点，防止压到标题
                 ncol=3, 
@@ -86,7 +87,7 @@ def multi_plot(plot_params, my_params, figpath=None):
         plt.savefig(figpath, dpi=300, bbox_inches='tight')
     plt.show()
     
-def load_csv_data(file_path, max_seconds=100):
+def load_csv_data(file_path, max_seconds=1000):
     """
     读取CSV，提取第二列（利用率），并截取前100秒
     """
@@ -124,8 +125,8 @@ if __name__ == "__main__":
                     'UnifiedGT': load_csv_data('UnifiedGT.log'),
                     'NeutronGT': load_csv_data('NeutronGT.log'),
                 },
-                'x_ticks' : np.arange(0, 100).tolist(),
-                'title' : 'OAV GPU Utilization Over Time',
+                'x_ticks' : np.arange(0, 1000).tolist(),
+                'title' : '',
                 'y1_lim' : (-5, 105),
                 # 'y2_lim' : (1e-5, 10),
                 'y1_log' : False,

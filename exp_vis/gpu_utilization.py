@@ -2,7 +2,7 @@ import time
 import datetime
 from pynvml import *
 
-def log_gpu_usage(duration_seconds=100, interval_seconds=1):
+def log_gpu_usage(duration_seconds=1000, interval_seconds=0.1):
     # 初始化 NVML
     nvmlInit()
     # 获取第一张显卡句柄 (编号从0开始)
@@ -30,10 +30,4 @@ def log_gpu_usage(duration_seconds=100, interval_seconds=1):
     nvmlShutdown()
 
 if __name__ == "__main__":
-    # import pandas as pd
-    # file_path = "UnifiedGT.log"
-    # df = pd.read_csv(file_path, header=None, names=['timestamp', 'util', 'mem'])
-    # # 每四步读取一次，最终只保留1000epoch，重新写入log
-    # df = df.iloc[::4, :].reset_index(drop=True)
-    # df.to_csv(file_path, header=False, index=False)
     log_gpu_usage()
