@@ -177,7 +177,7 @@ def main():
     val_acc_list, test_acc_list, epoch_t_list = [], [], []
     epoch_full_t_list = []
     epoch_reorder_t_list = []
-    epoch_cpu2gpu_t_list = []
+    # epoch_cpu2gpu_t_list = []
     best_model, best_val, best_test = None, float('-inf'), float('-inf')
 
     num_batch = flatten_train_idx.size(0) // args.seq_len + 1
@@ -192,7 +192,7 @@ def main():
         
         loss_list, iter_t_list = [], []
         iter_reorder_t_list = []
-        iter_cpu2gpu_t_list = []
+        # iter_cpu2gpu_t_list = []
         torch.cuda.synchronize()
         if seq_parallel_world_size > 1:
             dist.barrier(group=get_sequence_parallel_group())
@@ -211,7 +211,7 @@ def main():
             t_reorder_end = time.time()
 
             x_i, y_i, edge_index_i, attn_bias = packed_data
-            t_transfer_start = time.time()
+            # t_transfer_start = time.time()
             if attn_bias is not None:
                 x_i, y_i, edge_index_i, attn_bias = x_i.to(device), y_i.to(device), edge_index_i.to(device), attn_bias.to(device)
             else:
@@ -255,7 +255,7 @@ def main():
             torch.cuda.synchronize()   
             t2 = time.time() 
             iter_reorder_t_list.append(t_reorder_end - t0)
-            iter_cpu2gpu_t_list.append(t1 - t_transfer_start)
+            # iter_cpu2gpu_t_list.append(t1 - t_transfer_start)
             iter_t_list.append(t2 - t1) 
             
      
@@ -270,16 +270,16 @@ def main():
             epoch_t_list.append(np.sum(iter_t_list))
             epoch_full_t_list.append(epoch_full_t1 - epoch_full_t0)
             epoch_reorder_t_list.append(np.sum(iter_reorder_t_list))
-            epoch_cpu2gpu_t_list.append(np.sum(iter_cpu2gpu_t_list))
+            # epoch_cpu2gpu_t_list.append(np.sum(iter_cpu2gpu_t_list))
             print("------------------------------------------------------------------------------------")
             print(
-                "Epoch: {:03d}, Loss: {:.4f}, Epoch Time: {:.3f}s, Full Epoch Time: {:.3f}s, Batch Prep Time: {:.3f}s, CPU->GPU Time: {:.3f}s".format(
+                "Epoch: {:03d}, Loss: {:.4f}, Epoch Time: {:.3f}s, Full Epoch Time: {:.3f}s, Batch Prep Time: {:.3f}s".format(
                     epoch,
                     np.mean(loss_list),
                     np.mean(epoch_t_list),
                     np.mean(epoch_full_t_list),
                     np.mean(epoch_reorder_t_list),
-                    np.mean(epoch_cpu2gpu_t_list),
+                    # np.mean(epoch_cpu2gpu_t_list),
                 )
             )
             print("------------------------------------------------------------------------------------")
@@ -293,7 +293,7 @@ def main():
             print("------------------------------------------------------------------------------------")
             print(f'Eval time {t5-t4}s')
             print(
-                "Epoch: {:03d}, Loss: {:4f}, Train acc: {:.2%}, Val acc: {:.2%}, Test acc: {:.2%}, Epoch Time: {:.3f}s, Full Epoch Time: {:.3f}s, Reorder Time: {:.3f}s, CPU->GPU Time: {:.3f}s".format(
+                "Epoch: {:03d}, Loss: {:4f}, Train acc: {:.2%}, Val acc: {:.2%}, Test acc: {:.2%}, Epoch Time: {:.3f}s, Full Epoch Time: {:.3f}s, Reorder Time: {:.3f}s".format(
                     epoch,
                     np.mean(loss_list),
                     train_acc,
@@ -302,7 +302,7 @@ def main():
                     np.mean(epoch_t_list) if epoch_t_list else np.sum(iter_t_list),
                     np.mean(epoch_full_t_list) if epoch_full_t_list else (epoch_full_t1 - epoch_full_t0),
                     np.mean(epoch_reorder_t_list) if epoch_reorder_t_list else np.sum(iter_reorder_t_list),
-                    np.mean(epoch_cpu2gpu_t_list) if epoch_cpu2gpu_t_list else np.sum(iter_cpu2gpu_t_list),
+                    # np.mean(epoch_cpu2gpu_t_list) if epoch_cpu2gpu_t_list else np.sum(iter_cpu2gpu_t_list),
                 )
             )
             print("------------------------------------------------------------------------------------")

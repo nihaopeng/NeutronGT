@@ -20,6 +20,11 @@ exps/
 exps/*
 
 # 图级别任务暂时不要
+models/graphormer_dist_graph_level_mp_malnet_ppr.py
+models/graphormer_dist_graph_level_mp_malnet.py
+models/gt_dist_graph_level_mp_malnet_ppr.py
+models/gt_dist_graph_level_mp_malnet.py
+
 
 main_sp_sparse_malnet_ppr.py
 main_sp_sparse_malnet.py
