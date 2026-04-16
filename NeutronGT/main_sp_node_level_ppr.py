@@ -145,41 +145,12 @@ def main():
             edge_csr_data=edge_csr_data
         )
     sync_device(device)
-    graph_preprocess_total_time = time.time() - graph_preprocess_start
     wm:weightMetis_keepParent = structInfo.wm
 
-    window_state_timing = broadcast_window_state(args, structInfo, feature, device)
+    broadcast_window_state(args, structInfo, feature, device)
     sync_device(device)
-    if args.rank == 0:
-        print("====================================================================================")
-        print("Graph preprocess total time: {:.3f}s".format(graph_preprocess_total_time))
-        print("Window state distribution total time: {:.3f}s".format(window_state_timing['window_state_total_time']))
-        print("Window bundle write time: {:.3f}s".format(window_state_timing['bundle_write_time']))
-        print("====================================================================================")
-    print(
-        f"[rank {args.rank}] Window rebuild: load={window_state_timing['bundle_load_time']:.3f}s, "
-        f"dup={window_state_timing['local_dup_cache_rebuild_time']:.3f}s, "
-        f"subgraph={window_state_timing['local_subgraph_rebuild_time']:.3f}s, "
-        f"spatial={window_state_timing['local_spatial_rebuild_time']:.3f}s, "
-        f"total={window_state_timing['window_state_total_time']:.3f}s"
-    )
 
     local_partition_ids, local_partitions = build_local_partitions(structInfo, args.rank, seq_parallel_world_size)
-    if args.use_cache and args.rank == 0:
-        total_local_dup_nodes = int(sum(int(part.numel()) for part in structInfo.local_dup_nodes_per_partition))
-        unique_local_dup_nodes = int(structInfo.local_dup_nodes_per_partition_feature.shape[0]) if structInfo.local_dup_nodes_per_partition_feature is not None else 0
-        local_window_count = len(local_partition_ids)
-        avg_dup_nodes_per_window = (total_local_dup_nodes / local_window_count) if local_window_count > 0 else 0.0
-        avg_unique_dup_nodes_per_window = (unique_local_dup_nodes / local_window_count) if local_window_count > 0 else 0.0
-        print("\n" + "="*80)
-        print("本地重复节点缓存统计:")
-        print("="*80)
-        print(f"rank {args.rank} local partitions: {local_window_count}")
-        print(f"  - 本地重复节点出现次数: {total_local_dup_nodes}")
-        print(f"  - 本地唯一重复节点数: {unique_local_dup_nodes}")
-        print(f"  - 每个窗口平均重复节点个数: {avg_dup_nodes_per_window:.2f}")
-        print(f"  - 每个窗口平均唯一重复节点个数: {avg_unique_dup_nodes_per_window:.2f}")
-    print(f"rank {args.rank} local_partition_ids: {local_partition_ids}")
     if args.preprocess_only == 1:
         if seq_parallel_world_size > 1:
             torch.distributed.barrier()
@@ -249,7 +220,6 @@ def main():
                 dist.barrier()
             sync_device(device)
             window_adjust_start = time.time()
-            print("!node in and out!")
             gathered_scores = [None for _ in range(args.world_size)]
             dist.all_gather_object(gathered_scores, scores_by_pid)
             if args.rank == 0:
@@ -264,25 +234,10 @@ def main():
                 structInfo.window_state_version += 1
             broadcast_window_state(args, structInfo, feature, device)
             local_partition_ids, local_partitions = build_local_partitions(structInfo, args.rank, seq_parallel_world_size)
-            if args.rank == 0 and hasattr(wm, 'dup_nodes_per_partition'):
-                print(f"\n[窗口调整后] 重复节点统计:")
-                total_dup_nodes = sum(len(dup_nodes) for dup_nodes in wm.dup_nodes_per_partition)
-                non_empty_dup_nodes = [dup for dup in wm.dup_nodes_per_partition if len(dup) > 0]
-                unique_dup_nodes = len(torch.unique(torch.cat(non_empty_dup_nodes))) if non_empty_dup_nodes else 0
-                total_partition_nodes = sum(len(partition) for partition in wm.partitioned_results)
-                print(f"  - 总分区节点数: {total_partition_nodes}")
-                print(f"  - 重复节点出现次数: {total_dup_nodes}")
-                print(f"  - 唯一重复节点数: {unique_dup_nodes}")
-                avg_dup = total_dup_nodes / unique_dup_nodes if unique_dup_nodes > 0 else 0.0
-                print(f"  - 平均重复度: {avg_dup:.2f}")
             if seq_parallel_world_size > 1:
                 dist.barrier()
             sync_device(device)
-            window_adjust_time = time.time() - window_adjust_start
-            if args.rank == 0:
-                print("------------------------------------------------------------------------------------")
-                print("Window Adjust Time: {:.3f}s".format(window_adjust_time))
-                print("------------------------------------------------------------------------------------")
+            _ = time.time() - window_adjust_start
 
         if args.save_checkpoint:
             if args.rank == 0:

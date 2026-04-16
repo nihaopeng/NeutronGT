@@ -34,7 +34,7 @@ def initialize_distributed(args):
     else:   
         args.rank = int(os.environ["RANK"])                     
         args.world_size = int(os.environ["WORLD_SIZE"])
-        print(f"args.world_size:{args.world_size}")
+        # print(f"args.world_size:{args.world_size}")
         if args.rank == 0:
             print('> initializing torch distributed ...', flush=True)
 

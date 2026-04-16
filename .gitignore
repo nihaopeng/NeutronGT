@@ -30,9 +30,7 @@ main_sp_sparse_malnet_ppr.py
 main_sp_sparse_malnet.py
 run_ppr_graph.sh
 run_graph.sh
-core
-core/
-core/*
+
 data
 data/
 data/*
