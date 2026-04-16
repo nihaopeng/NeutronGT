@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 import numpy as np
+import warnings
 from models.graphormer_dist_node_level import Graphormer
 from models.gt_dist_node_level import GT
 from utils.lr import PolynomialDecayLR
@@ -14,112 +15,106 @@ from gt_sp.initialize import (
     initialize_distributed,
     sequence_parallel_is_initialized,
     get_sequence_parallel_group,
-    get_sequence_parallel_rank,
     get_sequence_parallel_world_size,
     get_sequence_parallel_src_rank,
     get_sequence_length_per_rank,
     set_global_token_indices,
     set_last_batch_global_token_indices,
-    last_batch_flag,
 )
 from gt_sp.reducer import sync_params_and_buffers, Reducer
 from gt_sp.evaluate import sparse_eval_gpu
-from gt_sp.utils import (
-    random_split_idx,
-    get_batch_reorder_blockize,
-    check_conditions,
-    fix_edge_index,
-    reformat_graph,
-    adjust_edge_index_nomerge,
-    pad_2d,
-    pad_y,
-)
+from gt_sp.utils import random_split_idx, get_batch_reorder_blockize, check_conditions
 from utils.parser_node_level import parser_add_main_args
 from collections import deque
 
 
-def prepare_full_graph_batch(args, feature, y, edge_index, train_idx, device, beta_coeffi, split_lens, pad_len):
-    seq_parallel_world_size = get_sequence_parallel_world_size() if sequence_parallel_is_initialized() else 1
-    seq_parallel_world_rank = get_sequence_parallel_rank() if sequence_parallel_is_initialized() else 0
-    if seq_parallel_world_size > 1:
-        src_rank = get_sequence_parallel_src_rank()
-        group = get_sequence_parallel_group()
+def get_experiment_id(args):
+    return (
+        f'{args.dataset}_{args.model}_h{args.hidden_dim}_l{args.n_layers}_'
+        f'hd{args.num_heads}_{args.attn_type}_r{int(args.reorder)}_'
+        f's{args.seq_len}_e{args.epochs}'
+    )
 
-    x_i = feature
-    y_i = y
-    edge_index_i = edge_index
-    attn_bias = None
-    mapped_train_idx = train_idx.clone().to(torch.long)
 
-    if args.model == "graphormer":
-        edge_index_i = fix_edge_index(edge_index_i, x_i.shape[0])
+def get_experiment_dir(args):
+    return os.path.join(args.model_dir, get_experiment_id(args))
 
-    if args.reorder:
-        if args.rank == 0:
-            edge_index_i, sorted_indices = reformat_graph(edge_index_i, 8, 16, beta_coeffi)
-            sizes_broad = torch.LongTensor([edge_index_i.shape[1], sorted_indices.shape[0]]).to(device)
-        else:
-            sizes_broad = torch.empty(2, dtype=torch.int64, device=device)
 
-        if seq_parallel_world_size > 1:
-            dist.barrier(group=group)
-            dist.broadcast(sizes_broad, src_rank, group=group)
+def get_latest_checkpoint_path(args):
+    return args.resume_path if args.resume_path else os.path.join(
+        get_experiment_dir(args), 'latest.pt')
 
-        if args.rank == 0:
-            edge_index_i_broad = edge_index_i.to(device)
-            sorted_indices_broad = sorted_indices.to(device)
-        else:
-            shape = sizes_broad.tolist()
-            edge_index_i_broad = torch.empty((2, shape[0]), device=device, dtype=torch.int64)
-            sorted_indices_broad = torch.empty((shape[1]), device=device, dtype=torch.int64)
 
-        if seq_parallel_world_size > 1:
-            dist.broadcast(edge_index_i_broad, src_rank, group=group)
-            dist.broadcast(sorted_indices_broad, src_rank, group=group)
+def get_best_model_path(args):
+    return os.path.join(get_experiment_dir(args), 'best.pkl')
 
-        edge_index_i = edge_index_i_broad.to("cpu")
-        sorted_indices = sorted_indices_broad.to("cpu")
 
-        if args.model == "graphormer":
-            sorted_indices = sorted_indices[sorted_indices != 0]
-            sorted_indices = sorted_indices - 1
+def build_args_snapshot(args):
+    return {
+        'dataset': args.dataset,
+        'model': args.model,
+        'seq_len': args.seq_len,
+        'n_layers': args.n_layers,
+        'hidden_dim': args.hidden_dim,
+        'ffn_dim': args.ffn_dim,
+        'num_heads': args.num_heads,
+        'attn_type': args.attn_type,
+        'reorder': args.reorder,
+        'world_size': args.world_size,
+        'peak_lr': args.peak_lr,
+        'end_lr': args.end_lr,
+        'warmup_updates': args.warmup_updates,
+        'weight_decay': args.weight_decay,
+        'seed': args.seed,
+    }
 
-        x_i = torch.index_select(x_i, 0, sorted_indices)
-        y_i = torch.index_select(y_i, 0, sorted_indices)
 
-        inverse_perm = torch.empty_like(sorted_indices)
-        inverse_perm[sorted_indices] = torch.arange(sorted_indices.numel(), dtype=sorted_indices.dtype)
-        mapped_train_idx = inverse_perm[mapped_train_idx]
+def warn_on_checkpoint_mismatch(args, checkpoint_args):
+    for key, current_value in build_args_snapshot(args).items():
+        checkpoint_value = checkpoint_args.get(key)
+        if checkpoint_value is not None and checkpoint_value != current_value:
+            warnings.warn(
+                f'Checkpoint "{key}" mismatch: current={current_value}, checkpoint={checkpoint_value}. '
+                'Resume will continue with the current runtime arguments.'
+            )
 
-    if seq_parallel_world_size == 1:
-        last_batch_flag(False)
-        train_mask = torch.zeros(y_i.size(0), dtype=torch.bool)
-        train_mask[mapped_train_idx] = True
-        return x_i, y_i, edge_index_i, attn_bias, train_mask
 
-    x_chunks = [t.contiguous() for t in torch.tensor_split(x_i, seq_parallel_world_size, dim=0)]
-    y_chunks = [t.contiguous() for t in torch.tensor_split(y_i, seq_parallel_world_size, dim=0)]
-    local_real_len = split_lens[seq_parallel_world_rank]
-
-    if local_real_len < pad_len:
-        last_batch_flag(True)
-        x_local = pad_2d(x_chunks[seq_parallel_world_rank], pad_len)
-        y_local = pad_y(y_chunks[seq_parallel_world_rank], pad_len)
-    else:
-        last_batch_flag(False)
-        x_local = x_chunks[seq_parallel_world_rank]
-        y_local = y_chunks[seq_parallel_world_rank]
-
-    if args.model == "graphormer":
-        edge_index_i = adjust_edge_index_nomerge(edge_index_i, pad_len)
-
-    local_start = sum(split_lens[:seq_parallel_world_rank])
-    local_train_mask = torch.zeros(pad_len, dtype=torch.bool)
-    local_train_idx = mapped_train_idx[(mapped_train_idx >= local_start) & (mapped_train_idx < local_start + local_real_len)] - local_start
-    if local_train_idx.numel() > 0:
-        local_train_mask[local_train_idx] = True
-
-    return x_local, y_local, edge_index_i, attn_bias, local_train_mask
+def save_latest_checkpoint(
+    checkpoint_path,
+    epoch,
+    model,
+    optimizer,
+    lr_scheduler,
+    best_val,
+    best_test,
+    val_acc_list,
+    test_acc_list,
+    epoch_t_list,
+    epoch_full_t_list,
+    epoch_reorder_t_list,
+    compare_ldr,
+    beta_idx,
+    f_loss,
+    args,
+):
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'lr_scheduler_state_dict': lr_scheduler.state_dict(),
+        'best_val': best_val,
+        'best_test': best_test,
+        'val_acc_list': val_acc_list,
+        'test_acc_list': test_acc_list,
+        'epoch_t_list': epoch_t_list,
+        'epoch_full_t_list': epoch_full_t_list,
+        'epoch_reorder_t_list': epoch_reorder_t_list,
+        'compare_ldr': list(compare_ldr),
+        'beta_idx': beta_idx,
+        'f_loss': f_loss,
+        'args_snapshot': build_args_snapshot(args),
+    }
+    torch.save(checkpoint, checkpoint_path)
 
 def main():
     parser = argparse.ArgumentParser(description='TorchGT node-level training arguments.')
@@ -136,8 +131,11 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
     
+    experiment_dir = get_experiment_dir(args)
+    best_model_path = get_best_model_path(args)
+
     if args.rank == 0:
-        os.makedirs(args.model_dir, exist_ok=True)
+        os.makedirs(experiment_dir, exist_ok=True)
     
     # Dataset 
     feature = torch.load(args.dataset_dir + args.dataset + '/x.pt',mmap=True) # [N, x_dim]
@@ -171,9 +169,8 @@ def main():
     if args.rank == 0:
         print(args)
         print('Dataset load successfully')
-        train_iters = 1 if args.full_batch else (split_idx['train'].size(0) // args.seq_len + 1)
         print(f"Train nodes: {split_idx['train'].shape[0]}, Val nodes: {split_idx['valid'].shape[0]}, Test nodes: {split_idx['test'].shape[0]}") 
-        print(f"Training iters: {train_iters}, Val iters: {split_idx['valid'].size(0) // args.seq_len + 1}, Test iters: {split_idx['test'].size(0) // args.seq_len + 1}")
+        print(f"Training iters: {split_idx['train'].size(0) // args.seq_len + 1}, Val iters: {split_idx['valid'].size(0) // args.seq_len + 1}, Test iters: {split_idx['test'].size(0) // args.seq_len + 1}")
     
     # Broadcast train indexes to all ranks 
     seq_parallel_world_size = get_sequence_parallel_world_size() if sequence_parallel_is_initialized() else 1
@@ -182,15 +179,13 @@ def main():
         group = get_sequence_parallel_group()
 
     train_idx = split_idx['train']
-    flatten_train_idx = None
-    if not args.full_batch:
-        if args.rank == 0:
-            flatten_train_idx = train_idx.to('cuda')
-        else:
-            total_numel = train_idx.numel()
-            flatten_train_idx = torch.empty(total_numel,
-                                    device=device,
-                                    dtype=torch.int64)
+    if args.rank == 0:
+        flatten_train_idx = train_idx.to('cuda')
+    else:
+        total_numel = train_idx.numel()
+        flatten_train_idx = torch.empty(total_numel,
+                                device=device,
+                                dtype=torch.int64)
         
     num_classes = None
     if args.dataset == 'ogbn-papers100M':
@@ -199,7 +194,7 @@ def main():
         num_classes = int(y.max().item()) + 1
 
     # Broadcast
-    if seq_parallel_world_size > 1 and not args.full_batch:
+    if seq_parallel_world_size > 1:
         dist.broadcast(flatten_train_idx, src_rank, group=group)
 
     # Initialize global token indices
@@ -208,13 +203,7 @@ def main():
     global_token_indices = list(range(0, seq_parallel_world_size * sub_real_seq_len, sub_real_seq_len))
 
     # Last batch fix sequence length
-    if args.full_batch:
-        x_dummy_list = [t for t in torch.tensor_split(torch.zeros(N, ), seq_parallel_world_size, dim=0)]
-        sub_split_seq_lens = [t.shape[0] for t in x_dummy_list]
-        sub_real_seq_len = max(sub_split_seq_lens) + args.num_global_node
-        global_token_indices = list(range(0, seq_parallel_world_size * sub_real_seq_len, sub_real_seq_len))
-        global_token_indices_last_batch = global_token_indices
-    elif flatten_train_idx.shape[0] % args.seq_len != 0:
+    if flatten_train_idx.shape[0] % args.seq_len != 0:
         last_batch_node_num = flatten_train_idx.shape[0] % args.seq_len
         if last_batch_node_num % seq_parallel_world_size != 0:
             div = last_batch_node_num // seq_parallel_world_size
@@ -281,22 +270,57 @@ def main():
     val_acc_list, test_acc_list, epoch_t_list = [], [], []
     epoch_full_t_list = []
     epoch_reorder_t_list = []
-    epoch_cpu2gpu_t_list = []
+    # epoch_cpu2gpu_t_list = []
     best_model, best_val, best_test = None, float('-inf'), float('-inf')
 
-    num_batch = 1 if args.full_batch else (flatten_train_idx.size(0) // args.seq_len + 1)
+    num_batch = flatten_train_idx.size(0) // args.seq_len + 1
 
     compare_ldr = deque([0, 0, 0, 0, 0]) 
     beta_coeffi_list = [0, 1, 1.5, 5, 7, 10, '1']
     beta_max, beta_idx  = 1, 1
+    f_loss = None
+    start_epoch = 1
+    checkpoint_path = get_latest_checkpoint_path(args)
 
-    for epoch in range(1, args.epochs + 1):
+    if args.resume:
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f'Resume checkpoint not found: {checkpoint_path}')
+
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        warn_on_checkpoint_mismatch(args, checkpoint.get('args_snapshot', {}))
+
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        lr_scheduler.load_state_dict(checkpoint['lr_scheduler_state_dict'])
+
+        best_val = checkpoint.get('best_val', best_val)
+        best_test = checkpoint.get('best_test', best_test)
+        val_acc_list = checkpoint.get('val_acc_list', val_acc_list)
+        test_acc_list = checkpoint.get('test_acc_list', test_acc_list)
+        epoch_t_list = checkpoint.get('epoch_t_list', epoch_t_list)
+        epoch_full_t_list = checkpoint.get('epoch_full_t_list', epoch_full_t_list)
+        epoch_reorder_t_list = checkpoint.get('epoch_reorder_t_list', epoch_reorder_t_list)
+        compare_ldr = deque(checkpoint.get('compare_ldr', list(compare_ldr)))
+        beta_idx = checkpoint.get('beta_idx', beta_idx)
+        f_loss = checkpoint.get('f_loss', f_loss)
+        start_epoch = checkpoint['epoch'] + 1
+
+        if args.rank == 0:
+            print(f'Resumed training from checkpoint: {checkpoint_path}')
+            print(f'Resuming at epoch {start_epoch} / {args.epochs}')
+
+    if start_epoch > args.epochs:
+        if args.rank == 0:
+            print(f'Checkpoint already reached epoch {start_epoch - 1}, which is >= target epochs {args.epochs}. Nothing to do.')
+        return
+
+    for epoch in range(start_epoch, args.epochs + 1):
         model.to(device)
         model.train()
         
         loss_list, iter_t_list = [], []
         iter_reorder_t_list = []
-        iter_cpu2gpu_t_list = []
+        # iter_cpu2gpu_t_list = []
         torch.cuda.synchronize()
         if seq_parallel_world_size > 1:
             dist.barrier(group=get_sequence_parallel_group())
@@ -308,31 +332,18 @@ def main():
         iter = 1
         
         for i in range(num_batch):
+            idx_i = flatten_train_idx[i*args.seq_len: (i+1)*args.seq_len]
+
             t0 = time.time()
-            if args.full_batch:
-                x_i, y_i, edge_index_i, attn_bias, train_mask = prepare_full_graph_batch(
-                    args,
-                    feature,
-                    y,
-                    edge_index,
-                    train_idx,
-                    device,
-                    beta_coeffi_list[beta_idx],
-                    sub_split_seq_lens,
-                    max(sub_split_seq_lens),
-                )
-            else:
-                idx_i = flatten_train_idx[i*args.seq_len: (i+1)*args.seq_len]
-                packed_data = get_batch_reorder_blockize(args, feature, y, idx_i.to("cpu"), sub_split_seq_lens, device, edge_index, N, k=8, block_size=16, beta_coeffi=beta_coeffi_list[beta_idx])
-                x_i, y_i, edge_index_i, attn_bias = packed_data
+            packed_data = get_batch_reorder_blockize(args, feature, y, idx_i.to("cpu"), sub_split_seq_lens, device, edge_index, N, k=8, block_size=16, beta_coeffi=beta_coeffi_list[beta_idx])
             t_reorder_end = time.time()
-            t_transfer_start = time.time()
+
+            x_i, y_i, edge_index_i, attn_bias = packed_data
+            # t_transfer_start = time.time()
             if attn_bias is not None:
                 x_i, y_i, edge_index_i, attn_bias = x_i.to(device), y_i.to(device), edge_index_i.to(device), attn_bias.to(device)
             else:
                 x_i, y_i, edge_index_i = x_i.to(device), y_i.to(device), edge_index_i.to(device)
-            if args.full_batch:
-                train_mask = train_mask.to(device)
 
             torch.cuda.synchronize() 
             t1 = time.time()
@@ -357,18 +368,7 @@ def main():
             
                 
             out_i = model(x_i, attn_bias, edge_index_i, attn_type=attn_type)    
-
-            # print(out_i.shape[0], y_i.shape[0])
-            # print(train_mask.sum().item(), split_idx['train'].shape[0])
-            # print(out_i[train_mask].shape[0])
-
-            if args.full_batch:
-                if train_mask.any():
-                    loss = F.nll_loss(out_i[train_mask], y_i[train_mask].long())
-                else:
-                    loss = out_i.sum() * 0.0
-            else:
-                loss = F.nll_loss(out_i, y_i.long())
+            loss = F.nll_loss(out_i, y_i.long())
             optimizer.zero_grad(set_to_none=True) 
             loss.backward()
             
@@ -383,7 +383,7 @@ def main():
             torch.cuda.synchronize()   
             t2 = time.time() 
             iter_reorder_t_list.append(t_reorder_end - t0)
-            iter_cpu2gpu_t_list.append(t1 - t_transfer_start)
+            # iter_cpu2gpu_t_list.append(t1 - t_transfer_start)
             iter_t_list.append(t2 - t1) 
             
      
@@ -398,16 +398,16 @@ def main():
             epoch_t_list.append(np.sum(iter_t_list))
             epoch_full_t_list.append(epoch_full_t1 - epoch_full_t0)
             epoch_reorder_t_list.append(np.sum(iter_reorder_t_list))
-            epoch_cpu2gpu_t_list.append(np.sum(iter_cpu2gpu_t_list))
+            # epoch_cpu2gpu_t_list.append(np.sum(iter_cpu2gpu_t_list))
             print("------------------------------------------------------------------------------------")
             print(
-                "Epoch: {:03d}, Loss: {:.4f}, Epoch Time: {:.3f}s, Full Epoch Time: {:.3f}s, Batch Prep Time: {:.3f}s, CPU->GPU Time: {:.3f}s".format(
+                "Epoch: {:03d}, Loss: {:.4f}, Epoch Time: {:.3f}s, Full Epoch Time: {:.3f}s, Batch Prep Time: {:.3f}s".format(
                     epoch,
                     np.mean(loss_list),
                     np.mean(epoch_t_list),
                     np.mean(epoch_full_t_list),
                     np.mean(epoch_reorder_t_list),
-                    np.mean(epoch_cpu2gpu_t_list),
+                    # np.mean(epoch_cpu2gpu_t_list),
                 )
             )
             print("------------------------------------------------------------------------------------")
@@ -421,7 +421,7 @@ def main():
             print("------------------------------------------------------------------------------------")
             print(f'Eval time {t5-t4}s')
             print(
-                "Epoch: {:03d}, Loss: {:4f}, Train acc: {:.2%}, Val acc: {:.2%}, Test acc: {:.2%}, Epoch Time: {:.3f}s, Full Epoch Time: {:.3f}s, Reorder Time: {:.3f}s, CPU->GPU Time: {:.3f}s".format(
+                "Epoch: {:03d}, Loss: {:4f}, Train acc: {:.2%}, Val acc: {:.2%}, Test acc: {:.2%}, Epoch Time: {:.3f}s, Full Epoch Time: {:.3f}s, Reorder Time: {:.3f}s".format(
                     epoch,
                     np.mean(loss_list),
                     train_acc,
@@ -430,7 +430,7 @@ def main():
                     np.mean(epoch_t_list) if epoch_t_list else np.sum(iter_t_list),
                     np.mean(epoch_full_t_list) if epoch_full_t_list else (epoch_full_t1 - epoch_full_t0),
                     np.mean(epoch_reorder_t_list) if epoch_reorder_t_list else np.sum(iter_reorder_t_list),
-                    np.mean(epoch_cpu2gpu_t_list) if epoch_cpu2gpu_t_list else np.sum(iter_cpu2gpu_t_list),
+                    # np.mean(epoch_cpu2gpu_t_list) if epoch_cpu2gpu_t_list else np.sum(iter_cpu2gpu_t_list),
                 )
             )
             print("------------------------------------------------------------------------------------")
@@ -438,7 +438,7 @@ def main():
             if val_acc > best_val:
                 best_val = val_acc
                 if args.save_model:
-                    torch.save(model.state_dict(), args.model_dir + f'{args.dataset}.pkl')
+                    torch.save(model.state_dict(), best_model_path)
             
             if test_acc > best_test:
                 best_test = test_acc
@@ -484,6 +484,26 @@ def main():
         if seq_parallel_world_size > 1:
             dist.broadcast(beta_idx_broad, src_rank, group=group)
         beta_idx = int(beta_idx_broad.item())
+
+        if args.rank == 0 and args.save_latest_every > 0 and epoch % args.save_latest_every == 0:
+            save_latest_checkpoint(
+                checkpoint_path=checkpoint_path,
+                epoch=epoch,
+                model=model,
+                optimizer=optimizer,
+                lr_scheduler=lr_scheduler,
+                best_val=best_val,
+                best_test=best_test,
+                val_acc_list=val_acc_list,
+                test_acc_list=test_acc_list,
+                epoch_t_list=epoch_t_list,
+                epoch_full_t_list=epoch_full_t_list,
+                epoch_reorder_t_list=epoch_reorder_t_list,
+                compare_ldr=compare_ldr,
+                beta_idx=beta_idx,
+                f_loss=f_loss,
+                args=args,
+            )
 
     if args.rank == 0:
         print("Best validation accuracy: {:.2%}, test accuracy: {:.2%}".format(best_val, best_test))

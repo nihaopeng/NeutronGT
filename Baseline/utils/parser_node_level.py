@@ -38,6 +38,12 @@ def parser_add_main_args(parser):
     parser.add_argument('--save_model', action='store_true', default=False, help='whether to save model')
     parser.add_argument('--load_model', action='store_true', default=False, help='whether to load saved model')
     parser.add_argument('--model_dir', type=str, default='./model_ckpt/')
+    parser.add_argument('--resume', action='store_true', default=False,
+                        help='resume training from the latest checkpoint')
+    parser.add_argument('--resume_path', type=str, default='',
+                        help='path to a specific checkpoint for resuming training')
+    parser.add_argument('--save_latest_every', type=int, default=5,
+                        help='save latest checkpoint every N epochs')
     parser.add_argument('--switch_freq', type=int, default=5)
     parser.add_argument('--reorder', action='store_true', default=False,
                         help='TorchGT mode')
