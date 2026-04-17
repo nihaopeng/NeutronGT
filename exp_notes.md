@@ -188,7 +188,7 @@ bash ./scripts/run_ablation_2.sh 0,1,2,3  --arxiv --GT
 
 ## Baseline+HAW+RWP
 
-在NeutronGT文件夹下，继续测试启用稀疏注意力与sparse的效果
+在NeutronGT文件夹下，继续测试启用稀疏注意力与cache的效果
 
 ```shell
 bash ./scripts/run_ablation_3.sh 0,1,2,3  --arxiv --GT 
@@ -211,7 +211,7 @@ bash ./scripts/run_ablation_3.sh 0,1,2,3  --arxiv --GT
 按照之前的NeutronGT的overall方式，切换数据集和模型即可，例如
 
 ```shell
-bash ./scripts/run_NeutronGT.sh 0,1,2,3  --arxiv --GPHLarge
+bash ./scripts/run_NeutronGT.sh 0,1,2,3  --arxiv --GPH_Large
 ```
 
 即可看到 arxiv 数据集的预处理的两阶段的开销

@@ -34,3 +34,7 @@ run_graph.sh
 data
 data/
 data/*
+
+old_logs/
+old_logs/*
+run.sh

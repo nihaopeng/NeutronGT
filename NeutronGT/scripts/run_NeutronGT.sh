@@ -16,7 +16,7 @@ if [ -z "$DEVICES" ] || [[ "$DEVICES" == -* ]]; then
     echo "Error: CUDA_VISIBLE_DEVICES argument is required."
     echo "Usage: bash $0 <devices> [dataset] [model]"
     echo "Datasets: --arxiv | --amazon | --reddit | --products"
-    echo "Models:   --GT | --GPHSlim | --GPHLarge"
+    echo "Models:   --GT | --GPH_Slim | --GPH_Large"
     echo "Example:  bash $0 0,1,2,3 --arxiv --GT"
     exit 1
 fi
@@ -36,12 +36,12 @@ while [[ $# -gt 0 ]]; do
         --reddit)   DATASET_INPUT="reddit" ;;
         --products) DATASET_INPUT="ogbn-products" ;;
         --GT)       MODEL_INPUT="GT" ;;
-        --GPHSlim)  MODEL_INPUT="GPHSlim" ;;
-        --GPHLarge) MODEL_INPUT="GPHLarge" ;;
+        --GPH_Slim)  MODEL_INPUT="GPH_Slim" ;;
+        --GPH_Large) MODEL_INPUT="GPH_Large" ;;
         *)
             echo "Usage: bash $0 <devices> [dataset] [model]"
             echo "Datasets: --arxiv | --amazon | --reddit | --products"
-            echo "Models:   --GT | --GPHSlim | --GPHLarge"
+            echo "Models:   --GT | --GPH_Slim | --GPH_Large"
             echo "Example:  bash $0 0,1,2,3 --arxiv --GT"
             echo "Error: unknown argument: $1" >&2
             exit 1
@@ -53,13 +53,13 @@ done
 # 3. Validate required selections
 if [ -z "$DATASET_INPUT" ]; then
     echo "Error: dataset is required." >&2
-    echo "Usage: bash $0 <devices> --arxiv|--amazon|--reddit|--products --GT|--GPHSlim|--GPHLarge" >&2
+    echo "Usage: bash $0 <devices> --arxiv|--amazon|--reddit|--products --GT|--GPH_Slim|--GPH_Large" >&2
     exit 1
 fi
 
 if [ -z "$MODEL_INPUT" ]; then
     echo "Error: model is required." >&2
-    echo "Usage: bash $0 <devices> --arxiv|--amazon|--reddit|--products --GT|--GPHSlim|--GPHLarge" >&2
+    echo "Usage: bash $0 <devices> --arxiv|--amazon|--reddit|--products --GT|--GPH_Slim|--GPH_Large" >&2
     exit 1
 fi
 
@@ -78,8 +78,8 @@ case "$MODEL_INPUT" in
         ATTN_TYPE="sparse"
         EPOCHS=500
         ;;
-    "GPHSlim")
-        MODEL_ALIAS="GPHSlim"
+    "GPH_Slim")
+        MODEL_ALIAS="GPH_Slim"
         MODEL="graphormer"
         N_LAYERS=4
         HIDDEN_DIM=64
@@ -88,8 +88,8 @@ case "$MODEL_INPUT" in
         ATTN_TYPE="sparse"
         EPOCHS=500
         ;;
-    "GPHLarge")
-        MODEL_ALIAS="GPHLarge"
+    "GPH_Large")
+        MODEL_ALIAS="GPH_Large"
         MODEL="graphormer"
         N_LAYERS=12
         HIDDEN_DIM=768
@@ -108,10 +108,10 @@ if [ "$dataset" = "AmazonProducts" ]; then
     if [ "$MODEL_ALIAS" = "GT" ]; then
         NPARTS=128
         RELATED_TOPK=4
-    elif [ "$MODEL_ALIAS" = "GPHSlim" ]; then
+    elif [ "$MODEL_ALIAS" = "GPH_Slim" ]; then
         NPARTS=128
         RELATED_TOPK=4
-    elif [ "$MODEL_ALIAS" = "GPHLarge" ]; then
+    elif [ "$MODEL_ALIAS" = "GPH_Large" ]; then
         NPARTS=400
         RELATED_TOPK=4
     fi
@@ -119,10 +119,10 @@ elif [ "$dataset" = "ogbn-arxiv" ]; then
     if [ "$MODEL_ALIAS" = "GT" ]; then
         NPARTS=16
         RELATED_TOPK=8
-    elif [ "$MODEL_ALIAS" = "GPHSlim" ]; then
+    elif [ "$MODEL_ALIAS" = "GPH_Slim" ]; then
         NPARTS=16
         RELATED_TOPK=8
-    elif [ "$MODEL_ALIAS" = "GPHLarge" ]; then
+    elif [ "$MODEL_ALIAS" = "GPH_Large" ]; then
         NPARTS=32
         RELATED_TOPK=8
     fi
@@ -130,10 +130,10 @@ elif [ "$dataset" = "ogbn-products" ]; then
     if [ "$MODEL_ALIAS" = "GT" ]; then
         NPARTS=128
         RELATED_TOPK=6
-    elif [ "$MODEL_ALIAS" = "GPHSlim" ]; then
+    elif [ "$MODEL_ALIAS" = "GPH_Slim" ]; then
         NPARTS=128
         RELATED_TOPK=6
-    elif [ "$MODEL_ALIAS" = "GPHLarge" ]; then
+    elif [ "$MODEL_ALIAS" = "GPH_Large" ]; then
         NPARTS=512
         RELATED_TOPK=4
     fi
@@ -141,10 +141,10 @@ elif [ "$dataset" = "reddit" ]; then
     if [ "$MODEL_ALIAS" = "GT" ]; then
         NPARTS=32
         RELATED_TOPK=10
-    elif [ "$MODEL_ALIAS" = "GPHSlim" ]; then
+    elif [ "$MODEL_ALIAS" = "GPH_Slim" ]; then
         NPARTS=32
         RELATED_TOPK=10
-    elif [ "$MODEL_ALIAS" = "GPHLarge" ]; then
+    elif [ "$MODEL_ALIAS" = "GPH_Large" ]; then
         NPARTS=80
         RELATED_TOPK=4
     fi
