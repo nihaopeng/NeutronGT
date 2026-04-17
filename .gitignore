@@ -4,7 +4,7 @@ dataset/
 __pycache__/
 *.csv
 *.json
-*.png
+
 
 dataset/
 dataset-graph/
