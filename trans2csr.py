@@ -2,7 +2,9 @@ import torch
 import os
 
 # 1. 设置路径
-folder_path = './dataset/reddit' 
+import sys
+dataset_name = sys.argv[1]
+folder_path = f'./dataset/{dataset_name}'
 edge_index_path = os.path.join(folder_path, 'edge_index.pt')
 x_path = os.path.join(folder_path, 'x.pt')
 
