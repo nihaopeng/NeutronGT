@@ -1,0 +1,220 @@
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+[2026-04-17 14:02:42,277] torch.distributed.run: [WARNING] 
+[2026-04-17 14:02:42,277] torch.distributed.run: [WARNING] *****************************************
+[2026-04-17 14:02:42,277] torch.distributed.run: [WARNING] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+[2026-04-17 14:02:42,277] torch.distributed.run: [WARNING] *****************************************
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+> initializing torch distributed ...
+************ Finish sequence parallel group Initialization. ***********
+Namespace(enable_attention_pruning=False, attention_pruning_ratio=0.1, enable_neighbor_pruning=False, neighbor_pruning_ratio=0.1, device=0, dataset_dir='./dataset/', dataset='ogbn-arxiv', model='graphormer', n_layers=4, num_heads=8, hidden_dim=64, ffn_dim=64, attn_bias_dim=1, dropout_rate=0.3, input_dropout_rate=0.1, attention_dropout_rate=0.5, num_global_node=1, attn_type='sparse', seq_len=256000, weight_decay=0.01, warmup_updates=10, tot_updates=70, epochs=25, patience=50, peak_lr=0.0001, end_lr=1e-09, seed=42, perturb_feature=False, save_model=False, load_model=False, model_dir='./model_ckpt/', save_checkpoint=False, checkpoint_dir='', save_checkpoint_every=1, save_latest_only=False, resume_checkpoint='', resume_latest=False, switch_freq=5, reorder=False, struct_enc='False', max_dist=5, max_num_edges=512, vis_dir=None, use_cache=1, ppr_backend='appnp', ppr_alpha=0.85, ppr_topk=5, ppr_num_iterations=10, ppr_batch_size=8192, ppr_iter_topk=5, ppr_eps=1e-06, n_parts=56, related_nodes_topk_rate=8, preprocess_only=0, use_preprocess_cache=0, refresh_preprocess_cache=0, rank=0, local_rank=0, world_size=4, distributed_backend='nccl', distributed_timeout_minutes=120, sequence_parallel_size=4)
+Dataset load successfully
+APPNP backend will use edge_index_csr.pt
+Train nodes: 101605, Val nodes: 33869, Test nodes: 33869
+Training iters: 1, Val iters: 1, Test iters: 1
+Preprocess Stage 1 Time: 25.166s
+Preprocess Stage 2 Time: 1.927s
+Model params: 147424
+------------------------------------------------------------------------------------
+Epoch: 000, Loss: 3.6747, Train Time: 0.693s, CPU->GPU Time: 0.051s, Window FW/BW Avg: 0.046s, Window FW/BW Total: 0.641s, Windows: 14, Max Window Steps: 14
+Training epoch time: 0.693s
+------------------------------------------------------------------------------------
+epoch 0: lr = 2.00e-05
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Epoch: 000, train_acc: 5.84441%, valid_acc: 5.97740%, test_acc: 5.86167%, samples(train/valid/test)=(140151/46726/46369)
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+------------------------------------------------------------------------------------
+Epoch: 001, Loss: 3.6490, Train Time: 0.453s, CPU->GPU Time: 0.046s, Window FW/BW Avg: 0.029s, Window FW/BW Total: 0.406s, Windows: 14, Max Window Steps: 14
+Training epoch time: 0.453s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 002, Loss: 3.6146, Train Time: 0.457s, CPU->GPU Time: 0.056s, Window FW/BW Avg: 0.029s, Window FW/BW Total: 0.401s, Windows: 14, Max Window Steps: 14
+Training epoch time: 0.457s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 003, Loss: 3.5781, Train Time: 0.458s, CPU->GPU Time: 0.046s, Window FW/BW Avg: 0.029s, Window FW/BW Total: 0.412s, Windows: 14, Max Window Steps: 14
+Training epoch time: 0.458s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 004, Loss: 3.5422, Train Time: 0.440s, CPU->GPU Time: 0.044s, Window FW/BW Avg: 0.028s, Window FW/BW Total: 0.396s, Windows: 14, Max Window Steps: 14
+Training epoch time: 0.440s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 005, Loss: 3.5040, Train Time: 0.419s, CPU->GPU Time: 0.044s, Window FW/BW Avg: 0.027s, Window FW/BW Total: 0.374s, Windows: 14, Max Window Steps: 14
+Training epoch time: 0.419s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 006, Loss: 3.4606, Train Time: 0.471s, CPU->GPU Time: 0.045s, Window FW/BW Avg: 0.030s, Window FW/BW Total: 0.425s, Windows: 14, Max Window Steps: 14
+Training epoch time: 0.471s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 007, Loss: 3.4113, Train Time: 0.462s, CPU->GPU Time: 0.044s, Window FW/BW Avg: 0.030s, Window FW/BW Total: 0.417s, Windows: 14, Max Window Steps: 14
+Training epoch time: 0.462s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 008, Loss: 3.3600, Train Time: 0.460s, CPU->GPU Time: 0.058s, Window FW/BW Avg: 0.029s, Window FW/BW Total: 0.401s, Windows: 14, Max Window Steps: 14
+Training epoch time: 0.460s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 009, Loss: 3.3073, Train Time: 0.453s, CPU->GPU Time: 0.046s, Window FW/BW Avg: 0.029s, Window FW/BW Total: 0.406s, Windows: 14, Max Window Steps: 14
+Training epoch time: 0.453s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 010, Loss: 3.2579, Train Time: 0.469s, CPU->GPU Time: 0.046s, Window FW/BW Avg: 0.030s, Window FW/BW Total: 0.423s, Windows: 14, Max Window Steps: 14
+Training epoch time: 0.469s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 011, Loss: 3.2230, Train Time: 0.477s, CPU->GPU Time: 0.046s, Window FW/BW Avg: 0.031s, Window FW/BW Total: 0.430s, Windows: 14, Max Window Steps: 14
+Training epoch time: 0.477s
+------------------------------------------------------------------------------------
+Traceback (most recent call last):
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/main_sp_node_level_ppr.py", line 262, in <module>
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/main_sp_node_level_ppr.py", line 262, in <module>
+[2026-04-17 14:03:25,184] torch.distributed.elastic.agent.server.api: [WARNING] Received Signals.SIGINT death signal, shutting down workers
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/main_sp_node_level_ppr.py", line 262, in <module>
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/main_sp_node_level_ppr.py", line 262, in <module>
+[2026-04-17 14:03:25,184] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3641971 closing signal SIGINT
+    main()    
+main()  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/main_sp_node_level_ppr.py", line 196, in main
+
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/main_sp_node_level_ppr.py", line 196, in main
+[2026-04-17 14:03:25,184] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3641972 closing signal SIGINT
+      File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/main_sp_node_level_ppr.py", line 196, in main
+loss_mean,scores_by_pid,updated_kv_cache,time_stats = train_epoch(args,model,local_partition_ids,local_partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,    
+[2026-04-17 14:03:25,184] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3641973 closing signal SIGINT
+loss_mean,scores_by_pid,updated_kv_cache,time_stats = train_epoch(args,model,local_partition_ids,local_partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/main_sp_node_level_ppr.py", line 196, in main
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/core/node_level_pipeline/train_eval.py", line 275, in train_epoch
+
+
+[2026-04-17 14:03:25,184] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3641974 closing signal SIGINT
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/functional.py", line 2729, in nll_loss
+    loss_mean,scores_by_pid,updated_kv_cache,time_stats = train_epoch(args,model,local_partition_ids,local_partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/core/node_level_pipeline/train_eval.py", line 257, in train_epoch
+    loss_mean,scores_by_pid,updated_kv_cache,time_stats = train_epoch(args,model,local_partition_ids,local_partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/core/node_level_pipeline/train_eval.py", line 257, in train_epoch
+    out_i, score_agg, score_spe, updated_kv_cache = model(
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+    out_i, score_agg, score_spe, updated_kv_cache = model(
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+    return torch._C._nn.nll_loss_nd(input, target, weight, _Reduction.get_enum(reduction), ignore_index)
+KeyboardInterrupt
+        return self._call_impl(*args, **kwargs)return self._call_impl(*args, **kwargs)
+
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/models/graphormer_dist_node_level.py", line 335, in forward
+    return forward_call(*args, **kwargs)
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/models/graphormer_dist_node_level.py", line 335, in forward
+    output, score, [compute_cache_k, compute_cache_v] = enc_layer(    
+output, score, [compute_cache_k, compute_cache_v] = enc_layer(  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/models/graphormer_dist_node_level.py", line 202, in forward
+    return forward_call(*args, **kwargs)
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/models/graphormer_dist_node_level.py", line 189, in forward
+    y = self.ffn_norm(x)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+    y, score, [compute_cache_k, compute_cache_v] = self.self_attention(
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+    return forward_call(*args, **kwargs)
+    return forward_call(*args, **kwargs)
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/models/graphormer_dist_node_level.py", line 171, in forward
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/normalization.py", line 196, in forward
+    x = self.output_layer(x)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1518, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/module.py", line 1527, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/modules/linear.py", line 114, in forward
+    return F.layer_norm(
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/nn/functional.py", line 2543, in layer_norm
+    return torch.layer_norm(input, normalized_shape, weight, bias, eps, torch.backends.cudnn.enabled)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/backends/__init__.py", line 36, in __get__
+    return F.linear(input, self.weight, self.bias)
+KeyboardInterrupt
+    def __get__(self, obj, objtype):
+KeyboardInterrupt
+[2026-04-17 14:03:25,362] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3641971 closing signal SIGTERM
+[2026-04-17 14:03:25,362] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3641972 closing signal SIGTERM
+[2026-04-17 14:03:25,362] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3641973 closing signal SIGTERM
+[2026-04-17 14:03:25,362] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3641974 closing signal SIGTERM
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 736, in run
+    result = self._invoke_run(role)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 877, in _invoke_run
+    time.sleep(monitor_interval)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 62, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 3641868 got signal: 2
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 743, in run
+    self._shutdown(e.sigval)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/local_elastic_agent.py", line 289, in _shutdown
+    self._pcontext.close(death_sig)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 331, in close
+    self._close(death_sig=death_sig, timeout=timeout)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 713, in _close
+    handler.proc.wait(time_to_wait)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/subprocess.py", line 1209, in wait
+    return self._wait(timeout=timeout)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/subprocess.py", line 1953, in _wait
+    time.sleep(delay)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 62, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 3641868 got signal: 2
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/bin/torchrun", line 33, in <module>
+    sys.exit(load_entry_point('torch==2.1.2', 'console_scripts', 'torchrun')())
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 346, in wrapper
+    return f(*args, **kwargs)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/run.py", line 806, in main
+    run(args)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/run.py", line 797, in run
+    elastic_launch(
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 134, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 255, in launch_agent
+    result = agent.run()
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/metrics/api.py", line 124, in wrapper
+    result = f(*args, **kwargs)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 748, in run
+    self._shutdown()
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/local_elastic_agent.py", line 289, in _shutdown
+    self._pcontext.close(death_sig)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 331, in close
+    self._close(death_sig=death_sig, timeout=timeout)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 713, in _close
+    handler.proc.wait(time_to_wait)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/subprocess.py", line 1209, in wait
+    return self._wait(timeout=timeout)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/subprocess.py", line 1953, in _wait
+    time.sleep(delay)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 62, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 3641868 got signal: 2

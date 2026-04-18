@@ -1,0 +1,164 @@
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+[2026-04-17 13:42:38,639] torch.distributed.run: [WARNING] 
+[2026-04-17 13:42:38,639] torch.distributed.run: [WARNING] *****************************************
+[2026-04-17 13:42:38,639] torch.distributed.run: [WARNING] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+[2026-04-17 13:42:38,639] torch.distributed.run: [WARNING] *****************************************
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+> initializing torch distributed ...
+************ Finish sequence parallel group Initialization. ***********
+feature shape torch.Size([169343, 128])
+y shape torch.Size([169343])
+edge_index shape torch.Size([2, 1166243])
+Namespace(device=0, dataset_dir='./dataset/', dataset='ogbn-arxiv', model='graphormer', n_layers=4, num_heads=8, hidden_dim=64, ffn_dim=64, attn_bias_dim=1, dropout_rate=0.3, input_dropout_rate=0.1, attention_dropout_rate=0.5, num_global_node=1, attn_type='full', seq_len=16000, weight_decay=0.01, warmup_updates=10, tot_updates=70, epochs=500, patience=50, peak_lr=0.0002, end_lr=1e-09, seed=42, perturb_feature=False, save_model=False, load_model=False, model_dir='./model_ckpt/', resume=False, resume_path='', save_latest_every=5, switch_freq=5, reorder=False, full_batch=False, rank=0, local_rank=0, world_size=4, distributed_backend='nccl', distributed_timeout_minutes=120, sequence_parallel_size=4)
+Dataset load successfully
+Train nodes: 101605, Val nodes: 33869, Test nodes: 33869
+Training iters: 7, Val iters: 3, Test iters: 3
+feature shape torch.Size([169343, 128])
+y shape torch.Size([169343])
+edge_index shape torch.Size([2, 1166243])
+feature shape torch.Size([169343, 128])
+y shape torch.Size([169343])
+edge_index shape torch.Size([2, 1166243])
+feature shape torch.Size([169343, 128])
+y shape torch.Size([169343])
+edge_index shape torch.Size([2, 1166243])
+Model params: 111913
+------------------------------------------------------------------------------------
+Epoch: 001, Loss: 3.6722, Epoch Time: 2.415s, Full Epoch Time: 2.936s, Batch Prep Time: 0.516s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 002, Loss: 3.6089, Epoch Time: 2.328s, Full Epoch Time: 2.826s, Batch Prep Time: 0.493s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 003, Loss: 3.5580, Epoch Time: 2.276s, Full Epoch Time: 2.750s, Batch Prep Time: 0.468s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 004, Loss: 3.5214, Epoch Time: 2.248s, Full Epoch Time: 2.719s, Batch Prep Time: 0.465s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 005, Loss: 3.4853, Epoch Time: 2.234s, Full Epoch Time: 2.704s, Batch Prep Time: 0.464s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Eval time 5.848680019378662s
+Epoch: 005, Loss: 3.485272, Train acc: 19.52%, Val acc: 19.49%, Test acc: 19.66%, Epoch Time: 2.234s, Full Epoch Time: 2.704s, Reorder Time: 0.464s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 006, Loss: 3.4457, Epoch Time: 2.289s, Full Epoch Time: 2.765s, Batch Prep Time: 0.471s
+------------------------------------------------------------------------------------
+[2026-04-17 13:43:09,264] torch.distributed.elastic.agent.server.api: [WARNING] Received Signals.SIGINT death signal, shutting down workers
+[2026-04-17 13:43:09,265] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3242145 closing signal SIGINT
+[2026-04-17 13:43:09,265] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3242146 closing signal SIGINT
+[2026-04-17 13:43:09,265] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3242147 closing signal SIGINT
+[2026-04-17 13:43:09,265] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3242148 closing signal SIGINT
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/Baseline/main_sp_node_level.py", line 530, in <module>
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/Baseline/main_sp_node_level.py", line 530, in <module>
+    main()
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/Baseline/main_sp_node_level.py", line 373, in main
+    main()
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/Baseline/main_sp_node_level.py", line 373, in main
+    loss.backward()
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/_tensor.py", line 492, in backward
+    loss.backward()
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/_tensor.py", line 492, in backward
+    torch.autograd.backward(
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/autograd/__init__.py", line 251, in backward
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/Baseline/main_sp_node_level.py", line 530, in <module>
+    Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+Traceback (most recent call last):
+KeyboardInterrupt    
+torch.autograd.backward(  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/Baseline/main_sp_node_level.py", line 530, in <module>
+
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/autograd/__init__.py", line 251, in backward
+    Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+KeyboardInterrupt
+    main()
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/Baseline/main_sp_node_level.py", line 373, in main
+    loss.backward()
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/_tensor.py", line 492, in backward
+    main()
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/Baseline/main_sp_node_level.py", line 373, in main
+    torch.autograd.backward(
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/autograd/__init__.py", line 251, in backward
+    loss.backward()
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/_tensor.py", line 492, in backward
+    Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+KeyboardInterrupt
+    torch.autograd.backward(
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/autograd/__init__.py", line 251, in backward
+    Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+KeyboardInterrupt
+[2026-04-17 13:43:09,463] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3242145 closing signal SIGTERM
+[2026-04-17 13:43:09,464] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3242146 closing signal SIGTERM
+[2026-04-17 13:43:09,464] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3242147 closing signal SIGTERM
+[2026-04-17 13:43:09,464] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3242148 closing signal SIGTERM
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 736, in run
+    result = self._invoke_run(role)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 877, in _invoke_run
+    time.sleep(monitor_interval)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 62, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 3242052 got signal: 2
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 743, in run
+    self._shutdown(e.sigval)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/local_elastic_agent.py", line 289, in _shutdown
+    self._pcontext.close(death_sig)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 331, in close
+    self._close(death_sig=death_sig, timeout=timeout)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 713, in _close
+    handler.proc.wait(time_to_wait)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/subprocess.py", line 1209, in wait
+    return self._wait(timeout=timeout)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/subprocess.py", line 1953, in _wait
+    time.sleep(delay)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 62, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 3242052 got signal: 2
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/bin/torchrun", line 33, in <module>
+    sys.exit(load_entry_point('torch==2.1.2', 'console_scripts', 'torchrun')())
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 346, in wrapper
+    return f(*args, **kwargs)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/run.py", line 806, in main
+    run(args)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/run.py", line 797, in run
+    elastic_launch(
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 134, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 255, in launch_agent
+    result = agent.run()
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/metrics/api.py", line 124, in wrapper
+    result = f(*args, **kwargs)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 748, in run
+    self._shutdown()
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/local_elastic_agent.py", line 289, in _shutdown
+    self._pcontext.close(death_sig)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 331, in close
+    self._close(death_sig=death_sig, timeout=timeout)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 713, in _close
+    handler.proc.wait(time_to_wait)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/subprocess.py", line 1209, in wait
+    return self._wait(timeout=timeout)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/subprocess.py", line 1953, in _wait
+    time.sleep(delay)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 62, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 3242052 got signal: 2

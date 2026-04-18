@@ -1,0 +1,137 @@
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+[2026-04-17 13:24:43,993] torch.distributed.run: [WARNING] 
+[2026-04-17 13:24:43,993] torch.distributed.run: [WARNING] *****************************************
+[2026-04-17 13:24:43,993] torch.distributed.run: [WARNING] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+[2026-04-17 13:24:43,993] torch.distributed.run: [WARNING] *****************************************
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+> initializing torch distributed ...
+************ Finish sequence parallel group Initialization. ***********
+feature shape torch.Size([169343, 128])
+y shape torch.Size([169343])
+edge_index shape torch.Size([2, 1166243])
+Namespace(device=0, dataset_dir='./dataset/', dataset='ogbn-arxiv', model='gt', n_layers=4, num_heads=8, hidden_dim=128, ffn_dim=128, attn_bias_dim=1, dropout_rate=0.3, input_dropout_rate=0.1, attention_dropout_rate=0.5, num_global_node=1, attn_type='sparse', seq_len=256000, weight_decay=0.01, warmup_updates=10, tot_updates=70, epochs=500, patience=50, peak_lr=0.0002, end_lr=1e-09, seed=42, perturb_feature=False, save_model=False, load_model=False, model_dir='./model_ckpt/', resume=False, resume_path='', save_latest_every=5, switch_freq=5, reorder=True, full_batch=False, rank=0, local_rank=0, world_size=4, distributed_backend='nccl', distributed_timeout_minutes=120, sequence_parallel_size=4)
+Dataset load successfully
+Train nodes: 101605, Val nodes: 33869, Test nodes: 33869
+Training iters: 1, Val iters: 1, Test iters: 1
+feature shape torch.Size([169343, 128])
+y shape torch.Size([169343])
+edge_index shape torch.Size([2, 1166243])
+Model params: 564272
+------------------------------------------------------------------------------------
+Epoch: 001, Loss: 3.6889, Epoch Time: 0.586s, Full Epoch Time: 6.698s, Batch Prep Time: 6.102s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 002, Loss: 3.6889, Epoch Time: 0.329s, Full Epoch Time: 6.287s, Batch Prep Time: 5.951s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 003, Loss: 3.6889, Epoch Time: 0.248s, Full Epoch Time: 6.110s, Batch Prep Time: 5.856s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 004, Loss: 3.6888, Epoch Time: 0.205s, Full Epoch Time: 5.869s, Batch Prep Time: 5.660s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 005, Loss: 3.6887, Epoch Time: 0.179s, Full Epoch Time: 5.696s, Batch Prep Time: 5.513s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Eval time 0.4805269241333008s
+Epoch: 005, Loss: 3.688713, Train acc: 15.77%, Val acc: 15.71%, Test acc: 16.04%, Epoch Time: 0.179s, Full Epoch Time: 5.696s, Reorder Time: 5.513s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 006, Loss: 3.6886, Epoch Time: 0.161s, Full Epoch Time: 5.587s, Batch Prep Time: 5.422s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 007, Loss: 3.6885, Epoch Time: 0.148s, Full Epoch Time: 5.509s, Batch Prep Time: 5.356s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 008, Loss: 3.6884, Epoch Time: 0.140s, Full Epoch Time: 5.434s, Batch Prep Time: 5.290s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 009, Loss: 3.6882, Epoch Time: 0.133s, Full Epoch Time: 5.399s, Batch Prep Time: 5.263s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 010, Loss: 3.6881, Epoch Time: 0.127s, Full Epoch Time: 5.352s, Batch Prep Time: 5.220s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Eval time 0.4942500591278076s
+Epoch: 010, Loss: 3.688069, Train acc: 13.40%, Val acc: 13.56%, Test acc: 13.45%, Epoch Time: 0.127s, Full Epoch Time: 5.352s, Reorder Time: 5.220s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 011, Loss: 3.6879, Epoch Time: 0.122s, Full Epoch Time: 5.319s, Batch Prep Time: 5.193s
+------------------------------------------------------------------------------------
+[2026-04-17 13:25:51,781] torch.distributed.elastic.agent.server.api: [WARNING] Received Signals.SIGINT death signal, shutting down workers
+[2026-04-17 13:25:51,782] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 2881609 closing signal SIGINT
+[2026-04-17 13:25:51,782] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 2881610 closing signal SIGINT
+[2026-04-17 13:25:51,782] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 2881611 closing signal SIGINT
+[2026-04-17 13:25:51,782] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 2881612 closing signal SIGINT
+[2026-04-17 13:25:52,054] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 2881609 closing signal SIGTERM
+[2026-04-17 13:25:52,054] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 2881610 closing signal SIGTERM
+[2026-04-17 13:25:52,055] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 2881611 closing signal SIGTERM
+[2026-04-17 13:25:52,055] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 2881612 closing signal SIGTERM
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 736, in run
+    result = self._invoke_run(role)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 877, in _invoke_run
+    time.sleep(monitor_interval)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 62, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 2881529 got signal: 2
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 743, in run
+    self._shutdown(e.sigval)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/local_elastic_agent.py", line 289, in _shutdown
+    self._pcontext.close(death_sig)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 331, in close
+    self._close(death_sig=death_sig, timeout=timeout)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 713, in _close
+    handler.proc.wait(time_to_wait)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/subprocess.py", line 1209, in wait
+    return self._wait(timeout=timeout)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/subprocess.py", line 1953, in _wait
+    time.sleep(delay)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 62, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 2881529 got signal: 2
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/bin/torchrun", line 33, in <module>
+    sys.exit(load_entry_point('torch==2.1.2', 'console_scripts', 'torchrun')())
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 346, in wrapper
+    return f(*args, **kwargs)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/run.py", line 806, in main
+    run(args)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/run.py", line 797, in run
+    elastic_launch(
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 134, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 255, in launch_agent
+    result = agent.run()
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/metrics/api.py", line 124, in wrapper
+    result = f(*args, **kwargs)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 748, in run
+    self._shutdown()
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/local_elastic_agent.py", line 289, in _shutdown
+    self._pcontext.close(death_sig)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 331, in close
+    self._close(death_sig=death_sig, timeout=timeout)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 713, in _close
+    handler.proc.wait(time_to_wait)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/subprocess.py", line 1209, in wait
+    return self._wait(timeout=timeout)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/subprocess.py", line 1953, in _wait
+    time.sleep(delay)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 62, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 2881529 got signal: 2

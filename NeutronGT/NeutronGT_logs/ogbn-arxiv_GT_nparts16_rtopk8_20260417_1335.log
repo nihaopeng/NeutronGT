@@ -1,0 +1,379 @@
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+[2026-04-17 13:35:01,855] torch.distributed.run: [WARNING] 
+[2026-04-17 13:35:01,855] torch.distributed.run: [WARNING] *****************************************
+[2026-04-17 13:35:01,855] torch.distributed.run: [WARNING] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+[2026-04-17 13:35:01,855] torch.distributed.run: [WARNING] *****************************************
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/cuda/__init__.py:51: FutureWarning: The pynvml package is deprecated. Please install nvidia-ml-py instead. If you did not install pynvml directly, please report this to the maintainers of the package that installed pynvml for you.
+  import pynvml  # type: ignore[import]
+> initializing torch distributed ...
+************ Finish sequence parallel group Initialization. ***********
+Namespace(enable_attention_pruning=False, attention_pruning_ratio=0.1, enable_neighbor_pruning=False, neighbor_pruning_ratio=0.1, device=0, dataset_dir='./dataset/', dataset='ogbn-arxiv', model='gt_sw', n_layers=4, num_heads=8, hidden_dim=128, ffn_dim=128, attn_bias_dim=1, dropout_rate=0.3, input_dropout_rate=0.1, attention_dropout_rate=0.5, num_global_node=1, attn_type='sparse', seq_len=256000, weight_decay=0.01, warmup_updates=10, tot_updates=70, epochs=500, patience=50, peak_lr=0.0001, end_lr=1e-09, seed=42, perturb_feature=False, save_model=False, load_model=False, model_dir='./model_ckpt/', save_checkpoint=False, checkpoint_dir='', save_checkpoint_every=1, save_latest_only=False, resume_checkpoint='', resume_latest=False, switch_freq=5, reorder=False, struct_enc='False', max_dist=5, max_num_edges=512, vis_dir=None, use_cache=1, ppr_backend='appnp', ppr_alpha=0.85, ppr_topk=5, ppr_num_iterations=10, ppr_batch_size=8192, ppr_iter_topk=5, ppr_eps=1e-06, n_parts=16, related_nodes_topk_rate=8, preprocess_only=0, use_preprocess_cache=0, refresh_preprocess_cache=0, rank=0, local_rank=0, world_size=4, distributed_backend='nccl', distributed_timeout_minutes=120, sequence_parallel_size=4)
+Dataset load successfully
+APPNP backend will use edge_index_csr.pt
+Train nodes: 101605, Val nodes: 33869, Test nodes: 33869
+Training iters: 1, Val iters: 1, Test iters: 1
+Preprocess Stage 1 Time: 86.320s
+Preprocess Stage 2 Time: 1.529s
+Model params: 599976
+------------------------------------------------------------------------------------
+Epoch: 000, Loss: 3.6889, Train Time: 0.449s, CPU->GPU Time: 0.046s, Window FW/BW Avg: 0.101s, Window FW/BW Total: 0.404s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.449s
+------------------------------------------------------------------------------------
+epoch 0: lr = 2.00e-05
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Epoch: 000, train_acc: 1.51370%, valid_acc: 1.45026%, test_acc: 1.58002%, samples(train/valid/test)=(128691/42682/42721)
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+------------------------------------------------------------------------------------
+Epoch: 001, Loss: 3.6888, Train Time: 0.168s, CPU->GPU Time: 0.040s, Window FW/BW Avg: 0.032s, Window FW/BW Total: 0.128s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.168s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 002, Loss: 3.6887, Train Time: 0.159s, CPU->GPU Time: 0.040s, Window FW/BW Avg: 0.030s, Window FW/BW Total: 0.119s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.159s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 003, Loss: 3.6886, Train Time: 0.173s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.034s, Window FW/BW Total: 0.137s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.173s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 004, Loss: 3.6884, Train Time: 0.156s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.030s, Window FW/BW Total: 0.119s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.156s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 005, Loss: 3.6881, Train Time: 0.157s, CPU->GPU Time: 0.035s, Window FW/BW Avg: 0.031s, Window FW/BW Total: 0.122s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.157s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 006, Loss: 3.6878, Train Time: 0.154s, CPU->GPU Time: 0.035s, Window FW/BW Avg: 0.030s, Window FW/BW Total: 0.119s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.154s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 007, Loss: 3.6874, Train Time: 0.187s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.037s, Window FW/BW Total: 0.150s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.187s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 008, Loss: 3.6868, Train Time: 0.168s, CPU->GPU Time: 0.035s, Window FW/BW Avg: 0.033s, Window FW/BW Total: 0.133s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.168s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 009, Loss: 3.6859, Train Time: 0.168s, CPU->GPU Time: 0.035s, Window FW/BW Avg: 0.033s, Window FW/BW Total: 0.133s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.168s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 010, Loss: 3.6849, Train Time: 0.157s, CPU->GPU Time: 0.035s, Window FW/BW Avg: 0.031s, Window FW/BW Total: 0.122s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.157s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 011, Loss: 3.6836, Train Time: 0.177s, CPU->GPU Time: 0.035s, Window FW/BW Avg: 0.036s, Window FW/BW Total: 0.142s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.177s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 012, Loss: 3.6820, Train Time: 0.163s, CPU->GPU Time: 0.035s, Window FW/BW Avg: 0.032s, Window FW/BW Total: 0.128s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.163s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 013, Loss: 3.6799, Train Time: 0.158s, CPU->GPU Time: 0.035s, Window FW/BW Avg: 0.031s, Window FW/BW Total: 0.123s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.158s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 014, Loss: 3.6773, Train Time: 0.171s, CPU->GPU Time: 0.035s, Window FW/BW Avg: 0.034s, Window FW/BW Total: 0.136s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.171s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 015, Loss: 3.6739, Train Time: 0.163s, CPU->GPU Time: 0.035s, Window FW/BW Avg: 0.032s, Window FW/BW Total: 0.128s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.163s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 016, Loss: 3.6696, Train Time: 0.162s, CPU->GPU Time: 0.035s, Window FW/BW Avg: 0.032s, Window FW/BW Total: 0.127s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.162s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 017, Loss: 3.6641, Train Time: 0.182s, CPU->GPU Time: 0.035s, Window FW/BW Avg: 0.037s, Window FW/BW Total: 0.147s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.182s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 018, Loss: 3.6573, Train Time: 0.157s, CPU->GPU Time: 0.035s, Window FW/BW Avg: 0.031s, Window FW/BW Total: 0.122s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.157s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 019, Loss: 3.6490, Train Time: 0.168s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.033s, Window FW/BW Total: 0.131s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.168s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 020, Loss: 3.6389, Train Time: 0.162s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.031s, Window FW/BW Total: 0.125s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.162s
+------------------------------------------------------------------------------------
+epoch 20: lr = 9.76e-05
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Epoch: 020, train_acc: 12.40802%, valid_acc: 12.27215%, test_acc: 12.59100%, samples(train/valid/test)=(128691/42682/42721)
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+------------------------------------------------------------------------------------
+Epoch: 021, Loss: 3.6269, Train Time: 0.171s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.034s, Window FW/BW Total: 0.134s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.171s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 022, Loss: 3.6127, Train Time: 0.154s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.029s, Window FW/BW Total: 0.117s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.154s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 023, Loss: 3.5961, Train Time: 0.163s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.031s, Window FW/BW Total: 0.126s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.163s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 024, Loss: 3.5772, Train Time: 0.167s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.032s, Window FW/BW Total: 0.130s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.167s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 025, Loss: 3.5558, Train Time: 0.160s, CPU->GPU Time: 0.038s, Window FW/BW Avg: 0.031s, Window FW/BW Total: 0.122s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.160s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 026, Loss: 3.5318, Train Time: 0.175s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.034s, Window FW/BW Total: 0.138s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.175s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 027, Loss: 3.5055, Train Time: 0.190s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.038s, Window FW/BW Total: 0.153s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.190s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 028, Loss: 3.4769, Train Time: 0.158s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.030s, Window FW/BW Total: 0.121s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.158s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 029, Loss: 3.4464, Train Time: 0.163s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.032s, Window FW/BW Total: 0.126s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.163s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 030, Loss: 3.4143, Train Time: 0.164s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.032s, Window FW/BW Total: 0.127s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.164s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 031, Loss: 3.3810, Train Time: 0.160s, CPU->GPU Time: 0.036s, Window FW/BW Avg: 0.031s, Window FW/BW Total: 0.124s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.160s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 032, Loss: 3.3473, Train Time: 0.161s, CPU->GPU Time: 0.040s, Window FW/BW Avg: 0.030s, Window FW/BW Total: 0.121s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.161s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 033, Loss: 3.3137, Train Time: 0.166s, CPU->GPU Time: 0.038s, Window FW/BW Avg: 0.032s, Window FW/BW Total: 0.128s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.166s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 034, Loss: 3.2809, Train Time: 0.159s, CPU->GPU Time: 0.036s, Window FW/BW Avg: 0.031s, Window FW/BW Total: 0.122s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.159s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 035, Loss: 3.2495, Train Time: 0.163s, CPU->GPU Time: 0.038s, Window FW/BW Avg: 0.031s, Window FW/BW Total: 0.125s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.163s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 036, Loss: 3.2200, Train Time: 0.158s, CPU->GPU Time: 0.036s, Window FW/BW Avg: 0.030s, Window FW/BW Total: 0.122s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.158s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 037, Loss: 3.1930, Train Time: 0.164s, CPU->GPU Time: 0.036s, Window FW/BW Avg: 0.032s, Window FW/BW Total: 0.128s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.164s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 038, Loss: 3.1687, Train Time: 0.157s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.030s, Window FW/BW Total: 0.120s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.157s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 039, Loss: 3.1472, Train Time: 0.166s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.032s, Window FW/BW Total: 0.129s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.166s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 040, Loss: 3.1288, Train Time: 0.167s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.032s, Window FW/BW Total: 0.130s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.167s
+------------------------------------------------------------------------------------
+epoch 40: lr = 9.35e-05
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Epoch: 040, train_acc: 12.40802%, valid_acc: 12.27215%, test_acc: 12.59100%, samples(train/valid/test)=(128691/42682/42721)
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+------------------------------------------------------------------------------------
+Epoch: 041, Loss: 3.1133, Train Time: 0.191s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.039s, Window FW/BW Total: 0.154s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.191s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 042, Loss: 3.1005, Train Time: 0.164s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.032s, Window FW/BW Total: 0.128s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.164s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 043, Loss: 3.0901, Train Time: 0.182s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.036s, Window FW/BW Total: 0.145s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.182s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 044, Loss: 3.0818, Train Time: 0.156s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.030s, Window FW/BW Total: 0.119s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.156s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 045, Loss: 3.0753, Train Time: 0.168s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.033s, Window FW/BW Total: 0.131s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.168s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 046, Loss: 3.0702, Train Time: 0.155s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.030s, Window FW/BW Total: 0.118s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.155s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 047, Loss: 3.0661, Train Time: 0.169s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.033s, Window FW/BW Total: 0.132s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.169s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 048, Loss: 3.0628, Train Time: 0.168s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.033s, Window FW/BW Total: 0.131s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.168s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 049, Loss: 3.0601, Train Time: 0.162s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.031s, Window FW/BW Total: 0.125s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.162s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 050, Loss: 3.0578, Train Time: 0.178s, CPU->GPU Time: 0.040s, Window FW/BW Avg: 0.034s, Window FW/BW Total: 0.138s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.178s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 051, Loss: 3.0557, Train Time: 0.156s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.030s, Window FW/BW Total: 0.119s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.156s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 052, Loss: 3.0537, Train Time: 0.170s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.033s, Window FW/BW Total: 0.133s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.170s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 053, Loss: 3.0518, Train Time: 0.193s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.039s, Window FW/BW Total: 0.156s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.193s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 054, Loss: 3.0500, Train Time: 0.169s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.033s, Window FW/BW Total: 0.132s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.169s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 055, Loss: 3.0480, Train Time: 0.173s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.034s, Window FW/BW Total: 0.136s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.173s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 056, Loss: 3.0460, Train Time: 0.159s, CPU->GPU Time: 0.036s, Window FW/BW Avg: 0.031s, Window FW/BW Total: 0.122s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.159s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 057, Loss: 3.0437, Train Time: 0.165s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.032s, Window FW/BW Total: 0.128s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.165s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 058, Loss: 3.0410, Train Time: 0.180s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.036s, Window FW/BW Total: 0.143s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.180s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 059, Loss: 3.0379, Train Time: 0.182s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.036s, Window FW/BW Total: 0.145s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.182s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 060, Loss: 3.0337, Train Time: 0.161s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.031s, Window FW/BW Total: 0.124s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.161s
+------------------------------------------------------------------------------------
+epoch 60: lr = 8.94e-05
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+Epoch: 060, train_acc: 14.96142%, valid_acc: 15.19376%, test_acc: 14.92943%, samples(train/valid/test)=(128691/42682/42721)
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+------------------------------------------------------------------------------------
+Epoch: 061, Loss: 3.0276, Train Time: 0.177s, CPU->GPU Time: 0.040s, Window FW/BW Avg: 0.034s, Window FW/BW Total: 0.137s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.177s
+------------------------------------------------------------------------------------
+------------------------------------------------------------------------------------
+Epoch: 062, Loss: 3.0052, Train Time: 0.154s, CPU->GPU Time: 0.037s, Window FW/BW Avg: 0.029s, Window FW/BW Total: 0.117s, Windows: 4, Max Window Steps: 4
+Training epoch time: 0.154s
+------------------------------------------------------------------------------------
+[2026-04-17 13:36:52,083] torch.distributed.elastic.agent.server.api: [WARNING] Received Signals.SIGINT death signal, shutting down workers
+[2026-04-17 13:36:52,083] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3088824 closing signal SIGINT
+[2026-04-17 13:36:52,084] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3088835 closing signal SIGINT
+[2026-04-17 13:36:52,084] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3088843 closing signal SIGINT
+[2026-04-17 13:36:52,084] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3088853 closing signal SIGINT
+
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/main_sp_node_level_ppr.py", line 262, in <module>
+    main()
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/main_sp_node_level_ppr.py", line 196, in main
+    loss_mean,scores_by_pid,updated_kv_cache,time_stats = train_epoch(args,model,local_partition_ids,local_partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/core/node_level_pipeline/train_eval.py", line 288, in train_epoch
+    loss.backward()
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/_tensor.py", line 492, in backward
+    torch.autograd.backward(
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/autograd/__init__.py", line 251, in backward
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/main_sp_node_level_ppr.py", line 262, in <module>
+    main()
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/main_sp_node_level_ppr.py", line 196, in main
+    loss_mean,scores_by_pid,updated_kv_cache,time_stats = train_epoch(args,model,local_partition_ids,local_partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/core/node_level_pipeline/train_eval.py", line 288, in train_epoch
+    loss.backward()
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/_tensor.py", line 492, in backward
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/main_sp_node_level_ppr.py", line 262, in <module>
+    torch.autograd.backward(
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/autograd/__init__.py", line 251, in backward
+    main()
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/main_sp_node_level_ppr.py", line 196, in main
+    loss_mean,scores_by_pid,updated_kv_cache,time_stats = train_epoch(args,model,local_partition_ids,local_partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
+  File "/home/hdd2/pengyt/project/yangmy/torchgt_npu/NeutronGT/core/node_level_pipeline/train_eval.py", line 288, in train_epoch
+    loss.backward()
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/_tensor.py", line 492, in backward
+    torch.autograd.backward(
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/autograd/__init__.py", line 251, in backward
+        Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward passVariable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+
+KeyboardInterruptKeyboardInterrupt
+    Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+
+KeyboardInterrupt
+[2026-04-17 13:36:52,385] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3088824 closing signal SIGTERM
+[2026-04-17 13:36:52,386] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3088835 closing signal SIGTERM
+[2026-04-17 13:36:52,386] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3088843 closing signal SIGTERM
+[2026-04-17 13:36:52,386] torch.distributed.elastic.multiprocessing.api: [WARNING] Sending process 3088853 closing signal SIGTERM
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 736, in run
+    result = self._invoke_run(role)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 877, in _invoke_run
+    time.sleep(monitor_interval)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 62, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 3081854 got signal: 2
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/bin/torchrun", line 33, in <module>
+    sys.exit(load_entry_point('torch==2.1.2', 'console_scripts', 'torchrun')())
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/errors/__init__.py", line 346, in wrapper
+    return f(*args, **kwargs)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/run.py", line 806, in main
+    run(args)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/run.py", line 797, in run
+    elastic_launch(
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 134, in __call__
+    return launch_agent(self._config, self._entrypoint, list(args))
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/launcher/api.py", line 255, in launch_agent
+    result = agent.run()
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/metrics/api.py", line 124, in wrapper
+    result = f(*args, **kwargs)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/api.py", line 743, in run
+    self._shutdown(e.sigval)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/agent/server/local_elastic_agent.py", line 289, in _shutdown
+    self._pcontext.close(death_sig)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 331, in close
+    self._close(death_sig=death_sig, timeout=timeout)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 713, in _close
+    handler.proc.wait(time_to_wait)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/subprocess.py", line 1209, in wait
+    return self._wait(timeout=timeout)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/subprocess.py", line 1953, in _wait
+    time.sleep(delay)
+  File "/home/hdd2/pengyt/softwares/miniconda/envs/gt/lib/python3.10/site-packages/torch/distributed/elastic/multiprocessing/api.py", line 62, in _terminate_process_handler
+    raise SignalException(f"Process {os.getpid()} got signal: {sigval}", sigval=sigval)
+torch.distributed.elastic.multiprocessing.api.SignalException: Process 3081854 got signal: 2
