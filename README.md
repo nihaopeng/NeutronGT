@@ -85,7 +85,7 @@ Epoch: 006, Loss: 3.6886, Epoch Time: 0.173s, Full Epoch Time: 5.396s, Batch Pre
 ```
 
 可以观察baseline的实验效果
-![alt text](https://github.com/nihaopeng/NeutronGT/raw/main/docs/image.png)
+![alt text](https://github.com/nihaopeng/NeutronGT/raw/main/notes/image.png)
 
 
 # NeutronGT OverAll performance
@@ -149,7 +149,7 @@ bash ./scripts/run_NeutronGT.sh 0,1,2,3  --arxiv --GT
 ```
 
 可以得到 NeutronGT 的实验效果如图
-![alt text](https://github.com/nihaopeng/NeutronGT/raw/main/docs/image-1.png)
+![alt text](https://github.com/nihaopeng/NeutronGT/raw/main/notes/image-1.png)
 输出类似
 
 
@@ -233,7 +233,7 @@ bash ./scripts/run_ablation_1.sh 0,1,2,3  --arxiv --GPH_Slim
 ```
 
 在 baseline 文件夹中，测试 full attention ，seq_len = 16000的配置。即可得到消融实验中Baseline所代表的效果
-![alt text](https://github.com/nihaopeng/NeutronGT/raw/main/docs/image-2.png)
+![alt text](https://github.com/nihaopeng/NeutronGT/raw/main/notes/image-2.png)
 
 
 
@@ -248,7 +248,7 @@ cd ../NeutronGT
 bash ./scripts/run_ablation_2.sh 0,1,2,3  --arxiv --GPH_Slim 
 ```
 
-![alt text](https://github.com/nihaopeng/NeutronGT/raw/main/docs/image-3.png)
+![alt text](https://github.com/nihaopeng/NeutronGT/raw/main/notes/image-3.png)
 
 
 
@@ -262,7 +262,7 @@ bash ./scripts/run_ablation_2.sh 0,1,2,3  --arxiv --GPH_Slim
 bash ./scripts/run_ablation_3.sh 0,1,2,3  --arxiv --GPH_Slim  
 ```
 
-![alt text](https://github.com/nihaopeng/NeutronGT/raw/main/docs/image-4.png)
+![alt text](https://github.com/nihaopeng/NeutronGT/raw/main/notes/image-4.png)
 
 
 
@@ -282,6 +282,6 @@ bash ./scripts/run_ablation_3.sh 0,1,2,3  --arxiv --GPH_Slim
 ```shell
 bash ./scripts/run_NeutronGT.sh 0,1,2,3  --arxiv --GPH_Large
 ```
-![alt text](https://github.com/nihaopeng/NeutronGT/raw/main/docs/image-5.png)
+![alt text](https://github.com/nihaopeng/NeutronGT/raw/main/notes/image-5.png)
 
 即可看到 arxiv 数据集的预处理的两阶段的开销和训练耗时
