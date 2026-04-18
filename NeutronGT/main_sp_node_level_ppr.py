@@ -21,6 +21,7 @@ from utils.lr import PolynomialDecayLR
 from utils.parser_node_level import parser_add_main_args
 import utils.logger as logger
 import utils.vis as vis
+from core.metisPartition import weightMetis_keepParent
 from core.node_level_pipeline import (
     StructInfo,
     broadcast_window_state,
@@ -191,6 +192,12 @@ def main():
             print(f"No checkpoint found under {ckpt_dir}, starting training from scratch.")
 
     detector = LossStagnationDetector(cooldown=0)
+    
+    if args.gpu_utilization_monitoring and args.rank == 0:
+        from utils.gpu_utilization import log_gpu_usage
+        import threading
+        gpu_monitor_thread = threading.Thread(target=log_gpu_usage, kwargs={'duration_seconds': 3600, 'interval_seconds': 0.1})
+        gpu_monitor_thread.start()
     
     for epoch in range(start_epoch, args.epochs):
         loss_mean,scores_by_pid,updated_kv_cache,time_stats = train_epoch(args,model,local_partition_ids,local_partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,

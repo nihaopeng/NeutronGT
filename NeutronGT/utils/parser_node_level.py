@@ -15,6 +15,9 @@ def parser_add_main_args(parser):
                         help='高分邻居保留比例 (例如 0.1 代表只保留 Top 10% 的高分邻居)')
 
     
+    parser.add_argument('--gpu_utilization_monitoring', type=bool, default=False, 
+                        help='是否开启GPU利用率监控')
+    
     # main args
     parser.add_argument('--device', type=int, default=0, help='device id')
     parser.add_argument('--dataset_dir', type=str, default='./dataset/')
