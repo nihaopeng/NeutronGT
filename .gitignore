@@ -38,3 +38,6 @@ data/*
 old_logs/
 old_logs/*
 run.sh
+
+
+NeutronGT_logs/

@@ -10,7 +10,7 @@ def log_gpu_usage(duration_seconds=1000, interval_seconds=0.1):
     device_name = nvmlDeviceGetName(handle)
     
     log_file = "gpu_utilization.log"
-    print(f"开始记录 {device_name} 的利用率，持续 {duration_seconds} 秒...")
+    print(f"start to record {device_name}，maintain {duration_seconds} secs...")
 
     with open(log_file, "a", encoding="utf-8") as f:
         for i in range(duration_seconds):
