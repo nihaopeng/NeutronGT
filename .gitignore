@@ -20,3 +20,5 @@ third_party/*
 .csv
 .CSV
 *.gz
+
+exp_vis/*.pdf

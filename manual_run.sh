@@ -3,7 +3,7 @@ export CUDA_PATH=/usr/local/cuda-12.1
 export PATH=$CUDA_HOME/bin:$PATH
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port 29652 main_sp_node_level_ppr.py \
+CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 --master_port 29652 main_sp_node_level_ppr.py \
   --dataset $1 \
   --dataset_dir ./dataset/ \
   --model graphormer \
@@ -27,4 +27,5 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port 29652 mai
   --ppr_batch_size 8192 \
   --ppr_iter_topk 5 \
   --distributed-backend nccl \
-  --distributed-timeout-minutes 120
+  --distributed-timeout-minutes 120 \
+  --save_latest_only

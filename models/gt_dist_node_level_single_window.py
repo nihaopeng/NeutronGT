@@ -60,11 +60,11 @@ class CoreAttention(nn.Module):
         # Raw Attn Score        [b, num_head, seq_len, seq_len]
         # attn_bias.            [b, num_head, seq_len, seq_len]
         # ===================================
-        log(f"q:{q.shape},k:{k.shape},v:{v.shape}")
+        # log(f"q:{q.shape},k:{k.shape},v:{v.shape}")
         q = q.transpose(1, 2)                    # [b, num_head, seq_len, atten_size]
         v = v.transpose(1, 2)                    # [b, num_head, seq_len, atten_size]
         k = k.transpose(1, 2).transpose(2, 3)    # [b, num_head, atten_size, seq_len]
-        log(f"transpose->q:{q.shape},k:{k.shape},v:{v.shape}")
+        # log(f"transpose->q:{q.shape},k:{k.shape},v:{v.shape}")
         
         # Scaled Dot-Product Attention.
         # Attention(Q, K, V) = softmax((QK^T)/sqrt(d_k))V
@@ -74,7 +74,7 @@ class CoreAttention(nn.Module):
         
         q = q * self.scale
         x = torch.matmul(q, k)  # [b, num_head, seq_len, seq_len]
-        log(f"x shape:{x.shape}")
+        # log(f"x shape:{x.shape}")
         score = x
         if attn_bias is not None:
             # attn_bias = attn_bias.repeat(1, self.num_heads, 1, 1)
@@ -102,9 +102,9 @@ class CoreAttention(nn.Module):
         x = torch.softmax(x, dim=3)
         x = self.att_dropout(x)
         x = x.matmul(v)  # [b, h, q_len, attn]
-        log(f"x shape:{x.shape}")
+        # log(f"x shape:{x.shape}")
         x = x.transpose(1, 2).contiguous()  # [b, q_len, h, attn]
-        log(f"x shape:{x.shape}")
+        # log(f"x shape:{x.shape}")
         node_scores = torch.abs(score).mean(dim=1).squeeze(0).sum(dim=0)
         return x, node_scores
     
@@ -221,9 +221,9 @@ class CoreAttention(nn.Module):
             x,score = self.full_attention(k, q, v, attn_bias,pruning_mask=pruning_mask,mask=mask)
         
         # [b, s+p, hp]
-        log(f"x:{x.shape}")
+        # log(f"x:{x.shape}")
         x = x.view(batch_size, s_len, -1)
-        log(f"x:{x.shape}")
+        # log(f"x:{x.shape}")
         return x,score
 
 
@@ -287,7 +287,7 @@ class MultiHeadAttention(nn.Module):
         # ==================================
         # core attention computation
         # ==================================
-        log(f"q:{q.shape},k:{k.shape},v:{v.shape}")
+        # log(f"q:{q.shape},k:{k.shape},v:{v.shape}")
         # ======================================= 取消跨设备分head操作，每个设备独立计算自己的窗口。
         x,score = self.local_attn(q, k, v, attn_bias, edge_index, attn_type, mask=mask, pruning_mask=pruning_mask)
         # x,score = self.dist_attn(q, k, v, attn_bias, edge_index, attn_type,pruning_mask=pruning_mask,mask=mask)
@@ -297,7 +297,7 @@ class MultiHeadAttention(nn.Module):
         # =================
 
         # [b, seq_len, h]
-        log(f"x shape:{x.shape}")
+        # log(f"x shape:{x.shape}")
         assert x.size() == orig_q_size
         return x,score,[compute_cache_k,compute_cache_v]# 对分数的绝对值求和，考虑正负数都起作用
 
@@ -607,7 +607,7 @@ class GT_SW(nn.Module):
         score_spe = []
         new_kv_cache = []
         for i,enc_layer in enumerate(self.layers):
-            log(f"output shape:{output.shape}")
+            # log(f"output shape:{output.shape}")
             # 处理KV cache传递
             layer_kv_cache = None
             if dup_nodes_kv_cache is not None:
@@ -656,9 +656,9 @@ class GT_SW(nn.Module):
         # t6 = time.time()
         # print(f"cost time6:{t6-t5:.3f}")
         
-        log(f"final output:{output.shape}")
+        # log(f"final output:{output.shape}")
         output = self.MLP_layer(output[0, :, :])
-        log(f"final output:{output.shape}")
+        # log(f"final output:{output.shape}")
         
         # 构建新的KV cache结构
         updated_kv_cache = dup_nodes_kv_cache

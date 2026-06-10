@@ -300,9 +300,9 @@ class weightMetis_keepParent:
         从原始图中提取由parent_nodes构成的子图，并返回CSR邻接结构和对应的边权列表。
         """
         if len(parent_nodes) == 0:
-            return pymetis.CSRAdjacency(xadj=[0], adjncy=[]), []
+            return pymetis.CSRAdjacency(adj_starts=[0], adjacent=[]), []
         if len(parent_nodes) == 1:
-            return pymetis.CSRAdjacency(xadj=[0, 0], adjncy=[]), []
+            return pymetis.CSRAdjacency(adj_starts=[0, 0], adjacent=[]), []
         xadj, adjncy = self.csr_adjacency.adj_starts, self.csr_adjacency.adjacent
         eweights = self.eweights
         parent_set = set(parent_nodes)
