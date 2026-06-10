@@ -138,7 +138,7 @@ class weightMetis_keepParent:
         for parent_id, parent_group in enumerate(self.child_partitions):
             expanded_group = []
             for child_idx, part in enumerate(parent_group):
-                halo_extended = torch.tensor([])
+                halo_extended = torch.empty((0,), dtype=torch.long)
                 # halo: partition包括原本partition的节点和邻居节点，根据PPR强度排序取 top-k% 的外部相关节点并
                 related_merge_start = time.time()
                 halo_extended = self._merge_related_nodes(part,related_nodes_topk_rate)
@@ -180,7 +180,12 @@ class weightMetis_keepParent:
         self.child_partitions = expanded_child_partitions
         expanded_edge_concat_start = time.time()
         # concat 新边和原始边
-        self.global_edge_index = torch.cat([self.global_edge_index,torch.tensor(self.expanded_edge)],dim=1)
+        expanded_edge_tensor = torch.tensor(
+            self.expanded_edge,
+            dtype=self.global_edge_index.dtype,
+            device=self.global_edge_index.device,
+        )
+        self.global_edge_index = torch.cat([self.global_edge_index, expanded_edge_tensor], dim=1)
         self.timing_stats['expanded_edge_concat_time'] = time.time() - expanded_edge_concat_start
         # TODO:rerange of partition for kv cache √
         # ---------------------------------- 统计窗口重复节点---------------------------------------
@@ -579,48 +584,26 @@ class weightMetis_keepParent:
         self,
         partition: torch.Tensor,
         total_add_count: int,
-        connect_prob: float = 0.01,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # ABLATION CHANGE: strictly match the final number of nodes added to the
         # window after the original two strategies are merged and deduplicated.
+        # Do not add synthetic virtual edges in ablation modes; keep only original graph edges.
         random_added = self._sample_random_external_nodes(partition, total_add_count)
         merged = torch.unique(torch.cat([partition.long(), random_added], dim=0))
-
-        virtual_edges = []
-        for new_node in random_added.tolist():
-            for old_node in partition.tolist():
-                if torch.rand(1).item() < connect_prob:
-                    virtual_edges.append([old_node, new_node])
-                    virtual_edges.append([new_node, old_node])
-        if virtual_edges:
-            virtual_edge_index = torch.tensor(virtual_edges, dtype=torch.long).t()
-        else:
-            virtual_edge_index = torch.empty((2, 0), dtype=torch.long)
-        return merged, virtual_edge_index
+        return merged, torch.empty((2, 0), dtype=torch.long)
 
     def _merge_high_degree_nodes_with_matched_total_count(
         self,
         partition: torch.Tensor,
         total_add_count: int,
-        connect_prob: float = 0.01,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # ABLATION CHANGE: strictly match the final number of nodes added to the
         # window after the original two strategies are merged and deduplicated,
         # but choose high-degree external nodes instead of random nodes.
+        # Do not add synthetic virtual edges in ablation modes; keep only original graph edges.
         added_nodes = self._select_high_degree_external_nodes(partition, total_add_count)
         merged = torch.unique(torch.cat([partition.long(), added_nodes], dim=0))
-
-        virtual_edges = []
-        for new_node in added_nodes.tolist():
-            for old_node in partition.tolist():
-                if torch.rand(1).item() < connect_prob:
-                    virtual_edges.append([old_node, new_node])
-                    virtual_edges.append([new_node, old_node])
-        if virtual_edges:
-            virtual_edge_index = torch.tensor(virtual_edges, dtype=torch.long).t()
-        else:
-            virtual_edge_index = torch.empty((2, 0), dtype=torch.long)
-        return merged, virtual_edge_index
+        return merged, torch.empty((2, 0), dtype=torch.long)
 
 
 

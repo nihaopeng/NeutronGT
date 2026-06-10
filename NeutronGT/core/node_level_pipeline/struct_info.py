@@ -205,6 +205,11 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
     # sorted_ppr_matrix = (edge_index, edge_value): ([[src,src...src],[dest,dest,...dest]],[val,val...val])
     sync_device(device)
     local_ppr_start = time.time()
+    print(
+        f"rank {args.rank}: start local PPR, source_range=({source_start}, {source_end}), "
+        f"backend={args.ppr_backend}, topk={topk}",
+        flush=True,
+    )
     local_sorted_ppr_matrix = personal_pagerank(
         edge_index,
         args.ppr_alpha,
@@ -223,6 +228,11 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
     sync_device(device)
     local_ppr_time = time.time() - local_ppr_start
     local_edge_count = int(local_sorted_ppr_matrix[1].numel())
+    print(
+        f"rank {args.rank}: finish local PPR, local_edge_count={local_edge_count}, "
+        f"time={local_ppr_time:.3f}s",
+        flush=True,
+    )
 
     sorted_ppr_matrix = local_sorted_ppr_matrix
     ppr_time = local_ppr_time
@@ -230,10 +240,12 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
     if distributed_appnp_ppr:
         sync_device(device)
         gather_start = time.time()
+        print(f"rank {args.rank}: enter PPR gather", flush=True)
         # 把多个GPU并行计算的 PPR 数据 gather 在 rank 0 CPU (concat方式聚合为一张大图)
         sorted_ppr_matrix = gather_ppr_shards(local_sorted_ppr_matrix, rank=args.rank, world_size=world_size)
         sync_device(device)
         gather_time = time.time() - gather_start
+        print(f"rank {args.rank}: finish PPR gather, time={gather_time:.3f}s", flush=True)
         if args.rank == 0 and sorted_ppr_matrix is not None:
             ppr_time += gather_time
         if args.rank != 0:
@@ -251,6 +263,11 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
     adj_build_time = time.time() - adj_build_start
     # -------------------------- 开始生成窗口 ----------------------------
     partition_build_start = time.time()
+    if args.rank == 0:
+        print(
+            f"rank {args.rank}: start window construction, ppr_edges={int(sorted_ppr_matrix[1].numel())}",
+            flush=True,
+        )
     wm = weightMetis_keepParent(
         csr_adjacency=csr_adjacency,
         eweights=eweights,
@@ -265,6 +282,12 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
         high_degree_replace_window_nodes=getattr(args, 'high_degree_replace_window_nodes', 0),
     )
     partition_build_time = time.time() - partition_build_start
+    if args.rank == 0:
+        print(
+            f"rank {args.rank}: finish window construction, total_windows={len(wm.partitioned_results)}, "
+            f"time={partition_build_time:.3f}s",
+            flush=True,
+        )
 
     # Stage 1: PPR 到基础 Metis 划分完成。
     stage1_time = (

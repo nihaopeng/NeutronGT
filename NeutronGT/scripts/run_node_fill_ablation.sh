@@ -178,7 +178,7 @@ CUDA_VISIBLE_DEVICES="${DEVICES}" torchrun \
   --num_heads "${NUM_HEADS}" \
   --epochs "${EPOCHS}" \
   --use_cache 1 \
-  --use_preprocess_cache 1 \
+  --use_preprocess_cache 0 \
   --n_parts "${NPARTS}" \
   --related_nodes_topk_rate "${RELATED_TOPK}" \
   --ppr_backend appnp \
