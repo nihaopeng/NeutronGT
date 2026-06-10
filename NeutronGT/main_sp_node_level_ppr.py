@@ -47,7 +47,7 @@ def main():
     args = parser.parse_args()
 
     vis.vis_dir = args.vis_dir
-    
+    # -----------初始化进程通信组--------------
     initialize_distributed(args)
     device = f'cuda:{torch.cuda.current_device()}' 
     
@@ -66,6 +66,7 @@ def main():
         if args.save_checkpoint or args.resume_latest:
             ensure_checkpoint_dir(args)
     
+    # ----------------------加载数据，兼容 coo 格式 和 csr 格式 -----------------
     feature = torch.load(args.dataset_dir + args.dataset + '/x.pt')
     y = torch.load(args.dataset_dir + args.dataset + '/y.pt')
     edge_csr_data = load_optional_edge_csr(args.dataset_dir, args.dataset) if args.ppr_backend == 'appnp' else None
@@ -101,7 +102,7 @@ def main():
             print('APPNP backend will use edge_index_csr.pt')
         print(f"Train nodes: {split_idx['train'].shape[0]}, Val nodes: {split_idx['valid'].shape[0]}, Test nodes: {split_idx['test'].shape[0]}") 
         print(f"Training iters: {split_idx['train'].size(0) // args.seq_len + 1}, Val iters: {split_idx['valid'].size(0) // args.seq_len + 1}, Test iters: {split_idx['test'].size(0) // args.seq_len + 1}")
-    
+    # ------------- torchGT 遗留，主要是做序列并行的划分 ----------------
     seq_parallel_world_size = get_sequence_parallel_world_size() if sequence_parallel_is_initialized() else 1
 
     train_idx = split_idx['train']
@@ -136,6 +137,9 @@ def main():
     set_last_batch_global_token_indices(global_token_indices_last_batch)
 
     sync_device(device)
+
+
+    # ------------------ 对图数据构建窗口 -------------------
     graph_preprocess_start = time.time()
     structInfo:StructInfo = build_graph_struct_info(
             args,N,edge_index,feature,seq_parallel_world_size,device,
@@ -146,7 +150,7 @@ def main():
         )
     sync_device(device)
     wm:weightMetis_keepParent = structInfo.wm
-
+    # ----------------- 分配窗口到各个GPU ---------------------
     broadcast_window_state(args, structInfo, feature, device)
     sync_device(device)
 
@@ -157,7 +161,7 @@ def main():
         if args.rank == 0:
             print("Preprocess-only mode enabled, exiting before model build/training.")
         return
-
+    # ------------------- 初始化模型，优化器 ----------------------
     model = build_model(args,feature,device,y,graph_in_degree=structInfo.graph_in_degree,graph_out_degree=structInfo.graph_out_degree)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.peak_lr, weight_decay=args.weight_decay)
@@ -175,7 +179,7 @@ def main():
 
     if seq_parallel_world_size > 1:
         sync_params_and_buffers(model)
-
+    # ------------------ 加载 ckpt.pt 断点文件 ----------------------
     resume_state = load_training_checkpoint(args, model, optimizer, lr_scheduler, device)
     start_epoch = resume_state.start_epoch
     loss_mean_list = resume_state.loss_mean_list or []
@@ -191,7 +195,7 @@ def main():
             print(f"No checkpoint found under {ckpt_dir}, starting training from scratch.")
 
     detector = LossStagnationDetector(cooldown=0)
-    
+    # ------------------- main training loop 实现窗口并行训练----------------------    
     for epoch in range(start_epoch, args.epochs):
         loss_mean,scores_by_pid,updated_kv_cache,time_stats = train_epoch(args,model,local_partition_ids,local_partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
                     epoch=epoch,
@@ -215,6 +219,8 @@ def main():
                     best_test = test_acc
         
         loss_mean_list.append(loss_mean)
+
+        # --------------------------- 动态窗口调整(未来计划实现) ---------------------------
         if args.use_cache==0 and detector(loss_mean_list):
             if seq_parallel_world_size > 1:
                 dist.barrier()
@@ -238,7 +244,7 @@ def main():
                 dist.barrier()
             sync_device(device)
             _ = time.time() - window_adjust_start
-
+        # ------------------------ save model ckpt ----------------------------
         if args.save_checkpoint:
             if args.rank == 0:
                 payload = build_checkpoint_payload(

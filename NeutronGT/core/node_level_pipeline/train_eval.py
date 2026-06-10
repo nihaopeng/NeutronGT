@@ -208,6 +208,7 @@ def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitio
     window_forward_backward_total_time = 0.0
     window_count = 0
 
+    # 多卡上窗口数量不一定一致，在这里对齐为最大的
     local_window_count = len(local_partitions)
     max_window_steps = local_window_count
     if world_size > 1:
@@ -221,6 +222,8 @@ def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitio
     epoch_train_start = time.time()
 
     kv_cache_per_partition = None
+
+    # 当前 rank 的每个窗口，都维护一份自己的重复节点 KV cache
     if args.use_cache:
         kv_cache_per_partition = [None] * len(local_partitions)
 
@@ -233,13 +236,17 @@ def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitio
             sync_device(device)
             cpu_to_gpu_start = time.time()
             if args.use_cache:
+                # 窗口内重复节点的索引，避免重复 CPU-GPU copy
                 dup_index_i = local_dup_indices[local_i]
                 start_of_no_dup = int(dup_index_i.numel())
+                # 对于非重复节点，直接从 feature[idx_i[start_of_no_dup:]] 搬到 GPU
                 x_i = feature[idx_i[start_of_no_dup:]].to(device)
                 if start_of_no_dup > 0:
+                    # 拼成完整的 x_i ，reuse的cache在前，一般的在后
                     x_i = torch.cat([local_dup_feature_cache[dup_index_i], x_i], dim=0)
             else:
                 x_i = feature[idx_i].to(device)
+
             attn_bias, in_degree, out_degree = None, None, None
             edge_index_i, edge_input_i, mask, spatial_pos_i = local_sub_edge_index_list[local_i].to(device), None, None, None
             if args.struct_enc == "True":
@@ -249,9 +256,12 @@ def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitio
                 assert len(idx_i) == spatial_pos_i.shape[0], f"rank {args.rank} spatial_pos mismatch for global_pid={global_pid}"
             sync_device(device)
             cpu_to_gpu_total_time += time.time() - cpu_to_gpu_start
-
+            
+            # 取这个窗口对应的 KV cache，如果这个窗口上一次已经保存过重复节点的 KV，就把那份拿出来继续用
             current_kv_cache = kv_cache_per_partition[local_i] if kv_cache_per_partition is not None else None
 
+
+            # forward
             sync_device(device)
             window_train_start = time.time()
             out_i, score_agg, score_spe, updated_kv_cache = model(
@@ -268,10 +278,13 @@ def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitio
                 part_id=global_pid
             )
 
+            # 产生新的 KV Cache，为窗口进行更新
             if kv_cache_per_partition is not None and updated_kv_cache is not None:
                 kv_cache_per_partition[local_i] = updated_kv_cache
 
+            # 保存当前窗口的 attention score，供动态调窗(待完善)
             scores_by_pid[global_pid] = score_spe[args.n_layers - 1]
+            # 对 train set 的 node 计算 loss，dummy step构建 0.0 loss。并反向
             loss = F.nll_loss(out_i, y[idx_i].to(device).long(), reduction='none')
             mask_train = torch.isin(idx_i.to(device), split_idx["train"].to(device))
             if mask_train.any():

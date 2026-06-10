@@ -88,6 +88,17 @@ def parser_add_main_args(parser):
                        help='number of graph partitions/windows used during Metis partitioning')
     parser.add_argument('--related_nodes_topk_rate', type=int, default=2,
                        help='top-k percent of external related neighbors merged into each partition')
+    # ABLATION CHANGE: replace the two node-expansion strategies with random node supplementation
+    # while preserving the same per-window supplementation counts.
+    parser.add_argument('--random_replace_window_nodes', type=int, default=0, choices=[0, 1],
+                       help='when set to 1, count the original two window node expansion strategies but replace their added nodes with random external nodes')
+    # ABLATION CHANGE: disable all node supplementation and keep only the core window.
+    parser.add_argument('--disable_window_node_expansion', type=int, default=0, choices=[0, 1],
+                       help='when set to 1, disable both node supplementation strategies and keep only the original partition nodes')
+    # ABLATION CHANGE: replace the two node-expansion strategies with high-degree node supplementation
+    # while preserving the same final per-window supplementation count.
+    parser.add_argument('--high_degree_replace_window_nodes', type=int, default=0, choices=[0, 1],
+                       help='when set to 1, count the original two window node expansion strategies but replace their added nodes with high-degree external nodes')
     parser.add_argument('--preprocess_only', type=int, default=0, choices=[0, 1],
                        help='when set to 1, stop after graph/window preprocessing and exit before training')
     parser.add_argument('--use_preprocess_cache', type=int, default=1, choices=[0, 1],

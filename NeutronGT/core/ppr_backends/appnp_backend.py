@@ -161,9 +161,10 @@ def _build_transition_csr_values(graph_rowptr: torch.Tensor, graph_col: torch.Te
         return torch.empty((0,), dtype=torch.float32, device=graph_rowptr.device)
     return (1.0 / degree[src]).to(torch.float32)
 
-
+# 进行SpMSpM计算
 def _cusparse_spgemm_iteration(state_rowptr, state_col, state_values, transition_rowptr, transition_col, transition_values, teleport_rows, teleport_cols, teleport_values, num_rows, num_nodes, alpha, iter_topk, timing_stats=None):
     step_start = time.perf_counter()
+    # 当前 source 分布 state乘上图的转移矩阵 transition，得到沿图走一步后的新分布，再乘 (1 - alpha)
     prop_rowptr, prop_col, prop_values = csr_spgemm(
         state_rowptr,
         state_col,
@@ -176,6 +177,7 @@ def _cusparse_spgemm_iteration(state_rowptr, state_col, state_values, transition
     if timing_stats is not None:
         timing_stats["spmm"] += time.perf_counter() - step_start
 
+    # 把传播结果转成 COO 行列值形式，再和 teleport 项拼接，再做聚合，把重复 (row, col) 项合并
     step_start = time.perf_counter()
     prop_rows = _rowptr_to_rows(prop_rowptr)
     merged_rows = torch.cat([prop_rows, teleport_rows], dim=0)
@@ -219,6 +221,7 @@ def personal_pagerank_appnp(
     batch_size = max(1, int(batch_size))
     num_iterations = max(1, int(num_iterations))
 
+    # -----------------如果不是csr，转成csr-----------------
     if csr_data is not None:
         graph_rowptr, graph_col, degree, num_nodes = _load_csr_graph(csr_data, device=device, num_nodes=num_nodes)
     else:
@@ -231,11 +234,15 @@ def personal_pagerank_appnp(
         empty_value = torch.empty((0,), dtype=torch.float32, device=device)
         return empty_index, empty_value
 
+
+    # ---------------- 构造随机游走矩阵 --------------------
     _ensure_cusparse_indexable(num_nodes, graph_rowptr, graph_col, "graph_csr")
     transition_rowptr = graph_rowptr
     transition_col = graph_col
+    # 进行归一化，把邻接矩阵变成随机游走概率
     transition_values = _build_transition_csr_values(graph_rowptr, graph_col, degree)
 
+    # --------------------- 一批 source node 的起止位置 ----------------------
     source_start = 0 if source_start is None else max(0, min(int(source_start), num_nodes))
     source_end = num_nodes if source_end is None else max(source_start, min(int(source_end), num_nodes))
     if source_start >= source_end:
@@ -255,16 +262,19 @@ def personal_pagerank_appnp(
 
     edge_index_batches = []
     edge_value_batches = []
+    
+
+    # --------------------- 循环计算每一批source node ----------------------
 
     for start in range(source_start, source_end, batch_size):
         end = min(start + batch_size, source_end)
         seed_nodes = torch.arange(start, end, dtype=torch.long, device=device)
         num_rows = seed_nodes.numel()
-
+        # 构建每个 source node 的初始态
         state_rowptr = torch.arange(0, num_rows + 1, dtype=torch.long, device=device)
         state_col = seed_nodes.clone()
         state_values = torch.ones(num_rows, dtype=torch.float32, device=device)
-
+        # 重启项
         teleport_rows = torch.arange(num_rows, dtype=torch.long, device=device)
         teleport_cols = seed_nodes
         teleport_values = torch.full((num_rows,), alpha, dtype=torch.float32, device=device)

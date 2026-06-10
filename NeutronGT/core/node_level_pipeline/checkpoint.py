@@ -16,6 +16,9 @@ _CHECKPOINT_COMPAT_KEYS = (
     'attn_type',
     'n_parts',
     'related_nodes_topk_rate',
+    'random_replace_window_nodes',
+    'disable_window_node_expansion',
+    'high_degree_replace_window_nodes',
     'ppr_topk',
 )
 

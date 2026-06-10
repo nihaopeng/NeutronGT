@@ -146,15 +146,18 @@ class MultiHeadAttention(nn.Module):
         compute_cache_k = None
         compute_cache_v = None
 
+        # 如果还没有kv cache，直接全量计算
         if dup_nodes_kv_cache is None:
             k = compute_cache_k = self.linear_k(x).view(batch_size, -1, self.num_heads, self.att_size)
             v = compute_cache_v = self.linear_v(x).view(batch_size, -1, self.num_heads, self.att_size)
         else:
+            # 当前层的kv cache
             layer_cache = dup_nodes_kv_cache[layer]
             k_cache, v_cache = layer_cache
             dup_nodes_num = k_cache.size(0)
             assert dup_nodes_num <= seq_len, f"Cache size {dup_nodes_num} > input seq_len {seq_len}"
 
+            # 只对没有cache的部分做计算
             x_dynamic = x[:, dup_nodes_num:, :]
             k_dynamic = self.linear_k(x_dynamic).view(batch_size, -1, self.num_heads, self.att_size)
             v_dynamic = self.linear_v(x_dynamic).view(batch_size, -1, self.num_heads, self.att_size)
@@ -162,6 +165,7 @@ class MultiHeadAttention(nn.Module):
             k_cached = k_cache.unsqueeze(0).expand(batch_size, -1, -1, -1)
             v_cached = v_cache.unsqueeze(0).expand(batch_size, -1, -1, -1)
 
+            # 计算后拼回来
             k = torch.cat([k_cached, k_dynamic], dim=1)
             v = torch.cat([v_cached, v_dynamic], dim=1)
             compute_cache_k = k
@@ -344,6 +348,7 @@ class Graphormer(nn.Module):
             )
             score_spe.append(score.detach())
 
+            # 模型 forward 后会拿到本次重新计算出来的完整 compute_cache_k / compute_cache_v
             if compute_cache_k is not None and compute_cache_v is not None:
                 if dup_nodes_kv_cache is not None and layer_kv_cache is not None:
                     dup_nodes_num = 0
@@ -352,6 +357,15 @@ class Graphormer(nn.Module):
                         if k_cache_item is not None:
                             dup_nodes_num = k_cache_item.shape[0]
 
+                    # 把前 dup_nodes_num 个节点的KV cache存起来
+                    # 一份窗口 cache 结构是
+                    # [
+                    #   (k_cache_layer0, v_cache_layer0),
+                    #   (k_cache_layer1, v_cache_layer1),
+                    #   ...
+                    # ]
+                    # 每层里单个 cache tensor shape 是：
+                    # [dup_nodes_num, num_heads, att_size]
                     if dup_nodes_num > 0:
                         k_cache = compute_cache_k[:, :dup_nodes_num, :, :].squeeze(0).detach()
                         v_cache = compute_cache_v[:, :dup_nodes_num, :, :].squeeze(0).detach()

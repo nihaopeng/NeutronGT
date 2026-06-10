@@ -29,7 +29,10 @@ class weightMetis_keepParent:
             n_parts:int,
             related_nodes_topk_rate:int,
             attn_type:str,
-            sorted_ppr_matrix:list[torch.Tensor]                   
+            sorted_ppr_matrix:list[torch.Tensor],
+            random_replace_window_nodes: int = 0,
+            disable_window_node_expansion: int = 0,
+            high_degree_replace_window_nodes: int = 0,
         ) -> None:
         self.attn_type = attn_type
         self.csr_adjacency = csr_adjacency
@@ -38,6 +41,24 @@ class weightMetis_keepParent:
         self.n_parts = n_parts
         self.global_edge_index = edge_index
         self.partition_num_per_parent = n_parts // 2
+        # ABLATION CHANGE: preserve the original supplementation counts but replace
+        # added nodes with random external nodes.
+        self.random_replace_window_nodes = int(random_replace_window_nodes) == 1
+        # ABLATION CHANGE: disable all node expansion and keep only the core window.
+        self.disable_window_node_expansion = int(disable_window_node_expansion) == 1
+        # ABLATION CHANGE: preserve the original supplementation counts but replace
+        # added nodes with high-degree external nodes.
+        self.high_degree_replace_window_nodes = int(high_degree_replace_window_nodes) == 1
+        enabled_ablation_modes = sum([
+            self.random_replace_window_nodes,
+            self.disable_window_node_expansion,
+            self.high_degree_replace_window_nodes,
+        ])
+        if enabled_ablation_modes > 1:
+            raise ValueError(
+                "Only one of random_replace_window_nodes, disable_window_node_expansion, "
+                "high_degree_replace_window_nodes can be enabled at a time."
+            )
         # print(len(torch.arange(0,len(csr_adjacency.adj_starts)-1)))
         # BUG:假设 n 个节点，csr_adjaceny.adj_starts 长度为 num_node + 1，则第一个参数是tensor: [0,1,2,...,num_node]
         # torch.range 已被弃用，改为torch.arange(0,len(csr_adjacency.adj_starts)-1)
@@ -72,21 +93,35 @@ class weightMetis_keepParent:
             'duplicate_rerange_time': 0.0,
             'subgraph_build_time': 0.0,
         }
+
+
+
+
+        # ---------------------  开始划分，这里先形成两个父分区 -----------------------
         partition_build_start = time.time()
         parent_partition_start = time.time()
         self.parent_partition = self.partition(torch.arange(0,len(csr_adjacency.adj_starts)-1),self.csr_adjacency,self.eweights,2)
         self.timing_stats['parent_partition_time'] = time.time() - parent_partition_start
         child_partition_start = time.time()
-        # 对父分区进行再次metis
+        # --------------------- 对父分区进行递归划分，直到得到核心窗口 ----------------------
         for parent_id,parent_partition in enumerate(self.parent_partition):
             csr_adjacency,eweight = self._extract_subgraph_csr_eweight(parent_partition)
             self.child_partitions.append(self.partition(parent_partition,csr_adjacency,eweight,self.partition_num_per_parent))
             # self.child_partitions = [[tensor,tensor,...],[tensor,tensor,...]]
             # TOD:将另一个父分区中特征相似的并入。√
             # TOD:将对外有联系的对端节点合并入分区。√
+
+        # --------------------- 计算核心窗口质心 ---------------------- 
         self.timing_stats['child_partition_time'] = time.time() - child_partition_start
         centroid_build_start = time.time()
         self.child_partition_centroids = []
+        #
+        # self.child_partitions 是：
+        # [
+        # [父分区0的若干子窗口],
+        # [父分区1的若干子窗口]
+        # ]
+        #
         for parent_group in self.child_partitions:
             centroid_group = []
             for part in parent_group:
@@ -97,34 +132,64 @@ class weightMetis_keepParent:
             self.child_partition_centroids.append(centroid_group)
         self.timing_stats['centroid_build_time'] = time.time() - centroid_build_start
 
+
+        # --------------------- 窗口节点补充 ---------------------- 
         expanded_child_partitions = []
         for parent_id, parent_group in enumerate(self.child_partitions):
             expanded_group = []
             for child_idx, part in enumerate(parent_group):
                 halo_extended = torch.tensor([])
-                # halo: partition包括原本partition的节点和邻居节点
+                # halo: partition包括原本partition的节点和邻居节点，根据PPR强度排序取 top-k% 的外部相关节点并
                 related_merge_start = time.time()
                 halo_extended = self._merge_related_nodes(part,related_nodes_topk_rate)
                 self.timing_stats['related_nodes_merge_time'] += time.time() - related_merge_start
-                # feature: partition包括原本的partition的节点和对侧最相似窗口中采样的节点
+                # feature: partition包括原本的partition的节点和对侧最相似窗口中采样的节点，从另一个父分区中找质心最相似的核心窗口，采样少量节点并入当前窗口
                 feature_merge_start = time.time()
                 feature_extended,expanded_edge_p = self._merge_feature_sim(part.long(), n_nodes=1, current_parent_id=parent_id, current_child_idx=child_idx)
                 self.timing_stats['feature_sim_merge_time'] += time.time() - feature_merge_start
-                merged = torch.cat([halo_extended, feature_extended], dim=0)
-                merged = torch.unique(merged)  # 自动排序 + 去重
+                if self.disable_window_node_expansion:
+                    # ABLATION CHANGE: keep only the core partition without any supplementation.
+                    merged = part.long()
+                    expanded_edge_p = torch.empty((2, 0), dtype=torch.long)
+                elif self.random_replace_window_nodes:
+                    # ABLATION CHANGE: match the final number of added nodes after the
+                    # original two strategies are unioned and deduplicated.
+                    merged_original = torch.unique(torch.cat([halo_extended, feature_extended], dim=0))
+                    total_add_count = int((~torch.isin(merged_original, part)).sum().item())
+                    merged, expanded_edge_p = self._merge_random_nodes_with_matched_total_count(
+                        part.long(),
+                        total_add_count=total_add_count,
+                    )
+                elif self.high_degree_replace_window_nodes:
+                    # ABLATION CHANGE: match the final number of added nodes after the
+                    # original two strategies are unioned and deduplicated, but use
+                    # high-degree external nodes instead of the original selection.
+                    merged_original = torch.unique(torch.cat([halo_extended, feature_extended], dim=0))
+                    total_add_count = int((~torch.isin(merged_original, part)).sum().item())
+                    merged, expanded_edge_p = self._merge_high_degree_nodes_with_matched_total_count(
+                        part.long(),
+                        total_add_count=total_add_count,
+                    )
+                else:
+                    merged = torch.cat([halo_extended, feature_extended], dim=0)
+                    merged = torch.unique(merged)  # 自动排序 + 去重
                 expanded_group.append(merged)
                 self.expanded_edge[0].extend(expanded_edge_p[0])
                 self.expanded_edge[1].extend(expanded_edge_p[1])
             expanded_child_partitions.append(expanded_group)
         self.child_partitions = expanded_child_partitions
         expanded_edge_concat_start = time.time()
+        # concat 新边和原始边
         self.global_edge_index = torch.cat([self.global_edge_index,torch.tensor(self.expanded_edge)],dim=1)
         self.timing_stats['expanded_edge_concat_time'] = time.time() - expanded_edge_concat_start
         # TODO:rerange of partition for kv cache √
+        # ---------------------------------- 统计窗口重复节点---------------------------------------
         duplicate_start = time.time()
         self.dup_nodes_per_partition = self._find_duplicate_nodes_and_rerange()
         self.timing_stats['duplicate_rerange_time'] = time.time() - duplicate_start
         self.dup_nodes_per_partition_feature = []
+
+        # ---------------------------- 得到最终的 partitioned_results及其edge作为窗口 ----------------------------
         subgraph_build_start = time.time()
         for parent_group in self.child_partitions:
             for part in parent_group:
@@ -467,6 +532,86 @@ class weightMetis_keepParent:
 
         virtual_edges = []
         for new_node in selected_nodes.tolist():
+            for old_node in partition.tolist():
+                if torch.rand(1).item() < connect_prob:
+                    virtual_edges.append([old_node, new_node])
+                    virtual_edges.append([new_node, old_node])
+        if virtual_edges:
+            virtual_edge_index = torch.tensor(virtual_edges, dtype=torch.long).t()
+        else:
+            virtual_edge_index = torch.empty((2, 0), dtype=torch.long)
+        return merged, virtual_edge_index
+
+    def _sample_random_external_nodes(self, partition: torch.Tensor, count: int, excluded_nodes: torch.Tensor | None = None) -> torch.Tensor:
+        if count <= 0:
+            return torch.empty((0,), dtype=torch.long)
+        total_nodes = len(self.csr_adjacency.adj_starts) - 1
+        candidate_mask = torch.ones(total_nodes, dtype=torch.bool)
+        candidate_mask[partition.long()] = False
+        if excluded_nodes is not None and excluded_nodes.numel() > 0:
+            candidate_mask[excluded_nodes.long()] = False
+        candidates = torch.nonzero(candidate_mask, as_tuple=False).flatten()
+        if candidates.numel() == 0:
+            return torch.empty((0,), dtype=torch.long)
+        actual_count = min(int(count), int(candidates.numel()))
+        sampled_idx = torch.randperm(candidates.numel())[:actual_count]
+        return candidates[sampled_idx].to(torch.long)
+
+    def _select_high_degree_external_nodes(self, partition: torch.Tensor, count: int, excluded_nodes: torch.Tensor | None = None) -> torch.Tensor:
+        if count <= 0:
+            return torch.empty((0,), dtype=torch.long)
+        total_nodes = len(self.csr_adjacency.adj_starts) - 1
+        candidate_mask = torch.ones(total_nodes, dtype=torch.bool)
+        candidate_mask[partition.long()] = False
+        if excluded_nodes is not None and excluded_nodes.numel() > 0:
+            candidate_mask[excluded_nodes.long()] = False
+        candidates = torch.nonzero(candidate_mask, as_tuple=False).flatten()
+        if candidates.numel() == 0:
+            return torch.empty((0,), dtype=torch.long)
+        xadj = torch.as_tensor(self.csr_adjacency.adj_starts, dtype=torch.long)
+        degrees = xadj[1:] - xadj[:-1]
+        candidate_degrees = degrees[candidates]
+        actual_count = min(int(count), int(candidates.numel()))
+        _, top_idx = torch.topk(candidate_degrees, k=actual_count, largest=True, sorted=False)
+        return candidates[top_idx].to(torch.long)
+
+    def _merge_random_nodes_with_matched_total_count(
+        self,
+        partition: torch.Tensor,
+        total_add_count: int,
+        connect_prob: float = 0.01,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # ABLATION CHANGE: strictly match the final number of nodes added to the
+        # window after the original two strategies are merged and deduplicated.
+        random_added = self._sample_random_external_nodes(partition, total_add_count)
+        merged = torch.unique(torch.cat([partition.long(), random_added], dim=0))
+
+        virtual_edges = []
+        for new_node in random_added.tolist():
+            for old_node in partition.tolist():
+                if torch.rand(1).item() < connect_prob:
+                    virtual_edges.append([old_node, new_node])
+                    virtual_edges.append([new_node, old_node])
+        if virtual_edges:
+            virtual_edge_index = torch.tensor(virtual_edges, dtype=torch.long).t()
+        else:
+            virtual_edge_index = torch.empty((2, 0), dtype=torch.long)
+        return merged, virtual_edge_index
+
+    def _merge_high_degree_nodes_with_matched_total_count(
+        self,
+        partition: torch.Tensor,
+        total_add_count: int,
+        connect_prob: float = 0.01,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # ABLATION CHANGE: strictly match the final number of nodes added to the
+        # window after the original two strategies are merged and deduplicated,
+        # but choose high-degree external nodes instead of random nodes.
+        added_nodes = self._select_high_degree_external_nodes(partition, total_add_count)
+        merged = torch.unique(torch.cat([partition.long(), added_nodes], dim=0))
+
+        virtual_edges = []
+        for new_node in added_nodes.tolist():
             for old_node in partition.tolist():
                 if torch.rand(1).item() < connect_prob:
                     virtual_edges.append([old_node, new_node])

@@ -128,13 +128,14 @@ def _build_struct_info_from_cache_payload(payload, graph_in_degree, graph_out_de
 
 def build_graph_struct_info(args, N, edge_index, feature, world_size, device, topk=50, n_parts=50,
                             related_nodes_topk_rate=5, connect_prob=0.01, edge_csr_data=None):
+    # ------------模型位置编码所需的数据------------
     graph_in_degree, graph_out_degree = None, None
     if args.struct_enc == "True":
         if edge_csr_data is not None:
             graph_in_degree, graph_out_degree = _get_node_degrees_from_csr(edge_csr_data, N)
         else:
             graph_in_degree, graph_out_degree = get_node_degrees(edge_index, N)
-
+    # ------------- preprocess cache ---------------
     cache_enabled = _preprocess_cache_enabled(args)
     if int(getattr(args, 'use_preprocess_cache', 1)) == 1 and int(getattr(args, 'use_cache', 0)) != 1 and args.rank == 0:
         print('Preprocess cache disabled: only supported for fixed-window training with --use_cache 1.')
@@ -162,12 +163,13 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
                 else:
                     print(f"Preprocess cache miss: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s")
                 hit_box = [cache_hit]
-                dist.broadcast_object_list(hit_box, src=0)
+                dist.broadcast_object_list(hit_box, src=0) # 广播是否 hit cache
                 if cache_hit:
                     return _build_struct_info_from_cache_payload(payload, graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
             else:
+                # 非 root GPU(0号) 生成空窗口信息，等待窗口状态同步
                 hit_box = [False]
-                dist.broadcast_object_list(hit_box, src=0)
+                dist.broadcast_object_list(hit_box, src=0)  
                 if hit_box[0]:
                     return build_placeholder_struct_info(graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
         else:
@@ -187,14 +189,20 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
     elif cache_enabled and args.rank == 0 and int(getattr(args, 'refresh_preprocess_cache', 0)) == 1:
         cache_key, cache_args_snapshot = compute_preprocess_cache_key(args, world_size)
         print(f"Preprocess cache miss: refresh requested, key={cache_key[:12]}")
-
+    # 如果不是 APPNP 多卡预处理，那么只 rank0 去做窗口构建，其他 rank 生成占位符等待
     if world_size > 1 and not distributed_appnp_ppr and args.rank != 0:
         return build_placeholder_struct_info(graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
-
+    # 如果是，那么为每个 rank 划分需要计算的 ppr 的源点
     source_start, source_end = 0, N
     if distributed_appnp_ppr:
         source_start, source_end = get_rank_source_range(N, args.rank, world_size)
 
+
+
+        
+    # ----------------------计算以每个点为源点的PPR --------------------------
+    # 加权稀疏交互图    
+    # sorted_ppr_matrix = (edge_index, edge_value): ([[src,src...src],[dest,dest,...dest]],[val,val...val])
     sync_device(device)
     local_ppr_start = time.time()
     local_sorted_ppr_matrix = personal_pagerank(
@@ -222,6 +230,7 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
     if distributed_appnp_ppr:
         sync_device(device)
         gather_start = time.time()
+        # 把多个GPU并行计算的 PPR 数据 gather 在 rank 0 CPU (concat方式聚合为一张大图)
         sorted_ppr_matrix = gather_ppr_shards(local_sorted_ppr_matrix, rank=args.rank, world_size=world_size)
         sync_device(device)
         gather_time = time.time() - gather_start
@@ -232,14 +241,15 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
 
     graph_edge_index = _ensure_edge_index(edge_index, edge_csr_data)
 
+    # ---------------------------为 PPR 图中的孤立点补充随机连边 -----------------------------
     isolated_start = time.time()
     sorted_ppr_matrix = add_isolated_connections(sorted_ppr_matrix, graph_edge_index, N, connect_prob=connect_prob)
     isolated_time = time.time() - isolated_start
-
+    # -------------------------- 将 PPR 图转换为划分所需要的 CSR 格式 -------------------------
     adj_build_start = time.time()
     csr_adjacency, eweights, _ = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
     adj_build_time = time.time() - adj_build_start
-
+    # -------------------------- 开始生成窗口 ----------------------------
     partition_build_start = time.time()
     wm = weightMetis_keepParent(
         csr_adjacency=csr_adjacency,
@@ -250,6 +260,9 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
         related_nodes_topk_rate=related_nodes_topk_rate,
         attn_type=args.attn_type,
         sorted_ppr_matrix=sorted_ppr_matrix,
+        random_replace_window_nodes=getattr(args, 'random_replace_window_nodes', 0),
+        disable_window_node_expansion=getattr(args, 'disable_window_node_expansion', 0),
+        high_degree_replace_window_nodes=getattr(args, 'high_degree_replace_window_nodes', 0),
     )
     partition_build_time = time.time() - partition_build_start
 
@@ -261,7 +274,7 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
         + wm.timing_stats.get('parent_partition_time', 0.0)
         + wm.timing_stats.get('child_partition_time', 0.0)
     )
-    # Stage 2: 基础 Metis 之后到 build_graph_struct_info 返回，不包含后续窗口状态广播。
+    # Stage 2: 基础 Metis 之后到 build_graph_struct_info 返回
     stage2_time = (
         wm.timing_stats.get('centroid_build_time', 0.0)
         + wm.timing_stats.get('related_nodes_merge_time', 0.0)
@@ -273,6 +286,7 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
     print(f"Preprocess Stage 1 Time: {stage1_time:.3f}s")
     print(f"Preprocess Stage 2 Time: {stage2_time:.3f}s")
 
+    # 此时 划分好的核心窗口集合在 rank 0 上
     struct_info = StructInfo(
         graph_in_degree=graph_in_degree,
         graph_out_degree=graph_out_degree,

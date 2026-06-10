@@ -179,6 +179,11 @@ def build_local_partitions(structInfo: StructInfo, rank: int, world_size: int):
 
 
 def build_dup_cache_metadata(structInfo: StructInfo, feature: torch.Tensor, device: str):
+    # local_dup_nodes = [
+    #     tensor([...]),   # partition 0 的 dup nodes
+    #     tensor([...]),   # partition 1 的 dup nodes
+    #     tensor([...]),   # partition 2 的 dup nodes
+    # ]
     local_dup_nodes = getattr(structInfo, 'local_dup_nodes_per_partition', None) or []
     if not local_dup_nodes:
         structInfo.local_dup_indices = []
@@ -191,6 +196,7 @@ def build_dup_cache_metadata(structInfo: StructInfo, feature: torch.Tensor, devi
         structInfo.local_dup_nodes_per_partition_feature = _empty_cache(feature, device)
         return torch.empty((0,), dtype=torch.long)
 
+    # 把所有窗口的 dup_node 合并为一个表
     dup_unique_sorted = torch.unique(torch.cat(non_empty_dup_nodes), sorted=True)
     structInfo.local_dup_indices = []
     for dup_nodes in local_dup_nodes:
@@ -200,7 +206,7 @@ def build_dup_cache_metadata(structInfo: StructInfo, feature: torch.Tensor, devi
         else:
             indices = torch.searchsorted(dup_unique_sorted, dup_nodes_cpu).to(device=device, dtype=torch.long)
         structInfo.local_dup_indices.append(indices)
-
+    # 建立索引，把特征缓存表传输 device
     structInfo.local_dup_nodes_per_partition_feature = feature[dup_unique_sorted].to(device)
     return dup_unique_sorted
 
@@ -232,9 +238,14 @@ def _rebuild_local_window_structures(args, structInfo: StructInfo, feature: torc
 
     dup_start = time.time()
     if args.use_cache:
+        # -----------找出当前 rank 自己这些窗口之间的重复节点，排到前面--------------
         local_partitions, local_dup_nodes_per_partition = _compute_local_duplicate_nodes(structInfo.local_partitions)
         structInfo.local_partitions = local_partitions
         structInfo.local_dup_nodes_per_partition = local_dup_nodes_per_partition
+        # ---------------- 把本 rank 的重复节点汇总成一张表存储
+        # ---------------- structInfo.local_dup_nodes_per_partition_feature
+        # ---------------- 建立每个重复节点的 id 到 表索引的映射
+        # ---------------- structInfo.local_dup_indices
         build_dup_cache_metadata(structInfo, feature, device)
     else:
         structInfo.local_dup_nodes_per_partition = [torch.empty((0,), dtype=torch.long) for _ in structInfo.local_partitions]
@@ -242,10 +253,12 @@ def _rebuild_local_window_structures(args, structInfo: StructInfo, feature: torc
         structInfo.local_dup_nodes_per_partition_feature = _empty_cache(feature, device)
     timing_stats['local_dup_cache_rebuild_time'] = time.time() - dup_start
 
+    # -----------窗口的原图子图-------------
     subgraph_start = time.time()
     structInfo.local_sub_edge_index_for_partition_results = _build_local_sub_edge_index_list(structInfo, structInfo.local_partitions)
     timing_stats['local_subgraph_rebuild_time'] = time.time() - subgraph_start
 
+    # ------------- PE/SE 用 --------------
     spatial_start = time.time()
     if args.struct_enc == 'True':
         structInfo.local_spatial_pos_by_pid = _compute_local_spatial_pos(
@@ -271,24 +284,30 @@ def broadcast_window_state(args, structInfo: StructInfo, feature: torch.Tensor, 
     overall_start = time.time()
 
     if args.rank == 0:
-        # 把全局窗口结构保存在 CPU
         restore_global_window_state(structInfo)
         _stash_global_window_state_cpu(structInfo)
 
+
+    # --------------------- 此时所有的核心窗口存储在 rank0 cpu侧 ------------------------
     if args.world_size <= 1:
-        bundle = _build_local_bundle_for_rank(args, structInfo, args.rank)
-        _assign_local_window_bundle(structInfo, bundle)
+        bundle = _build_local_bundle_for_rank(args, structInfo, args.rank)              # 给当前 rank 建立窗口数据 local_partition_ids 、local_partitions、local_ppr_sub_edge_index_list(SE/PE用)
+        _assign_local_window_bundle(structInfo, bundle)                                 # bundle 写回到 structInfo
         local_ppr_sub_edge_index_list = bundle.get('local_ppr_sub_edge_index_list', [])
-        rebuild_stats = _rebuild_local_window_structures(args, structInfo, feature, device, local_ppr_sub_edge_index_list)
+        # 根据窗口构造 local_sub_edge_index_for_partition_results(窗口子图) 、spatial_pos(SE/PE用)
+        # 构建本窗口的 cache 区
+        rebuild_stats = _rebuild_local_window_structures(args, structInfo, feature, device, local_ppr_sub_edge_index_list)      
         timing_stats.update(rebuild_stats)
         if args.rank == 0:
+            # 重建完毕后，释放存储的全局核心窗口数据
             _release_hot_global_window_state(structInfo)
         timing_stats['window_state_total_time'] = time.time() - overall_start
         return timing_stats
 
     version = structInfo.window_state_version # 这是窗口状态版本号，避免 node_out/node_in 重新分发时覆盖混淆
 
-    # 对每个 rank 生成一个 bundle,including
+
+    # --------------------------多卡，同上------------------------
+    # 对每个 rank 生成一个 bundle,包括
     # local_partition_ids、local_partitions、如果开结构编码，再加 local_ppr_sub_edge_index_list
     # 写到磁盘
     if args.rank == 0:
