@@ -30,6 +30,8 @@ def metis_partition(csr_adjacency:pymetis.CSRAdjacency,eweights:list[list],n_par
 def build_adj_fromat(sorted_ppr_matrix):
     """FROM QWEN"""
     edge_index, ppr_val = sorted_ppr_matrix
+    edge_index = edge_index.to(torch.long).cpu()
+    ppr_val = ppr_val.to(torch.float32).cpu()
     assert edge_index.shape[0] == 2
     if edge_index.numel() == 0:
         csr_adj = pymetis.CSRAdjacency(adj_starts=[0], adjacent=[])
@@ -59,9 +61,9 @@ def build_adj_fromat(sorted_ppr_matrix):
     xadj = torch.zeros(num_nodes + 1, dtype=torch.int32, device=u_all.device)
     xadj[1:] = torch.cumsum(degrees, dim=0)
 
-    xadj_np = xadj.cpu().numpy()
-    adjncy_np = v_all.to(torch.int32).cpu().numpy()
-    eweights_np = weights_all.cpu().numpy()
+    xadj_np = xadj.numpy()
+    adjncy_np = v_all.to(torch.int32).numpy()
+    eweights_np = weights_all.numpy()
     assert len(adjncy_np) == len(eweights_np)
     assert int(xadj_np[-1]) == len(adjncy_np)
     csr_adj = pymetis.CSRAdjacency(
@@ -103,13 +105,13 @@ def add_isolated_connections(
     向 PPR 结果中添加孤立节点与其他节点的随机连接。
     """
     edge_index, edge_values = ppr_result
-    edge_index = edge_index.to(device)
-    edge_values = edge_values.to(device)
-    original_edge_index = original_edge_index.to(device)
+    edge_index = edge_index.to(torch.long).cpu()
+    edge_values = edge_values.to(torch.float32).cpu()
+    original_edge_index = original_edge_index.to(torch.long).cpu()
     ppr_appeared_nodes = torch.unique(edge_index)
     original_appeared_nodes = torch.unique(original_edge_index)
     appeared_nodes = torch.unique(torch.cat([ppr_appeared_nodes, original_appeared_nodes], dim=0))
-    all_nodes = torch.arange(num_nodes, device=device)
+    all_nodes = torch.arange(num_nodes, dtype=torch.long)
     is_isolated = ~torch.isin(all_nodes, appeared_nodes)
     isolated_nodes = all_nodes[is_isolated]
     if isolated_nodes.numel() == 0:
@@ -118,15 +120,25 @@ def add_isolated_connections(
     non_isolated_nodes = all_nodes[non_isolated_mask]
     if non_isolated_nodes.numel() == 0:
         return edge_index, edge_values
-    rand_probs = torch.rand(len(isolated_nodes), len(non_isolated_nodes), device=device)
-    connect_mask = rand_probs < connect_prob
-    i_idx, j_idx = torch.where(connect_mask)
-    if i_idx.numel() == 0:
+    src_chunks = []
+    dst_chunks = []
+    non_isolated_num = int(non_isolated_nodes.numel())
+    chunk_size = 1_000_000
+    for iso_node in isolated_nodes.tolist():
+        for start in range(0, non_isolated_num, chunk_size):
+            end = min(start + chunk_size, non_isolated_num)
+            dst_chunk = non_isolated_nodes[start:end]
+            connect_mask = torch.rand(dst_chunk.numel()) < connect_prob
+            if connect_mask.any():
+                chosen_dst = dst_chunk[connect_mask]
+                src_chunks.append(torch.full((chosen_dst.numel(),), iso_node, dtype=torch.long))
+                dst_chunks.append(chosen_dst)
+    if not src_chunks:
         return edge_index, edge_values
-    srcs = isolated_nodes[i_idx]
-    dsts = non_isolated_nodes[j_idx]
+    srcs = torch.cat(src_chunks, dim=0)
+    dsts = torch.cat(dst_chunks, dim=0)
     new_edges = torch.stack([srcs, dsts], dim=0)
-    new_values = torch.full((new_edges.shape[1],), ppr_fill_value, device=device, dtype=edge_values.dtype)
+    new_values = torch.full((new_edges.shape[1],), ppr_fill_value, dtype=edge_values.dtype)
     final_edge_index = torch.cat([edge_index, new_edges], dim=1)
     final_edge_values = torch.cat([edge_values, new_values], dim=0)
     return final_edge_index, final_edge_values

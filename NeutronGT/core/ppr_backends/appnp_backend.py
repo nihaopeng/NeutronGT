@@ -3,9 +3,10 @@ import time
 import torch
 from tqdm import tqdm
 
-from .cusparse_ops import csr_spgemm
+from .cusparse_ops import csr_spgemm, prepare_graph_csr_for_cusparse
 
 _INT32_MAX = 2**31 - 1
+_TRANSITION_VALUE_CHUNK_NUM_ROWS = 1_000_000
 
 
 def _normalize_device(device) -> torch.device:
@@ -22,21 +23,21 @@ def _load_csr_graph(csr_data, device, num_nodes: int | None = None):
     if "rowptr" not in csr_data or "col" not in csr_data:
         raise KeyError(f"CSR data must contain rowptr and col, got keys={list(csr_data.keys())}")
 
-    rowptr = torch.as_tensor(csr_data["rowptr"], dtype=torch.long, device=device)
-    col = torch.as_tensor(csr_data["col"], dtype=torch.long, device=device)
+    rowptr = torch.as_tensor(csr_data["rowptr"], dtype=torch.int32, device=device)
+    col = torch.as_tensor(csr_data["col"], dtype=torch.int32, device=device)
     if rowptr.dim() != 1 or col.dim() != 1:
         raise ValueError("CSR rowptr and col must be 1-D")
     inferred_num_nodes = int(rowptr.numel() - 1)
     if num_nodes is not None and inferred_num_nodes != int(num_nodes):
         raise ValueError(f"CSR num_nodes mismatch: expected {num_nodes}, got {inferred_num_nodes}")
-    degree = (rowptr[1:] - rowptr[:-1]).clamp_min(1).to(torch.float32)
+    degree = (rowptr[1:].to(torch.int64) - rowptr[:-1].to(torch.int64)).clamp_min(1).to(torch.float32)
     return rowptr, col, degree, inferred_num_nodes
 
 
 def _build_csr_from_edge_index(edge_index: torch.Tensor, device, num_nodes: int | None = None):
     if edge_index.numel() == 0:
-        empty_rowptr = torch.zeros((1,), dtype=torch.long, device=device)
-        empty_col = torch.empty((0,), dtype=torch.long, device=device)
+        empty_rowptr = torch.zeros((1,), dtype=torch.int32, device=device)
+        empty_col = torch.empty((0,), dtype=torch.int32, device=device)
         empty_degree = torch.empty((0,), dtype=torch.float32, device=device)
         return empty_rowptr, empty_col, empty_degree, 0
 
@@ -51,18 +52,18 @@ def _build_csr_from_edge_index(edge_index: torch.Tensor, device, num_nodes: int 
     src = src[perm]
     dst = dst[perm]
 
-    counts = torch.bincount(src, minlength=int(num_nodes))
-    rowptr = torch.zeros((int(num_nodes) + 1,), dtype=torch.long, device=device)
+    counts = torch.bincount(src, minlength=int(num_nodes)).to(torch.int32)
+    rowptr = torch.zeros((int(num_nodes) + 1,), dtype=torch.int32, device=device)
     rowptr[1:] = torch.cumsum(counts, dim=0)
     degree = counts.clamp_min(1).to(torch.float32)
-    return rowptr, dst, degree, int(num_nodes)
+    return rowptr, dst.to(torch.int32), degree, int(num_nodes)
 
 
 def _rowptr_to_rows(rowptr: torch.Tensor):
     lengths = rowptr[1:] - rowptr[:-1]
     if lengths.numel() == 0:
         return torch.empty((0,), dtype=torch.long, device=rowptr.device)
-    return torch.arange(lengths.numel(), dtype=torch.long, device=rowptr.device).repeat_interleave(lengths)
+    return torch.arange(lengths.numel(), dtype=torch.long, device=rowptr.device).repeat_interleave(lengths.to(torch.long))
 
 
 def _aggregate_sparse_entries(rows: torch.Tensor, cols: torch.Tensor, values: torch.Tensor, num_nodes: int):
@@ -156,22 +157,56 @@ def _ensure_cusparse_indexable(num_nodes: int, rowptr: torch.Tensor, col: torch.
 
 
 def _build_transition_csr_values(graph_rowptr: torch.Tensor, graph_col: torch.Tensor, degree: torch.Tensor):
-    src = _rowptr_to_rows(graph_rowptr)
-    if src.numel() == 0:
+    if graph_col.numel() == 0:
         return torch.empty((0,), dtype=torch.float32, device=graph_rowptr.device)
-    return (1.0 / degree[src]).to(torch.float32)
+    num_rows = int(graph_rowptr.numel() - 1)
+    if num_rows <= 0:
+        return torch.empty((0,), dtype=torch.float32, device=graph_rowptr.device)
+
+    transition_values = torch.empty((graph_col.numel(),), dtype=torch.float32, device=graph_rowptr.device)
+    chunk_num_rows = max(1, int(_TRANSITION_VALUE_CHUNK_NUM_ROWS))
+
+    for u_start in range(0, num_rows, chunk_num_rows):
+        u_end = min(u_start + chunk_num_rows, num_rows)
+        starts = graph_rowptr[u_start:u_end]
+        ends = graph_rowptr[u_start + 1:u_end + 1]
+        lengths = ends - starts
+        if lengths.numel() == 0:
+            continue
+        block_nnz = int(lengths.sum().item())
+        if block_nnz <= 0:
+            continue
+
+        block_start = int(starts[0].item())
+        block_end = int(ends[-1].item())
+        if block_end <= block_start:
+            continue
+
+        block_values = (1.0 / degree[u_start:u_end]).to(torch.float32)
+        repeated_values = block_values.repeat_interleave(lengths)
+        if int(repeated_values.numel()) != block_nnz:
+            raise RuntimeError(
+                "transition value chunk construction mismatch: "
+                f"u_range=({u_start}, {u_end}), expected_nnz={block_nnz}, actual_nnz={int(repeated_values.numel())}"
+            )
+        transition_values[block_start:block_end] = repeated_values
+
+    if transition_values.numel() != graph_col.numel():
+        raise RuntimeError(
+            "transition value construction mismatch: "
+            f"transition_values={int(transition_values.numel())}, graph_col={int(graph_col.numel())}"
+        )
+    return transition_values
 
 # 进行SpMSpM计算
-def _cusparse_spgemm_iteration(state_rowptr, state_col, state_values, transition_rowptr, transition_col, transition_values, teleport_rows, teleport_cols, teleport_values, num_rows, num_nodes, alpha, iter_topk, timing_stats=None):
+def _cusparse_spgemm_iteration(state_rowptr, state_col, state_values, transition_graph_csr, teleport_rows, teleport_cols, teleport_values, num_rows, num_nodes, alpha, iter_topk, timing_stats=None):
     step_start = time.perf_counter()
     # 当前 source 分布 state乘上图的转移矩阵 transition，得到沿图走一步后的新分布，再乘 (1 - alpha)
     prop_rowptr, prop_col, prop_values = csr_spgemm(
         state_rowptr,
         state_col,
         state_values,
-        transition_rowptr,
-        transition_col,
-        transition_values,
+        transition_graph_csr,
     )
     prop_values = prop_values * (1.0 - alpha)
     if timing_stats is not None:
@@ -240,7 +275,27 @@ def personal_pagerank_appnp(
     transition_rowptr = graph_rowptr
     transition_col = graph_col
     # 进行归一化，把邻接矩阵变成随机游走概率
+    transition_value_start = time.perf_counter()
+    print(
+        f"APPNP transition build start: num_nodes={num_nodes}, nnz={int(graph_col.numel())}, device={device}",
+        flush=True,
+    )
     transition_values = _build_transition_csr_values(graph_rowptr, graph_col, degree)
+    if transition_values.numel() != graph_col.numel():
+        raise RuntimeError(
+            "transition value shape mismatch after construction: "
+            f"transition_values={int(transition_values.numel())}, graph_col={int(graph_col.numel())}"
+        )
+    print(
+        f"APPNP transition build finish: nnz={int(transition_values.numel())}, "
+        f"time={time.perf_counter() - transition_value_start:.3f}s",
+        flush=True,
+    )
+    transition_graph_csr = prepare_graph_csr_for_cusparse(
+        transition_rowptr,
+        transition_col,
+        transition_values,
+    )
 
     # --------------------- 一批 source node 的起止位置 ----------------------
     source_start = 0 if source_start is None else max(0, min(int(source_start), num_nodes))
@@ -285,9 +340,7 @@ def personal_pagerank_appnp(
                 state_rowptr,
                 state_col,
                 state_values,
-                transition_rowptr,
-                transition_col,
-                transition_values,
+                transition_graph_csr,
                 teleport_rows,
                 teleport_cols,
                 teleport_values,

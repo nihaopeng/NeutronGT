@@ -15,7 +15,7 @@ DEVICES=${1-}
 if [ -z "$DEVICES" ] || [[ "$DEVICES" == -* ]]; then
     echo "Error: CUDA_VISIBLE_DEVICES argument is required."
     echo "Usage: bash $0 <devices> [dataset] [model]"
-    echo "Datasets: --arxiv | --amazon | --reddit | --products"
+    echo "Datasets: --arxiv | --amazon | --reddit | --products | --papers100m"
     echo "Models:   --GT | --GPH_Slim | --GPH_Large"
     echo "Example:  bash $0 0,1,2,3 --arxiv --GT"
     exit 1
@@ -35,12 +35,13 @@ while [[ $# -gt 0 ]]; do
         --amazon)   DATASET_INPUT="AmazonProducts" ;;
         --reddit)   DATASET_INPUT="reddit" ;;
         --products) DATASET_INPUT="ogbn-products" ;;
+        --papers100m) DATASET_INPUT="ogbn-papers100M" ;;
         --GT)       MODEL_INPUT="GT" ;;
         --GPH_Slim)  MODEL_INPUT="GPH_Slim" ;;
         --GPH_Large) MODEL_INPUT="GPH_Large" ;;
         *)
             echo "Usage: bash $0 <devices> [dataset] [model]"
-            echo "Datasets: --arxiv | --amazon | --reddit | --products"
+            echo "Datasets: --arxiv | --amazon | --reddit | --products | --papers100m"
             echo "Models:   --GT | --GPH_Slim | --GPH_Large"
             echo "Example:  bash $0 0,1,2,3 --arxiv --GT"
             echo "Error: unknown argument: $1" >&2
@@ -53,19 +54,22 @@ done
 # 3. Validate required selections
 if [ -z "$DATASET_INPUT" ]; then
     echo "Error: dataset is required." >&2
-    echo "Usage: bash $0 <devices> --arxiv|--amazon|--reddit|--products --GT|--GPH_Slim|--GPH_Large" >&2
+    echo "Usage: bash $0 <devices> --arxiv|--amazon|--reddit|--products|--papers100m --GT|--GPH_Slim|--GPH_Large" >&2
     exit 1
 fi
 
 if [ -z "$MODEL_INPUT" ]; then
     echo "Error: model is required." >&2
-    echo "Usage: bash $0 <devices> --arxiv|--amazon|--reddit|--products --GT|--GPH_Slim|--GPH_Large" >&2
+    echo "Usage: bash $0 <devices> --arxiv|--amazon|--reddit|--products|--papers100m --GT|--GPH_Slim|--GPH_Large" >&2
     exit 1
 fi
 
 # ================= Parameter Mapping =================
 
 dataset="$DATASET_INPUT"
+STRUCT_ENC="False"
+PPR_TOPK=5
+PPR_ITER_TOPK=5
 
 case "$MODEL_INPUT" in
     "GT")
@@ -148,6 +152,28 @@ elif [ "$dataset" = "reddit" ]; then
         NPARTS=80
         RELATED_TOPK=4
     fi
+elif [ "$dataset" = "ogbn-papers100M" ]; then
+    # Keep windows small enough for 24GB GPUs:
+    # - disable structural encoding to avoid O(W^2) spatial_pos tensors
+    # - use a large number of windows
+    # - keep supplementation and PPR sparsification conservative
+    STRUCT_ENC="False"
+    if [ "$MODEL_ALIAS" = "GT" ]; then
+        NPARTS=8192
+        RELATED_TOPK=0
+        PPR_TOPK=5
+        PPR_ITER_TOPK=5
+    elif [ "$MODEL_ALIAS" = "GPH_Slim" ]; then
+        NPARTS=8192
+        RELATED_TOPK=0
+        PPR_TOPK=5
+        PPR_ITER_TOPK=5
+    elif [ "$MODEL_ALIAS" = "GPH_Large" ]; then
+        NPARTS=16384
+        RELATED_TOPK=0
+        PPR_TOPK=5
+        PPR_ITER_TOPK=5
+    fi
 else
     echo "Error: unsupported dataset: $dataset" >&2
     exit 1
@@ -170,7 +196,7 @@ echo "GPUs: ${GPU_NUM} (CUDA_VISIBLE_DEVICES=${DEVICES})"
 echo "Log: ${LOG_FILE}"
 echo "-------------------------------------------------------------"
 
-CUDA_VISIBLE_DEVICES="${DEVICES}" torchrun   --nproc_per_node="${GPU_NUM}"   --master_port="${MASTER_PORT}"   main_sp_node_level_ppr.py   --dataset "${dataset}"   --dataset_dir "${DATASET_DIR}"   --model "${MODEL}"   --attn_type "${ATTN_TYPE}"   --n_layers "${N_LAYERS}"   --hidden_dim "${HIDDEN_DIM}"   --ffn_dim "${FFN_DIM}"   --num_heads "${NUM_HEADS}"   --epochs "${EPOCHS}"   --use_cache 1   --use_preprocess_cache 0   --n_parts "${NPARTS}"   --related_nodes_topk_rate "${RELATED_TOPK}"   --ppr_backend appnp   --ppr_topk 5   --ppr_alpha 0.85   --ppr_num_iterations 10   --ppr_batch_size 8192   --ppr_iter_topk 5   --distributed-backend nccl   --distributed-timeout-minutes 120   > "${LOG_FILE}" 2>&1
+CUDA_VISIBLE_DEVICES="${DEVICES}" torchrun   --nproc_per_node="${GPU_NUM}"   --master_port="${MASTER_PORT}"   main_sp_node_level_ppr.py   --dataset "${dataset}"   --dataset_dir "${DATASET_DIR}"   --model "${MODEL}"   --attn_type "${ATTN_TYPE}"   --n_layers "${N_LAYERS}"   --hidden_dim "${HIDDEN_DIM}"   --ffn_dim "${FFN_DIM}"   --num_heads "${NUM_HEADS}"   --epochs "${EPOCHS}"   --use_cache 1   --use_preprocess_cache 0   --struct_enc "${STRUCT_ENC}"   --n_parts "${NPARTS}"   --related_nodes_topk_rate "${RELATED_TOPK}"   --ppr_backend appnp   --ppr_topk "${PPR_TOPK}"   --ppr_alpha 0.85   --ppr_num_iterations 10   --ppr_batch_size 8192   --ppr_iter_topk "${PPR_ITER_TOPK}"   --distributed-backend nccl   --distributed-timeout-minutes 120   > "${LOG_FILE}" 2>&1
 
 if [ $? -eq 0 ]; then
     echo "Status: Success"

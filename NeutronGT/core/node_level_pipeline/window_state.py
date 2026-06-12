@@ -53,6 +53,11 @@ def _compute_local_duplicate_nodes(local_partitions):
     if not local_partitions:
         return [], []
     all_nodes = torch.cat([part.to(torch.long).cpu() for part in local_partitions]) if local_partitions else torch.empty((0,), dtype=torch.long)
+    if all_nodes.numel() > 5_000_000:
+        print(
+            f"window_state duplicate scan: partitions={len(local_partitions)}, total_nodes={int(all_nodes.numel())}",
+            flush=True,
+        )
     if all_nodes.numel() == 0:
         return [part.clone() for part in local_partitions], [torch.empty((0,), dtype=torch.long) for _ in local_partitions]
 
@@ -96,14 +101,29 @@ def _subgraph_from_csr(node_set: torch.Tensor, rowptr: torch.Tensor, col: torch.
 
     sort_order = torch.argsort(node_set)
     sorted_nodes = node_set[sort_order]
+    local_index_by_sorted_pos = torch.empty_like(sort_order)
+    local_index_by_sorted_pos[sort_order] = torch.arange(sort_order.numel(), dtype=torch.long)
     row_chunks = []
     col_chunks = []
-    for local_src, global_src in enumerate(node_set.tolist()):
-        start = int(rowptr[global_src].item())
-        end = int(rowptr[global_src + 1].item())
-        neighbors = col[start:end].to(torch.long)
-        if neighbors.numel() == 0:
+    chunk_num_rows = 2048
+    node_list = node_set.tolist()
+    for chunk_start in range(0, node_set.numel(), chunk_num_rows):
+        chunk_end = min(chunk_start + chunk_num_rows, node_set.numel())
+        chunk_nodes = node_list[chunk_start:chunk_end]
+        chunk_src_rows = []
+        chunk_neighbors = []
+        for local_src, global_src in enumerate(chunk_nodes, start=chunk_start):
+            start = int(rowptr[global_src].item())
+            end = int(rowptr[global_src + 1].item())
+            if end <= start:
+                continue
+            neighbors = col[start:end].to(torch.long)
+            chunk_neighbors.append(neighbors)
+            chunk_src_rows.append(torch.full((neighbors.numel(),), local_src, dtype=torch.long))
+        if not chunk_neighbors:
             continue
+        neighbors = torch.cat(chunk_neighbors, dim=0)
+        src_rows = torch.cat(chunk_src_rows, dim=0)
         positions = torch.searchsorted(sorted_nodes, neighbors)
         in_bounds = positions < sorted_nodes.numel()
         matched = torch.zeros_like(in_bounds, dtype=torch.bool)
@@ -111,8 +131,8 @@ def _subgraph_from_csr(node_set: torch.Tensor, rowptr: torch.Tensor, col: torch.
             matched[in_bounds] = sorted_nodes[positions[in_bounds]] == neighbors[in_bounds]
         if not matched.any():
             continue
-        local_dst = sort_order[positions[matched]].to(torch.long)
-        row_chunks.append(torch.full((local_dst.numel(),), local_src, dtype=torch.long))
+        local_dst = local_index_by_sorted_pos[positions[matched]].to(torch.long)
+        row_chunks.append(src_rows[matched])
         col_chunks.append(local_dst)
     if not row_chunks:
         return torch.empty((2, 0), dtype=torch.long)
@@ -198,6 +218,12 @@ def build_dup_cache_metadata(structInfo: StructInfo, feature: torch.Tensor, devi
 
     # 把所有窗口的 dup_node 合并为一个表
     dup_unique_sorted = torch.unique(torch.cat(non_empty_dup_nodes), sorted=True)
+    if dup_unique_sorted.numel() > 1_000_000:
+        print(
+            f"window_state dup cache build: unique_dup_nodes={int(dup_unique_sorted.numel())}, "
+            f"partitions={len(local_dup_nodes)}",
+            flush=True,
+        )
     structInfo.local_dup_indices = []
     for dup_nodes in local_dup_nodes:
         dup_nodes_cpu = dup_nodes.to(torch.long).cpu()
@@ -316,6 +342,10 @@ def broadcast_window_state(args, structInfo: StructInfo, feature: torch.Tensor, 
             bundle = _build_local_bundle_for_rank(args, structInfo, rank)
             torch.save(bundle, _bundle_path(args, version, rank))
         timing_stats['bundle_write_time'] = time.time() - bundle_write_start
+        print(
+            f"window_state bundle write finish: version={version}, time={timing_stats['bundle_write_time']:.3f}s",
+            flush=True,
+        )
     dist.barrier()
 
     # 每个 rank 读自己的 bundle，并本地重建结构

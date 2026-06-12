@@ -131,6 +131,15 @@ class weightMetis_keepParent:
                     centroid_group.append(self.feature[part.long()].mean(dim=0))
             self.child_partition_centroids.append(centroid_group)
         self.timing_stats['centroid_build_time'] = time.time() - centroid_build_start
+        parent_sizes = [int(part.numel()) for part in self.parent_partition]
+        child_sizes = [int(part.numel()) for group in self.child_partitions for part in group]
+        print(
+            f"metis stats: parent_sizes={parent_sizes}, "
+            f"child_count={len(child_sizes)}, child_min={min(child_sizes) if child_sizes else 0}, "
+            f"child_max={max(child_sizes) if child_sizes else 0}, "
+            f"child_mean={(sum(child_sizes) / len(child_sizes)) if child_sizes else 0.0:.2f}",
+            flush=True,
+        )
 
 
         # --------------------- 窗口节点补充 ---------------------- 
@@ -178,6 +187,16 @@ class weightMetis_keepParent:
                 self.expanded_edge[1].extend(expanded_edge_p[1])
             expanded_child_partitions.append(expanded_group)
         self.child_partitions = expanded_child_partitions
+        expanded_sizes = [int(part.numel()) for group in self.child_partitions for part in group]
+        print(
+            f"window expansion stats: related_time={self.timing_stats['related_nodes_merge_time']:.3f}s, "
+            f"feature_time={self.timing_stats['feature_sim_merge_time']:.3f}s, "
+            f"expanded_min={min(expanded_sizes) if expanded_sizes else 0}, "
+            f"expanded_max={max(expanded_sizes) if expanded_sizes else 0}, "
+            f"expanded_mean={(sum(expanded_sizes) / len(expanded_sizes)) if expanded_sizes else 0.0:.2f}, "
+            f"virtual_edges={len(self.expanded_edge[0])}",
+            flush=True,
+        )
         expanded_edge_concat_start = time.time()
         # concat 新边和原始边
         expanded_edge_tensor = torch.tensor(
@@ -193,6 +212,14 @@ class weightMetis_keepParent:
         self.dup_nodes_per_partition = self._find_duplicate_nodes_and_rerange()
         self.timing_stats['duplicate_rerange_time'] = time.time() - duplicate_start
         self.dup_nodes_per_partition_feature = []
+        total_window_nodes = int(sum(part.numel() for group in self.child_partitions for part in group))
+        unique_window_nodes = int(torch.unique(torch.cat([part.to(torch.long).cpu() for group in self.child_partitions for part in group], dim=0)).numel()) if total_window_nodes > 0 else 0
+        duplicate_ratio = 1.0 - (unique_window_nodes / total_window_nodes) if total_window_nodes > 0 else 0.0
+        print(
+            f"duplicate stats: total_window_nodes={total_window_nodes}, unique_window_nodes={unique_window_nodes}, "
+            f"duplicate_ratio={duplicate_ratio:.4f}",
+            flush=True,
+        )
 
         # ---------------------------- 得到最终的 partitioned_results及其edge作为窗口 ----------------------------
         subgraph_build_start = time.time()

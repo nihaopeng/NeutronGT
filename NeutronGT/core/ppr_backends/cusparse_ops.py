@@ -94,14 +94,29 @@ def _prepare_value_tensor(tensor: torch.Tensor, name: str):
     return tensor.to(dtype=torch.float32, copy=False).contiguous()
 
 
-def csr_spgemm(rowptr_a, col_a, val_a, rowptr_b, col_b, val_b):
+def prepare_graph_csr_for_cusparse(rowptr: torch.Tensor, col: torch.Tensor, val: torch.Tensor):
+    return {
+        "rowptr_i32": _prepare_index_tensor(rowptr, "rowptr_b"),
+        "col_i32": _prepare_index_tensor(col, "col_b"),
+        "val_f32": _prepare_value_tensor(val, "val_b"),
+    }
+
+
+def csr_spgemm(rowptr_a, col_a, val_a, rowptr_b, col_b=None, val_b=None):
     ext = load_cusparse_extension()
     rowptr_a_i32 = _prepare_index_tensor(rowptr_a, "rowptr_a")
     col_a_i32 = _prepare_index_tensor(col_a, "col_a")
     val_a_f32 = _prepare_value_tensor(val_a, "val_a")
-    rowptr_b_i32 = _prepare_index_tensor(rowptr_b, "rowptr_b")
-    col_b_i32 = _prepare_index_tensor(col_b, "col_b")
-    val_b_f32 = _prepare_value_tensor(val_b, "val_b")
+    if isinstance(rowptr_b, dict):
+        rowptr_b_i32 = rowptr_b["rowptr_i32"]
+        col_b_i32 = rowptr_b["col_i32"]
+        val_b_f32 = rowptr_b["val_f32"]
+    else:
+        if col_b is None or val_b is None:
+            raise ValueError("col_b and val_b must be provided when rowptr_b is not a prepared graph CSR dict")
+        rowptr_b_i32 = _prepare_index_tensor(rowptr_b, "rowptr_b")
+        col_b_i32 = _prepare_index_tensor(col_b, "col_b")
+        val_b_f32 = _prepare_value_tensor(val_b, "val_b")
 
     rowptr_c, col_c, val_c = ext.csr_spgemm(
         rowptr_a_i32,

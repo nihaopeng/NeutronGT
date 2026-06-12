@@ -73,7 +73,9 @@ def save_preprocess_cache(args, struct_info: Any, cache_key: str, args_snapshot)
     payload = build_preprocess_cache_payload(struct_info, args_snapshot, cache_key)
     save_start = time.time()
     torch.save(payload, cache_path)
-    return cache_path, time.time() - save_start
+    save_time = time.time() - save_start
+    file_size_mb = os.path.getsize(cache_path) / (1024 ** 2) if os.path.exists(cache_path) else 0.0
+    return cache_path, save_time, file_size_mb
 
 
 def load_preprocess_cache(args, graph_in_degree, graph_out_degree, edge_index=None, edge_csr_data=None, num_nodes=None, world_size: int = 1):
@@ -85,13 +87,14 @@ def load_preprocess_cache(args, graph_in_degree, graph_out_degree, edge_index=No
     load_start = time.time()
     payload = torch.load(cache_path, map_location='cpu')
     load_time = time.time() - load_start
+    file_size_mb = os.path.getsize(cache_path) / (1024 ** 2) if os.path.exists(cache_path) else 0.0
     if payload.get('cache_version') != _PREPROCESS_CACHE_VERSION:
-        return None, cache_key, cache_path, args_snapshot, load_time
+        return None, cache_key, cache_path, args_snapshot, load_time, file_size_mb
     if payload.get('cache_key') != cache_key:
-        return None, cache_key, cache_path, args_snapshot, load_time
+        return None, cache_key, cache_path, args_snapshot, load_time, file_size_mb
 
     cached_snapshot = payload.get('args_snapshot', {})
     if cached_snapshot != args_snapshot:
-        return None, cache_key, cache_path, args_snapshot, load_time
+        return None, cache_key, cache_path, args_snapshot, load_time, file_size_mb
 
-    return payload, cache_key, cache_path, args_snapshot, load_time
+    return payload, cache_key, cache_path, args_snapshot, load_time, file_size_mb

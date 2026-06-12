@@ -1,3 +1,4 @@
+import os
 import time
 from types import SimpleNamespace
 
@@ -64,10 +65,11 @@ def gather_ppr_shards(local_ppr: tuple[torch.Tensor, torch.Tensor], rank: int, w
     if world_size <= 1:
         return edge_index, edge_value
 
-    local_payload = (
-        edge_index.detach().cpu(),
-        edge_value.detach().cpu(),
-    )
+    device = edge_index.device
+    local_edge_count = torch.tensor([int(edge_value.numel())], dtype=torch.long, device=device)
+    gathered_edge_counts = [torch.zeros_like(local_edge_count) for _ in range(world_size)]
+    dist.all_gather(gathered_edge_counts, local_edge_count)
+    edge_counts = [int(item.item()) for item in gathered_edge_counts]
     try:
         dist.barrier()
     except Exception as exc:
@@ -75,27 +77,38 @@ def gather_ppr_shards(local_ppr: tuple[torch.Tensor, torch.Tensor], rank: int, w
             "Distributed PPR shard synchronization failed before gather. This usually means at least one rank did not finish local APPNP propagation cleanly."
         ) from exc
 
-    gathered_payloads = [None for _ in range(world_size)] if rank == 0 else None
-    try:
-        dist.gather_object(local_payload, object_gather_list=gathered_payloads, dst=0)
-    except Exception as exc:
-        raise RuntimeError(
-            "Distributed PPR shard gather failed. Check earlier rank-local logs for the first rank that crashed or stalled before entering gather."
-        ) from exc
-
     if rank != 0:
+        try:
+            if edge_counts[rank] > 0:
+                dist.send(edge_index.contiguous(), dst=0)
+                dist.send(edge_value.contiguous(), dst=0)
+        except Exception as exc:
+            raise RuntimeError(
+                "Distributed PPR shard send failed. Check whether rank 0 is still alive and earlier logs for sender-side failures."
+            ) from exc
         return None
 
     edge_index_parts = []
     edge_value_parts = []
-    for payload in gathered_payloads:
-        if payload is None:
+    for src_rank, shard_edge_count in enumerate(edge_counts):
+        if shard_edge_count <= 0:
             continue
-        shard_edge_index, shard_edge_value = payload
-        if shard_edge_value.numel() <= 0:
+        if src_rank == 0:
+            edge_index_parts.append(edge_index.detach().cpu())
+            edge_value_parts.append(edge_value.detach().cpu())
             continue
-        edge_index_parts.append(shard_edge_index)
-        edge_value_parts.append(shard_edge_value)
+        recv_edge_index = torch.empty((2, shard_edge_count), dtype=edge_index.dtype, device=device)
+        recv_edge_value = torch.empty((shard_edge_count,), dtype=edge_value.dtype, device=device)
+        try:
+            dist.recv(recv_edge_index, src=src_rank)
+            dist.recv(recv_edge_value, src=src_rank)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Distributed PPR shard receive failed while reading rank {src_rank}. Check sender-side logs for earlier failures."
+            ) from exc
+        edge_index_parts.append(recv_edge_index.cpu())
+        edge_value_parts.append(recv_edge_value.cpu())
+        del recv_edge_index, recv_edge_value
 
     if not edge_index_parts:
         empty_index = torch.empty((2, 0), dtype=torch.long)
@@ -106,6 +119,30 @@ def gather_ppr_shards(local_ppr: tuple[torch.Tensor, torch.Tensor], rank: int, w
 
 def _preprocess_cache_enabled(args):
     return int(getattr(args, 'use_preprocess_cache', 1)) == 1 and int(getattr(args, 'use_cache', 0)) == 1
+
+
+def _log_window_stats(partitioned_results):
+    if not partitioned_results:
+        print("window stats: no windows constructed", flush=True)
+        return
+
+    window_sizes = [int(part.numel()) for part in partitioned_results]
+    total_window_nodes = int(sum(window_sizes))
+    all_nodes = torch.cat([part.to(torch.long).cpu() for part in partitioned_results], dim=0)
+    unique_window_nodes = int(torch.unique(all_nodes).numel()) if all_nodes.numel() > 0 else 0
+    overlap_ratio = 1.0 - (unique_window_nodes / total_window_nodes) if total_window_nodes > 0 else 0.0
+
+    print(
+        "window stats: "
+        f"count={len(window_sizes)}, "
+        f"min={min(window_sizes)}, "
+        f"max={max(window_sizes)}, "
+        f"mean={sum(window_sizes) / len(window_sizes):.2f}, "
+        f"total={total_window_nodes}, "
+        f"unique={unique_window_nodes}, "
+        f"overlap_ratio={overlap_ratio:.4f}",
+        flush=True,
+    )
 
 
 def _build_struct_info_from_cache_payload(payload, graph_in_degree, graph_out_degree, edge_index=None, edge_csr_data=None, num_nodes=None):
@@ -148,7 +185,7 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
     if cache_enabled and int(getattr(args, 'refresh_preprocess_cache', 0)) != 1:
         if world_size > 1:
             if args.rank == 0:
-                payload, cache_key, cache_path, cache_args_snapshot, cache_load_time = load_preprocess_cache(
+                payload, cache_key, cache_path, cache_args_snapshot, cache_load_time, cache_size_mb = load_preprocess_cache(
                     args,
                     graph_in_degree,
                     graph_out_degree,
@@ -159,21 +196,21 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
                 )
                 cache_hit = payload is not None
                 if cache_hit:
-                    print(f"Preprocess cache hit: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s")
+                    print(f"Preprocess cache hit: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s, size_mb={cache_size_mb:.2f}")
                 else:
-                    print(f"Preprocess cache miss: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s")
+                    print(f"Preprocess cache miss: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s, size_mb={cache_size_mb:.2f}")
                 hit_box = [cache_hit]
                 dist.broadcast_object_list(hit_box, src=0) # 广播是否 hit cache
-                if cache_hit:
-                    return _build_struct_info_from_cache_payload(payload, graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
             else:
                 # 非 root GPU(0号) 生成空窗口信息，等待窗口状态同步
                 hit_box = [False]
                 dist.broadcast_object_list(hit_box, src=0)  
                 if hit_box[0]:
                     return build_placeholder_struct_info(graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
+            if args.rank == 0 and cache_hit:
+                return _build_struct_info_from_cache_payload(payload, graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
         else:
-            payload, cache_key, cache_path, cache_args_snapshot, cache_load_time = load_preprocess_cache(
+            payload, cache_key, cache_path, cache_args_snapshot, cache_load_time, cache_size_mb = load_preprocess_cache(
                 args,
                 graph_in_degree,
                 graph_out_degree,
@@ -183,9 +220,9 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
                 world_size=world_size,
             )
             if payload is not None:
-                print(f"Preprocess cache hit: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s")
+                print(f"Preprocess cache hit: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s, size_mb={cache_size_mb:.2f}")
                 return _build_struct_info_from_cache_payload(payload, graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
-            print(f"Preprocess cache miss: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s")
+            print(f"Preprocess cache miss: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s, size_mb={cache_size_mb:.2f}")
     elif cache_enabled and args.rank == 0 and int(getattr(args, 'refresh_preprocess_cache', 0)) == 1:
         cache_key, cache_args_snapshot = compute_preprocess_cache_key(args, world_size)
         print(f"Preprocess cache miss: refresh requested, key={cache_key[:12]}")
@@ -288,6 +325,7 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
             f"time={partition_build_time:.3f}s",
             flush=True,
         )
+        _log_window_stats(wm.partitioned_results)
 
     # Stage 1: PPR 到基础 Metis 划分完成。
     stage1_time = (
@@ -323,7 +361,7 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
     if cache_enabled and args.rank == 0:
         if cache_key is None or cache_args_snapshot is None:
             cache_key, cache_args_snapshot = compute_preprocess_cache_key(args, world_size)
-        saved_cache_path, cache_save_time = save_preprocess_cache(args, struct_info, cache_key, cache_args_snapshot)
-        print(f"Preprocess cache save: path={saved_cache_path}, key={cache_key[:12]}, save_time={cache_save_time:.3f}s")
+        saved_cache_path, cache_save_time, cache_size_mb = save_preprocess_cache(args, struct_info, cache_key, cache_args_snapshot)
+        print(f"Preprocess cache save: path={saved_cache_path}, key={cache_key[:12]}, save_time={cache_save_time:.3f}s, size_mb={cache_size_mb:.2f}")
 
     return struct_info
