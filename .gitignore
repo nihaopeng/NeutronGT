@@ -1,40 +1,41 @@
-TorchGT/
-model_ckpt/
-dataset/
+# ===== 编译产物 =====
 __pycache__/
-*.csv
-*.json
+*.pyc
+*.pyo
+*.so
 
-
+# ===== 数据集 =====
 dataset/
 dataset-graph/
-dataset/*
-dataset-graph/*
+data/
+
+# ===== 模型检查点 =====
+model_ckpt/
+*.pkl
+
+# ===== 日志 =====
 *.log
 *.txt
+*.csv
+NeutronGT_logs/
+TorchGT_logs/
+old_logs/
 experiment_logs/
-experiment_logs/*
 experiment_logs_new/
-experiment_logs_new/*
 exps/
-exps/*
+Baseline/TorchGT_logs/
+NeutronGT/NeutronGT_logs/
 
-# 图级别任务暂时不要
+# ===== 图级别任务（暂不开发）=====
 models/graphormer_dist_graph_level_mp_malnet_ppr.py
 models/graphormer_dist_graph_level_mp_malnet.py
 models/gt_dist_graph_level_mp_malnet_ppr.py
 models/gt_dist_graph_level_mp_malnet.py
-
-
 main_sp_sparse_malnet_ppr.py
 main_sp_sparse_malnet.py
 run_ppr_graph.sh
 run_graph.sh
-
-data
-data/
-data/*
-
-old_logs/
-old_logs/*
 run.sh
+
+# ===== IDE / 工具 =====
+.claude/
