@@ -105,36 +105,53 @@ def add_isolated_connections(
     ppr_fill_value: float = 0.001,
     device="cuda"
 ) -> tuple:
-    """FROM QWEN
-    向 PPR 结果中添加孤立节点与其他节点的随机连接。
+    """向 PPR 结果中添加孤立节点与其他节点的随机连接。
+
+    大图优化：孤立节点检测在 CPU 上完成，避免将全量 edge_index
+    (papers100M: 25.6 GB) 搬到 GPU。只有极少数情况下有孤立节点时
+    才将小批量随机边搬上 GPU。
     """
     edge_index, edge_values = ppr_result
-    edge_index = edge_index.to(device)
-    edge_values = edge_values.to(device)
-    original_edge_index = original_edge_index.to(device)
-    ppr_appeared_nodes = torch.unique(edge_index)
-    original_appeared_nodes = torch.unique(original_edge_index)
-    appeared_nodes = torch.unique(torch.cat([ppr_appeared_nodes, original_appeared_nodes], dim=0))
-    all_nodes = torch.arange(num_nodes, device=device)
-    is_isolated = ~torch.isin(all_nodes, appeared_nodes)
-    isolated_nodes = all_nodes[is_isolated]
+
+    # 在 CPU 上检测孤立节点，避免将整个 edge_index 搬到 GPU
+    edge_index_cpu = edge_index.cpu()
+    original_cpu = original_edge_index.cpu()
+    ppr_appeared = torch.unique(edge_index_cpu)
+    original_appeared = torch.unique(original_cpu)
+    appeared = torch.unique(torch.cat([ppr_appeared, original_appeared], dim=0))
+    del ppr_appeared, original_appeared
+
+    all_nodes_cpu = torch.arange(num_nodes)
+    is_isolated = ~torch.isin(all_nodes_cpu, appeared)
+    isolated_nodes = all_nodes_cpu[is_isolated]
+
     if isolated_nodes.numel() == 0:
-        return edge_index, edge_values
-    non_isolated_mask = ~is_isolated
-    non_isolated_nodes = all_nodes[non_isolated_mask]
+        return edge_index_cpu, edge_values.cpu()
+
+    # 极少情况：存在孤立节点，生成随机连接
+    non_isolated_nodes = all_nodes_cpu[~is_isolated]
     if non_isolated_nodes.numel() == 0:
-        return edge_index, edge_values
-    rand_probs = torch.rand(len(isolated_nodes), len(non_isolated_nodes), device=device)
+        return edge_index_cpu, edge_values.cpu()
+
+    # 在 CPU 上生成随机边（孤立节点数量通常极小）
+    n_isolated = len(isolated_nodes)
+    n_non_isolated = len(non_isolated_nodes)
+    rand_probs = torch.rand(n_isolated, n_non_isolated)
     connect_mask = rand_probs < connect_prob
     i_idx, j_idx = torch.where(connect_mask)
     if i_idx.numel() == 0:
-        return edge_index, edge_values
+        return edge_index_cpu, edge_values.cpu()
+
     srcs = isolated_nodes[i_idx]
     dsts = non_isolated_nodes[j_idx]
     new_edges = torch.stack([srcs, dsts], dim=0)
-    new_values = torch.full((new_edges.shape[1],), ppr_fill_value, device=device, dtype=edge_values.dtype)
-    final_edge_index = torch.cat([edge_index, new_edges], dim=1)
-    final_edge_values = torch.cat([edge_values, new_values], dim=0)
+    new_values = torch.full((new_edges.shape[1],), ppr_fill_value, dtype=edge_values.dtype)
+
+    # 搬到 GPU 拼接（孤立节点边极少, 几乎不占显存）
+    edge_index_gpu = edge_index_cpu.to(device)
+    edge_values_gpu = edge_values.to(device)
+    final_edge_index = torch.cat([edge_index_gpu, new_edges.to(device)], dim=1)
+    final_edge_values = torch.cat([edge_values_gpu, new_values.to(device)], dim=0)
     return final_edge_index, final_edge_values
 
 
