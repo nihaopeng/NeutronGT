@@ -5,6 +5,7 @@ __pycache__/
 *.so
 
 # ===== 数据集 =====
+dataset
 dataset/
 dataset-graph/
 data/
