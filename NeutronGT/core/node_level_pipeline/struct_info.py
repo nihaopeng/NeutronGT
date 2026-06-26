@@ -59,51 +59,72 @@ def get_rank_source_range(num_nodes: int, rank: int, world_size: int):
     return start, end
 
 
-def gather_ppr_shards(local_ppr: tuple[torch.Tensor, torch.Tensor], rank: int, world_size: int):
+def _ppr_shard_dir(dataset_dir: str, dataset: str) -> str:
+    import os
+    d = os.path.join(dataset_dir, dataset, 'ppr_temp')
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _ppr_shard_path(dataset_dir: str, dataset: str, rank: int) -> str:
+    import os
+    return os.path.join(_ppr_shard_dir(dataset_dir, dataset), f'ppr_shard_{rank}.pt')
+
+
+def gather_ppr_shards(local_ppr: tuple[torch.Tensor, torch.Tensor], rank: int,
+                       world_size: int, dataset_dir: str = '', dataset: str = ''):
     edge_index, edge_value = local_ppr
     if world_size <= 1:
         return edge_index, edge_value
 
-    local_payload = (
-        edge_index.detach().cpu(),
-        edge_value.detach().cpu(),
-    )
+    # 各 rank 将 PPR 结果写入磁盘，避免 dist.gather_object 在 rank 0 上
+    # 同时持有所有 shard 的内存拷贝（papers100M: 4 shard ≈ 22 GB）
+    shard_path = _ppr_shard_path(dataset_dir, dataset, rank)
+    torch.save((edge_index.cpu(), edge_value.cpu()), shard_path)
+    del edge_index, edge_value
+
     try:
         dist.barrier()
     except Exception as exc:
         raise RuntimeError(
-            "Distributed PPR shard synchronization failed before gather. This usually means at least one rank did not finish local APPNP propagation cleanly."
-        ) from exc
-
-    gathered_payloads = [None for _ in range(world_size)] if rank == 0 else None
-    try:
-        dist.gather_object(local_payload, object_gather_list=gathered_payloads, dst=0)
-    except Exception as exc:
-        raise RuntimeError(
-            "Distributed PPR shard gather failed. Check earlier rank-local logs for the first rank that crashed or stalled before entering gather."
+            "Distributed PPR shard synchronization failed at barrier. "
+            "This usually means at least one rank did not finish saving its PPR shard."
         ) from exc
 
     if rank != 0:
         return None
 
-    # 增量合并：逐个 shard concat 并立即释放，避免同时持有所有 shard + 最终结果
+    # rank 0 逐个从磁盘加载 shard 并增量合并，每个 shard 加载后立即释放
     result_edge_index = None
     result_edge_value = None
-    for payload in gathered_payloads:
-        if payload is None:
-            continue
-        shard_edge_index, shard_edge_value = payload
-        if shard_edge_value.numel() <= 0:
-            del shard_edge_index, shard_edge_value
+    for r in range(world_size):
+        shard_path_r = _ppr_shard_path(dataset_dir, dataset, r)
+        try:
+            shard_ei, shard_ev = torch.load(shard_path_r, map_location='cpu')
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to load PPR shard from rank {r} at {shard_path_r}"
+            ) from exc
+        if shard_ev.numel() <= 0:
+            del shard_ei, shard_ev
             continue
         if result_edge_index is None:
-            result_edge_index = shard_edge_index
-            result_edge_value = shard_edge_value
+            result_edge_index = shard_ei
+            result_edge_value = shard_ev
         else:
-            result_edge_index = torch.cat([result_edge_index, shard_edge_index], dim=1)
-            result_edge_value = torch.cat([result_edge_value, shard_edge_value], dim=0)
-            del shard_edge_index, shard_edge_value
-    del gathered_payloads
+            result_edge_index = torch.cat([result_edge_index, shard_ei], dim=1)
+            result_edge_value = torch.cat([result_edge_value, shard_ev], dim=0)
+            del shard_ei, shard_ev
+
+    # 清理临时文件
+    import os
+    for r in range(world_size):
+        p = _ppr_shard_path(dataset_dir, dataset, r)
+        if os.path.exists(p):
+            os.remove(p)
+    shard_dir = _ppr_shard_dir(dataset_dir, dataset)
+    if os.path.isdir(shard_dir) and not os.listdir(shard_dir):
+        os.rmdir(shard_dir)
 
     if result_edge_index is None:
         empty_index = torch.empty((2, 0), dtype=torch.long)
@@ -230,7 +251,8 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
     if distributed_appnp_ppr:
         sync_device(device)
         gather_start = time.time()
-        sorted_ppr_matrix = gather_ppr_shards(local_sorted_ppr_matrix, rank=args.rank, world_size=world_size)
+        sorted_ppr_matrix = gather_ppr_shards(local_sorted_ppr_matrix, rank=args.rank, world_size=world_size,
+                                                 dataset_dir=args.dataset_dir, dataset=args.dataset)
         sync_device(device)
         gather_time = time.time() - gather_start
         if args.rank == 0 and sorted_ppr_matrix is not None:
