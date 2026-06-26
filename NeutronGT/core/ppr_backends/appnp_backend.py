@@ -22,10 +22,16 @@ def _load_csr_graph(csr_data, device, num_nodes: int | None = None):
     if "rowptr" not in csr_data or "col" not in csr_data:
         raise KeyError(f"CSR data must contain rowptr and col, got keys={list(csr_data.keys())}")
 
-    # 大图使用 int32 加载并直接放在 GPU 上，相比 int64 节省一半显存
-    # papers100M: 1.6B edges * 4 bytes = 6.4 GB (int32) vs 12.8 GB (int64)
-    rowptr = torch.as_tensor(csr_data["rowptr"], dtype=torch.int32, device=device)
-    col = torch.as_tensor(csr_data["col"], dtype=torch.int32, device=device)
+    # 先在 CPU 上转为 int32，再搬上 GPU。
+    # torch.as_tensor(data, dtype=int32, device=cuda) 在 PyTorch 内部可能先将
+    # int64 data 完整拷贝到 GPU 再转 int32，导致 GPU 上同时存在 int64 和 int32 两份。
+    # papers100M: col int64 (12.8GB) + int32 (6.4GB) = 19.2GB GPU 峰值。
+    # 改为 CPU 转 dtype 后，int64→int32 的中间产物在 CPU 上，GPU 只看到最终 int32。
+    rowptr_cpu = csr_data["rowptr"].to(torch.int32)
+    col_cpu = csr_data["col"].to(torch.int32)
+    rowptr = rowptr_cpu.to(device)
+    col = col_cpu.to(device)
+    del rowptr_cpu, col_cpu
     if rowptr.dim() != 1 or col.dim() != 1:
         raise ValueError("CSR rowptr and col must be 1-D")
     inferred_num_nodes = int(rowptr.numel() - 1)
@@ -236,6 +242,8 @@ def personal_pagerank_appnp(
 
     if csr_data is not None:
         graph_rowptr, graph_col, degree, num_nodes = _load_csr_graph(csr_data, device=device, num_nodes=num_nodes)
+        # 释放 CPU 上的 int64 原始 CSR 数据，仅保留 GPU int32 版本
+        csr_data.clear()
     else:
         if edge_index is None:
             raise ValueError("edge_index must be provided when csr_data is None")
