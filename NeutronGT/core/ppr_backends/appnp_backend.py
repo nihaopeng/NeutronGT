@@ -63,8 +63,9 @@ def _build_csr_from_edge_index(edge_index: torch.Tensor, device, num_nodes: int 
 def _rowptr_to_rows(rowptr: torch.Tensor):
     lengths = rowptr[1:] - rowptr[:-1]
     if lengths.numel() == 0:
-        return torch.empty((0,), dtype=torch.long, device=rowptr.device)
-    return torch.arange(lengths.numel(), dtype=torch.long, device=rowptr.device).repeat_interleave(lengths)
+        return torch.empty((0,), dtype=torch.int32, device=rowptr.device)
+    # 使用 int32 替代 int64: papers100M 有 1.6B 条边，int64 版占用 12.8GB，int32 仅需 6.4GB
+    return torch.arange(lengths.numel(), dtype=torch.int32, device=rowptr.device).repeat_interleave(lengths)
 
 
 def _aggregate_sparse_entries(rows: torch.Tensor, cols: torch.Tensor, values: torch.Tensor, num_nodes: int):
