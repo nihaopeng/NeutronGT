@@ -19,10 +19,10 @@ export LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}
 # 阶段 2：完整训练
 #   bash scripts/run_papers100M.sh 0,1,2,3 --GPH_Slim
 #
-# 显存估算 (per window, fp32)：
-#   GPH_Slim  (d=64,  4层): n_parts=64   → ~1.9M nodes/window → ~8 GB
-#   GT        (d=128, 4层): n_parts=64   → ~1.9M nodes/window → ~12 GB
-#   GPH_Large (d=768,12层): n_parts=512  → ~238K nodes/window → ~21 GB
+# n_parts 选择依据（参照 ogbn-products: 2.4M/128≈19K nodes/window）:
+#   GPH_Slim:  n_parts=4096 → ~31K nodes/window → ~1.1 GB GPU
+#   GT:        n_parts=4096 → ~31K nodes/window → ~2.0 GB GPU
+#   GPH_Large: n_parts=8192 → ~16K nodes/window → ~9.5 GB GPU
 # ===============================================
 
 DEVICES=${1-}
@@ -76,7 +76,7 @@ case "$MODEL_INPUT" in
         HIDDEN_DIM=128
         FFN_DIM=128
         NUM_HEADS=8
-        NPARTS=64
+        NPARTS=4096
         RELATED_TOPK=4
         ;;
     "GPH_Slim")
@@ -86,7 +86,7 @@ case "$MODEL_INPUT" in
         HIDDEN_DIM=64
         FFN_DIM=64
         NUM_HEADS=8
-        NPARTS=64
+        NPARTS=4096
         RELATED_TOPK=4
         ;;
     "GPH_Large")
@@ -96,7 +96,7 @@ case "$MODEL_INPUT" in
         HIDDEN_DIM=768
         FFN_DIM=768
         NUM_HEADS=32
-        NPARTS=512
+        NPARTS=8192
         RELATED_TOPK=2
         ;;
 esac
@@ -146,13 +146,13 @@ echo "  显存预估 (per window, fp32):"
 
 case "$MODEL_INPUT" in
     "GPH_Slim")
-        echo "    ~1.9M nodes/window → ~8 GB GPU memory"
+        echo "    ~31K nodes/window → ~1.1 GB GPU memory"
         ;;
     "GT")
-        echo "    ~1.9M nodes/window → ~12 GB GPU memory"
+        echo "    ~31K nodes/window → ~2.0 GB GPU memory"
         ;;
     "GPH_Large")
-        echo "    ~238K nodes/window → ~21 GB GPU memory"
+        echo "    ~16K nodes/window → ~9.5 GB GPU memory"
         ;;
 esac
 echo ""

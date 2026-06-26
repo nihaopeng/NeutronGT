@@ -22,8 +22,10 @@ def _load_csr_graph(csr_data, device, num_nodes: int | None = None):
     if "rowptr" not in csr_data or "col" not in csr_data:
         raise KeyError(f"CSR data must contain rowptr and col, got keys={list(csr_data.keys())}")
 
-    rowptr = torch.as_tensor(csr_data["rowptr"], dtype=torch.long, device=device)
-    col = torch.as_tensor(csr_data["col"], dtype=torch.long, device=device)
+    # 大图使用 int32 加载并直接放在 GPU 上，相比 int64 节省一半显存
+    # papers100M: 1.6B edges * 4 bytes = 6.4 GB (int32) vs 12.8 GB (int64)
+    rowptr = torch.as_tensor(csr_data["rowptr"], dtype=torch.int32, device=device)
+    col = torch.as_tensor(csr_data["col"], dtype=torch.int32, device=device)
     if rowptr.dim() != 1 or col.dim() != 1:
         raise ValueError("CSR rowptr and col must be 1-D")
     inferred_num_nodes = int(rowptr.numel() - 1)
