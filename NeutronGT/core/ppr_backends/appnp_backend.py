@@ -159,10 +159,19 @@ def _ensure_cusparse_indexable(num_nodes: int, rowptr: torch.Tensor, col: torch.
 
 
 def _build_transition_csr_values(graph_rowptr: torch.Tensor, graph_col: torch.Tensor, degree: torch.Tensor):
-    src = _rowptr_to_rows(graph_rowptr)
-    if src.numel() == 0:
+    """构建 CSR 转移概率值，避免创建 1.6B 元素的中间索引张量。
+
+    原实现: src = _rowptr_to_rows(rowptr); 1.0 / degree[src]
+            同时存在 src(6.4GB) + degree[src](6.4GB) + result(6.4GB) = 19.2GB 峰值
+
+    新实现: inv_degree.repeat_interleave(lengths)
+            只有 inv_degree(444MB) + result(6.4GB) = 6.8GB 峰值
+    """
+    lengths = graph_rowptr[1:] - graph_rowptr[:-1]
+    if lengths.numel() == 0:
         return torch.empty((0,), dtype=torch.float32, device=graph_rowptr.device)
-    return (1.0 / degree[src]).to(torch.float32)
+    inv_degree = (1.0 / degree).to(torch.float32)
+    return inv_degree.repeat_interleave(lengths.to(torch.long))
 
 
 def _cusparse_spgemm_iteration(state_rowptr, state_col, state_values, transition_rowptr, transition_col, transition_values, teleport_rows, teleport_cols, teleport_values, num_rows, num_nodes, alpha, iter_topk, timing_stats=None):
