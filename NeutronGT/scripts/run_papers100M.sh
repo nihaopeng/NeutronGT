@@ -110,8 +110,8 @@ PPR_BACKEND="appnp"
 PPR_TOPK=5
 PPR_ALPHA=0.85
 PPR_NUM_ITER=10
-PPR_BATCH_SIZE=32768
-PPR_ITER_TOPK=128
+PPR_BATCH_SIZE=2048
+PPR_ITER_TOPK=64
 USE_CACHE=1
 
 # ==================== Main Execution ====================

@@ -159,19 +159,22 @@ def _ensure_cusparse_indexable(num_nodes: int, rowptr: torch.Tensor, col: torch.
 
 
 def _build_transition_csr_values(graph_rowptr: torch.Tensor, graph_col: torch.Tensor, degree: torch.Tensor):
-    """构建 CSR 转移概率值，避免创建 1.6B 元素的中间索引张量。
+    """在 CPU 上计算 CSR 转移概率值，仅将最终结果移至 GPU。
 
-    原实现: src = _rowptr_to_rows(rowptr); 1.0 / degree[src]
-            同时存在 src(6.4GB) + degree[src](6.4GB) + result(6.4GB) = 19.2GB 峰值
-
-    新实现: inv_degree.repeat_interleave(lengths)
-            只有 inv_degree(444MB) + result(6.4GB) = 6.8GB 峰值
+    避免 GPU 上的 repeat_interleave 峰值分配（papers100M: 1.6B × 4 = 6.4 GB），
+    此分配与 CSR col 和 cuSPARSE 工作区叠加会导致 24GB 显卡 OOM。
     """
     lengths = graph_rowptr[1:] - graph_rowptr[:-1]
     if lengths.numel() == 0:
         return torch.empty((0,), dtype=torch.float32, device=graph_rowptr.device)
-    inv_degree = (1.0 / degree).to(torch.float32)
-    return inv_degree.repeat_interleave(lengths.to(torch.long))
+    # 全部在 CPU 上计算，最后一次性搬到 GPU
+    device = graph_rowptr.device
+    lengths_cpu = lengths.cpu()
+    inv_degree = (1.0 / degree.cpu()).to(torch.float32)
+    values_cpu = inv_degree.repeat_interleave(lengths_cpu.to(torch.long))
+    result = values_cpu.to(device=device)
+    del values_cpu, inv_degree, lengths_cpu
+    return result
 
 
 def _cusparse_spgemm_iteration(state_rowptr, state_col, state_values, transition_rowptr, transition_col, transition_values, teleport_rows, teleport_cols, teleport_values, num_rows, num_nodes, alpha, iter_topk, timing_stats=None):
@@ -247,6 +250,10 @@ def personal_pagerank_appnp(
     transition_rowptr = graph_rowptr
     transition_col = graph_col
     transition_values = _build_transition_csr_values(graph_rowptr, graph_col, degree)
+    # degree 在 transition_values 计算完成后不再需要，释放 GPU 显存
+    del degree
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
     source_start = 0 if source_start is None else max(0, min(int(source_start), num_nodes))
     source_end = num_nodes if source_end is None else max(source_start, min(int(source_end), num_nodes))
