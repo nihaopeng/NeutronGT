@@ -66,8 +66,8 @@ def main():
         if args.save_checkpoint or args.resume_latest:
             ensure_checkpoint_dir(args)
     
-    feature = torch.load(args.dataset_dir + args.dataset + '/x.pt')
-    y = torch.load(args.dataset_dir + args.dataset + '/y.pt')
+    feature = torch.load(args.dataset_dir + args.dataset + '/x.pt', mmap=True)
+    y = torch.load(args.dataset_dir + args.dataset + '/y.pt', mmap=True)
     edge_csr_data = load_optional_edge_csr(args.dataset_dir, args.dataset) if args.ppr_backend == 'appnp' else None
     edge_index = None if edge_csr_data is not None else torch.load(args.dataset_dir + args.dataset + '/edge_index.pt')
     N = feature.shape[0]

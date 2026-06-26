@@ -125,12 +125,20 @@ class weightMetis_keepParent:
         self.dup_nodes_per_partition = self._find_duplicate_nodes_and_rerange()
         self.timing_stats['duplicate_rerange_time'] = time.time() - duplicate_start
         self.dup_nodes_per_partition_feature = []
-        subgraph_build_start = time.time()
+        # 保存 num_nodes 供后续使用（csr_adjacency 将被释放）
+        self.num_nodes = len(self.csr_adjacency.adj_starts) - 1 if hasattr(self.csr_adjacency, 'adj_starts') else None
+        # 先构建 partitioned_results
         for parent_group in self.child_partitions:
             for part in parent_group:
                 self.partitioned_results.append(part)
-                self.sub_edge_index_for_partition_results.append(self._get_sub_edge_index(part))
+        # 一次性扫描 global_edge_index 为所有分区构建子图边索引
+        subgraph_build_start = time.time()
+        self.sub_edge_index_for_partition_results = self._build_all_sub_edge_indices()
         self.timing_stats['subgraph_build_time'] = time.time() - subgraph_build_start
+
+        # 释放预处理中间数据：Metis 划分完成后不再需要
+        del self.csr_adjacency, self.eweights
+        del self.ppr_edge_index, self.ppr_val
 
     def partition(self,partition:torch.Tensor,csr_adjacency:pymetis.CSRAdjacency,eweights:list[list],n_parts:int):
         try:
@@ -287,13 +295,99 @@ class weightMetis_keepParent:
             # return new_partition_global_nodes_id, new_sub_edge_index
 
     def _get_sub_edge_index(self, node_set: torch.Tensor) -> torch.Tensor:
+        """单个分区的子图边索引提取（保留兼容 node_in/node_out）"""
         sub_edge_index, _ = subgraph(
             node_set,
             self.global_edge_index,
             relabel_nodes=True,
-            num_nodes=len(self.csr_adjacency.adj_starts) - 1
+            num_nodes=self.num_nodes
         )
         return sub_edge_index
+
+    def _build_all_sub_edge_indices(self) -> list:
+        """一次性扫描 global_edge_index，为所有分区构建子图边索引。
+
+        替代原有的逐分区 torch_geometric.utils.subgraph() 调用，
+        将 50 次全量边扫描合并为 1 次。
+        """
+        num_parts = len(self.partitioned_results)
+        if num_parts == 0:
+            return []
+
+        # 构建 node → partition 映射
+        num_nodes = self.num_nodes or int(self.global_edge_index.max().item()) + 1
+        node_to_part = torch.full((num_nodes,), -1, dtype=torch.long)
+        for pid, part in enumerate(self.partitioned_results):
+            node_to_part[part.long()] = pid
+
+        # 分块处理 global_edge_index，控制峰值内存
+        src_all, dst_all = self.global_edge_index[0].long(), self.global_edge_index[1].long()
+        total_edges = src_all.numel()
+        CHUNK = 200_000_000  # 2 亿条边每块
+
+        # 每个分区累积 [src_local, dst_local]
+        part_srcs: list[list] = [[] for _ in range(num_parts)]
+        part_dsts: list[list] = [[] for _ in range(num_parts)]
+
+        for chunk_start in range(0, total_edges, CHUNK):
+            chunk_end = min(chunk_start + CHUNK, total_edges)
+            src = src_all[chunk_start:chunk_end]
+            dst = dst_all[chunk_start:chunk_end]
+
+            src_part = node_to_part[src]
+            dst_part = node_to_part[dst]
+            same_part = (src_part == dst_part) & (src_part >= 0)
+
+            valid_src = src[same_part]
+            valid_dst = dst[same_part]
+            valid_part = src_part[same_part]
+
+            if valid_src.numel() == 0:
+                continue
+
+            # 按分区排序后分组
+            order = torch.argsort(valid_part)
+            valid_part = valid_part[order]
+            valid_src = valid_src[order]
+            valid_dst = valid_dst[order]
+            boundaries = torch.searchsorted(
+                valid_part,
+                torch.arange(num_parts + 1, device=valid_part.device)
+            )
+
+            for pid in range(num_parts):
+                s, e = int(boundaries[pid].item()), int(boundaries[pid + 1].item())
+                if s == e:
+                    continue
+                part_srcs[pid].append(valid_src[s:e].cpu())
+                part_dsts[pid].append(valid_dst[s:e].cpu())
+
+            del src, dst, src_part, dst_part, same_part, valid_src, valid_dst, valid_part, order, boundaries
+
+        # 每个分区内 relabel: global → local（复用 global_to_local 缓冲区）
+        sub_edge_list = []
+        global_to_local = torch.full((num_nodes,), -1, dtype=torch.long)
+        for pid in range(num_parts):
+            if not part_srcs[pid]:
+                sub_edge_list.append(torch.empty((2, 0), dtype=torch.long))
+                continue
+            cat_src = torch.cat(part_srcs[pid])
+            cat_dst = torch.cat(part_dsts[pid])
+            part_nodes = self.partitioned_results[pid]
+            # 标记当前分区节点 → local index
+            global_to_local[part_nodes.long()] = torch.arange(len(part_nodes))
+            local_src = global_to_local[cat_src]
+            local_dst = global_to_local[cat_dst]
+            sub_edge_list.append(torch.stack([local_src, local_dst], dim=0))
+            del local_src, local_dst
+            # 清除当前分区的映射，为下一分区复用缓冲区
+            global_to_local[part_nodes.long()] = -1
+            del cat_src, cat_dst
+            part_srcs[pid] = None
+            part_dsts[pid] = None
+
+        del global_to_local, node_to_part
+        return sub_edge_list
 
 
     def _extract_subgraph_csr_eweight(self, parent_nodes: list[int]) -> tuple[pymetis.CSRAdjacency, list[int]]:
@@ -336,27 +430,25 @@ class weightMetis_keepParent:
         """
         if not hasattr(self, 'child_partitions') or not self.child_partitions:
             return []
-        # 收集所有节点并找出全局重复节点
-        all_nodes = [node for group in self.child_partitions for part in group for node in part.tolist()]
-        if not all_nodes:
+        # 收集所有节点并找出全局重复节点（使用 tensor 操作避免 Python list 内存爆炸）
+        parts_list = [part for group in self.child_partitions for part in group]
+        if not parts_list:
             return []
-        unique, counts = torch.unique(torch.tensor(all_nodes), return_counts=True)
-        duplicated_set = set(unique[counts >= 2].tolist())
+        all_nodes = torch.cat(parts_list)
+        unique, counts = torch.unique(all_nodes, return_counts=True)
         # 重排每个子分区并收集其开头的重复节点
         dup_nodes_per_partition = []
         new_child_partitions = []
         for parent_group in self.child_partitions:
             new_group = []
             for part in parent_group:
-                nodes = part.tolist()
-                dup = [n for n in nodes if n in duplicated_set]
-                non_dup = [n for n in nodes if n not in duplicated_set]
-                reranged = torch.tensor(dup + non_dup, dtype=torch.long)
+                # 使用 tensor isin 替代 Python list 遍历
+                is_dup = torch.isin(part, unique[counts >= 2])
+                dup = part[is_dup]
+                non_dup = part[~is_dup]
+                reranged = torch.cat([dup, non_dup], dim=0)
                 new_group.append(reranged)
-                if dup:
-                    dup_nodes_per_partition.append(torch.tensor(dup, dtype=torch.long))
-                else:
-                    dup_nodes_per_partition.append(torch.empty(0, dtype=torch.long))
+                dup_nodes_per_partition.append(dup if dup.numel() > 0 else torch.empty(0, dtype=torch.long))
             new_child_partitions.append(new_group)
 
         self.child_partitions = new_child_partitions

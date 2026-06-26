@@ -289,4 +289,8 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
         saved_cache_path, cache_save_time = save_preprocess_cache(args, struct_info, cache_key, cache_args_snapshot)
         print(f"Preprocess cache save: path={saved_cache_path}, key={cache_key[:12]}, save_time={cache_save_time:.3f}s")
 
+    # 释放 full PPR matrix：struct_enc=False 时不使用，节省 ~11 GB
+    if args.struct_enc != "True":
+        struct_info.sorted_ppr_matrix = None
+
     return struct_info
