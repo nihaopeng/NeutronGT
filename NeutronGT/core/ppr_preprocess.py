@@ -43,25 +43,31 @@ def build_adj_fromat(sorted_ppr_matrix):
     unique_edge_keys, inverse_indices = torch.unique(edge_key, sorted=True, return_inverse=True)
     summed_ppr = torch.zeros(unique_edge_keys.numel(), dtype=ppr_val.dtype, device=ppr_val.device)
     summed_ppr.scatter_add_(0, inverse_indices, ppr_val)
-    unique_u = torch.div(unique_edge_keys, num_nodes, rounding_mode="floor")
-    unique_v = unique_edge_keys % num_nodes
+    # 转为 int32: papers100M 节点数 111M < 2^31，int32 安全
+    unique_u = torch.div(unique_edge_keys, num_nodes, rounding_mode="floor").to(torch.int32)
+    unique_v = (unique_edge_keys % num_nodes).to(torch.int32)
+    del unique_edge_keys, edge_key, u, v, src, dst
     weights = (summed_ppr * 1000).clamp_min(1).to(torch.int32)
 
     u_all = torch.cat([unique_u, unique_v], dim=0)
     v_all = torch.cat([unique_v, unique_u], dim=0)
     weights_all = torch.cat([weights, weights], dim=0)
-    sort_idx = torch.argsort(u_all)
-    u_all = u_all[sort_idx]
-    v_all = v_all[sort_idx]
-    weights_all = weights_all[sort_idx]
+    del unique_u, unique_v, weights
 
-    degrees = torch.bincount(u_all, minlength=num_nodes).to(torch.int32)
-    xadj = torch.zeros(num_nodes + 1, dtype=torch.int32, device=u_all.device)
+    sort_idx = torch.argsort(u_all)
+    u_all_sorted = u_all[sort_idx]
+    v_all_sorted = v_all[sort_idx]
+    weights_all_sorted = weights_all[sort_idx]
+    del u_all, v_all, weights_all, sort_idx
+
+    degrees = torch.bincount(u_all_sorted, minlength=num_nodes).to(torch.int32)
+    xadj = torch.zeros(num_nodes + 1, dtype=torch.int32, device=u_all_sorted.device)
     xadj[1:] = torch.cumsum(degrees, dim=0)
 
     xadj_np = xadj.cpu().numpy()
-    adjncy_np = v_all.to(torch.int32).cpu().numpy()
-    eweights_np = weights_all.cpu().numpy()
+    adjncy_np = v_all_sorted.to(torch.int32).cpu().numpy()
+    eweights_np = weights_all_sorted.cpu().numpy()
+    del v_all_sorted, weights_all_sorted
     assert len(adjncy_np) == len(eweights_np)
     assert int(xadj_np[-1]) == len(adjncy_np)
     csr_adj = pymetis.CSRAdjacency(

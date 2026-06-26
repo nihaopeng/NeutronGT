@@ -86,22 +86,30 @@ def gather_ppr_shards(local_ppr: tuple[torch.Tensor, torch.Tensor], rank: int, w
     if rank != 0:
         return None
 
-    edge_index_parts = []
-    edge_value_parts = []
+    # 增量合并：逐个 shard concat 并立即释放，避免同时持有所有 shard + 最终结果
+    result_edge_index = None
+    result_edge_value = None
     for payload in gathered_payloads:
         if payload is None:
             continue
         shard_edge_index, shard_edge_value = payload
         if shard_edge_value.numel() <= 0:
+            del shard_edge_index, shard_edge_value
             continue
-        edge_index_parts.append(shard_edge_index)
-        edge_value_parts.append(shard_edge_value)
+        if result_edge_index is None:
+            result_edge_index = shard_edge_index
+            result_edge_value = shard_edge_value
+        else:
+            result_edge_index = torch.cat([result_edge_index, shard_edge_index], dim=1)
+            result_edge_value = torch.cat([result_edge_value, shard_edge_value], dim=0)
+            del shard_edge_index, shard_edge_value
+    del gathered_payloads
 
-    if not edge_index_parts:
+    if result_edge_index is None:
         empty_index = torch.empty((2, 0), dtype=torch.long)
         empty_value = torch.empty((0,), dtype=edge_value.dtype)
         return empty_index, empty_value
-    return torch.cat(edge_index_parts, dim=1), torch.cat(edge_value_parts, dim=0)
+    return result_edge_index, result_edge_value
 
 
 def _preprocess_cache_enabled(args):
@@ -252,6 +260,8 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
         sorted_ppr_matrix=sorted_ppr_matrix,
     )
     partition_build_time = time.time() - partition_build_start
+    # wm 已构造完毕，释放 build_adj_fromat 产物和 PPR 矩阵（wm 内部已提取并随后释放所需数据）
+    del csr_adjacency, eweights, sorted_ppr_matrix
 
     # Stage 1: PPR 到基础 Metis 划分完成。
     stage1_time = (
