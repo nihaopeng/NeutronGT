@@ -130,7 +130,8 @@ def _build_local_sub_edge_index_list(structInfo: StructInfo, local_partitions):
                 relabel_nodes=True,
                 num_nodes=structInfo.num_nodes,
             )
-            local_sub_edge_index_list.append(local_edge_index)
+            # torch_scatter 要求 int64 index; graph_edge_index 为 int32, subgraph 继承该 dtype
+            local_sub_edge_index_list.append(local_edge_index.long())
         return local_sub_edge_index_list
 
     rowptr = structInfo.graph_csr_data['rowptr'].to(torch.long).cpu()
