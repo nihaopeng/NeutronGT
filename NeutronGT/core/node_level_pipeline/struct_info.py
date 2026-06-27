@@ -79,6 +79,7 @@ def gather_ppr_shards(local_ppr: tuple[torch.Tensor, torch.Tensor], rank: int,
 
     # 各 rank 将 PPR 结果写入磁盘，避免 dist.gather_object 在 rank 0 上
     # 同时持有所有 shard 的内存拷贝（papers100M: 4 shard ≈ 22 GB）
+    value_dtype = edge_value.dtype  # 在 del 前保存，空 shard 路径需要用到
     shard_path = _ppr_shard_path(dataset_dir, dataset, rank)
     torch.save((edge_index.cpu(), edge_value.cpu()), shard_path)
     del edge_index, edge_value
@@ -128,7 +129,7 @@ def gather_ppr_shards(local_ppr: tuple[torch.Tensor, torch.Tensor], rank: int,
 
     if result_edge_index is None:
         empty_index = torch.empty((2, 0), dtype=torch.long)
-        empty_value = torch.empty((0,), dtype=edge_value.dtype)
+        empty_value = torch.empty((0,), dtype=value_dtype)
         return empty_index, empty_value
     return result_edge_index, result_edge_value
 

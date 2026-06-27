@@ -314,14 +314,15 @@ class weightMetis_keepParent:
         if num_parts == 0:
             return []
 
-        # 构建 node → partition 映射
+        # 构建 node → partition 映射（int32: papers100M 111M 节点 888MB → 444MB）
         num_nodes = self.num_nodes or int(self.global_edge_index.max().item()) + 1
-        node_to_part = torch.full((num_nodes,), -1, dtype=torch.long)
+        node_to_part = torch.full((num_nodes,), -1, dtype=torch.int32)
         for pid, part in enumerate(self.partitioned_results):
             node_to_part[part.long()] = pid
 
-        # 分块处理 global_edge_index，控制峰值内存
-        src_all, dst_all = self.global_edge_index[0].long(), self.global_edge_index[1].long()
+        # 分块处理 global_edge_index，控制峰值内存（edge_index 已为 int32，无需 .long()）
+        src_all = self.global_edge_index[0]
+        dst_all = self.global_edge_index[1]
         total_edges = src_all.numel()
         CHUNK = 200_000_000  # 2 亿条边每块
 
@@ -364,9 +365,9 @@ class weightMetis_keepParent:
 
             del src, dst, src_part, dst_part, same_part, valid_src, valid_dst, valid_part, order, boundaries
 
-        # 每个分区内 relabel: global → local（复用 global_to_local 缓冲区）
+        # 每个分区内 relabel: global → local（复用 global_to_local 缓冲区，int32 省一半内存）
         sub_edge_list = []
-        global_to_local = torch.full((num_nodes,), -1, dtype=torch.long)
+        global_to_local = torch.full((num_nodes,), -1, dtype=torch.int32)
         for pid in range(num_parts):
             if not part_srcs[pid]:
                 sub_edge_list.append(torch.empty((2, 0), dtype=torch.long))
@@ -375,7 +376,7 @@ class weightMetis_keepParent:
             cat_dst = torch.cat(part_dsts[pid])
             part_nodes = self.partitioned_results[pid]
             # 标记当前分区节点 → local index
-            global_to_local[part_nodes.long()] = torch.arange(len(part_nodes))
+            global_to_local[part_nodes.long()] = torch.arange(len(part_nodes), dtype=torch.int32)
             local_src = global_to_local[cat_src]
             local_dst = global_to_local[cat_dst]
             sub_edge_list.append(torch.stack([local_src, local_dst], dim=0))

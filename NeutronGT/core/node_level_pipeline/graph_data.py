@@ -26,12 +26,13 @@ def load_optional_edge_csr(dataset_dir: str, dataset_name: str):
     return {"rowptr": rowptr, "col": col}
 
 def _csr_to_edge_index(edge_csr: dict):
-    rowptr = torch.as_tensor(edge_csr["rowptr"], dtype=torch.long, device="cpu")
-    col = torch.as_tensor(edge_csr["col"], dtype=torch.long, device="cpu")
+    # 使用 int32: papers100M 1.6B 边，int64 COO 25.6GB → int32 12.8GB
+    rowptr = torch.as_tensor(edge_csr["rowptr"], dtype=torch.int32, device="cpu")
+    col = torch.as_tensor(edge_csr["col"], dtype=torch.int32, device="cpu")
     if rowptr.numel() <= 1 or col.numel() == 0:
-        return torch.empty((2, 0), dtype=torch.long)
-    row_lengths = rowptr[1:] - rowptr[:-1]
-    rows = torch.arange(row_lengths.numel(), dtype=torch.long).repeat_interleave(row_lengths)
+        return torch.empty((2, 0), dtype=torch.int32)
+    row_lengths = rowptr[1:] - rowptr[:-1].to(torch.long)
+    rows = torch.arange(row_lengths.numel(), dtype=torch.int32).repeat_interleave(row_lengths)
     return torch.stack([rows, col], dim=0)
 
 def _get_node_degrees_from_csr(edge_csr: dict, num_nodes: int):
