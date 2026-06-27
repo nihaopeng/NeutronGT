@@ -242,8 +242,6 @@ def personal_pagerank_appnp(
 
     if csr_data is not None:
         graph_rowptr, graph_col, degree, num_nodes = _load_csr_graph(csr_data, device=device, num_nodes=num_nodes)
-        # 释放 CPU 上的 int64 原始 CSR 数据，仅保留 GPU int32 版本
-        csr_data.clear()
     else:
         if edge_index is None:
             raise ValueError("edge_index must be provided when csr_data is None")

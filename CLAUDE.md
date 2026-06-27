@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Interaction rules
+
+- **回答问题时只回答，不修改代码。** 只有用户明确说"改"、"修"、"commit"、"push"等指令时才动手
+- **修改前先明确计划。** 说明要改哪个文件、为什么、改什么，边界清晰后再动手
+- **每次改动后严格检查。** 确认改动不破坏调用链、不引入新问题
+
 ## Project Overview
 
 NeutronGT is a window-level Graph Transformer framework for node-level graph learning. It partitions large graphs into subgraphs ("windows") using Personalized PageRank (PPR) affinity and Metis partitioning, then trains a Graph Transformer model where **each GPU independently processes its assigned windows** — attention is computed only within each window, not across windows.
