@@ -283,8 +283,8 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
         sorted_ppr_matrix=sorted_ppr_matrix,
     )
     partition_build_time = time.time() - partition_build_start
-    # wm 已构造完毕，释放 build_adj_fromat 产物和 PPR 矩阵（wm 内部已提取并随后释放所需数据）
-    del csr_adjacency, eweights, sorted_ppr_matrix
+    # wm 已构造完毕，释放 build_adj_fromat 产物（PPR 矩阵后续 StructInfo 还需要）
+    del csr_adjacency, eweights
 
     # Stage 1: PPR 到基础 Metis 划分完成。
     stage1_time = (
