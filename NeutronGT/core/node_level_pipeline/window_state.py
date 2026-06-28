@@ -261,6 +261,8 @@ def _rebuild_local_window_structures(args, structInfo: StructInfo, feature: torc
 
 
 def broadcast_window_state(args, structInfo: StructInfo, feature: torch.Tensor, device: str):
+    if args.rank == 0:
+        print('[Preprocess] broadcast_window_state started: building window bundles...')
     timing_stats = {
         'bundle_write_time': 0.0,
         'bundle_load_time': 0.0,

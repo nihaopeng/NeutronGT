@@ -250,6 +250,8 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
     ppr_time = local_ppr_time
     gather_time = 0.0
     if distributed_appnp_ppr:
+        if args.rank == 0:
+            print(f'[Preprocess] PPR computation done ({ppr_time:.1f}s), gathering shards from disk...')
         sync_device(device)
         gather_start = time.time()
         sorted_ppr_matrix = gather_ppr_shards(local_sorted_ppr_matrix, rank=args.rank, world_size=world_size,
@@ -263,13 +265,22 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
 
     graph_edge_index = _ensure_edge_index(edge_index, edge_csr_data)
 
+    if args.rank == 0:
+        print(f'[Preprocess] PPR gather done, checking isolated connections...')
+
     isolated_start = time.time()
     sorted_ppr_matrix = add_isolated_connections(sorted_ppr_matrix, graph_edge_index, N, connect_prob=connect_prob)
     isolated_time = time.time() - isolated_start
 
+    if args.rank == 0:
+        print(f'[Preprocess] isolated check done ({isolated_time:.1f}s), building adjacency...')
+
     adj_build_start = time.time()
     csr_adjacency, eweights, _ = build_adj_fromat(sorted_ppr_matrix=sorted_ppr_matrix)
     adj_build_time = time.time() - adj_build_start
+
+    if args.rank == 0:
+        print(f'[Preprocess] build_adj_fromat done ({adj_build_time:.1f}s), building Metis partitions...')
 
     partition_build_start = time.time()
     wm = weightMetis_keepParent(
@@ -283,6 +294,8 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
         sorted_ppr_matrix=sorted_ppr_matrix,
     )
     partition_build_time = time.time() - partition_build_start
+    if args.rank == 0:
+        print(f'[Preprocess] weightMetis_keepParent done ({partition_build_time:.1f}s)')
     # wm 已构造完毕，释放 build_adj_fromat 产物（PPR 矩阵后续 StructInfo 还需要）
     del csr_adjacency, eweights
 

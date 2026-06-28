@@ -147,6 +147,13 @@ def main():
     sync_device(device)
     wm:weightMetis_keepParent = structInfo.wm
 
+    if args.rank == 0:
+        print('[Preprocess] build_graph_struct_info done, waiting for all ranks to sync...')
+    if seq_parallel_world_size > 1:
+        dist.barrier()
+    if args.rank == 0:
+        print('[Preprocess] all ranks synced, starting broadcast_window_state...')
+
     broadcast_window_state(args, structInfo, feature, device)
     sync_device(device)
 
