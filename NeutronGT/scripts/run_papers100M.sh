@@ -11,15 +11,24 @@ export PATH=$CUDA_HOME/bin:${PATH:-}
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}
 
 # ==================== Usage ====================
-#   bash scripts/run_papers100M.sh 0,1,2,3
+#   bash scripts/run_papers100M.sh <devices> [--GT|--GPH_Slim|--GPH_Large|--ALL] [--preprocess_only]
+#
+#   默认 running --ALL 三个模型。
+#   --ALL       GT → GPH_Slim → GPH_Large
+#   --GT        仅 GT
+#   --GPH_Slim  仅 GPH_Slim
+#   --GPH_Large 仅 GPH_Large
 # ===============================================
 
 DEVICES=${1-}
 if [ -z "$DEVICES" ] || [[ "$DEVICES" == -* ]]; then
-    echo "Usage: bash $0 <devices>"
-    echo "Example: bash $0 0,1,2,3"
+    echo "Usage: bash $0 <devices> [--GT|--GPH_Slim|--GPH_Large|--ALL] [--preprocess_only]"
+    echo "Example: bash $0 0,1,2,3              # 默认 --ALL, 完整训练"
+    echo "         bash $0 0,1,2,3 --GT         # 仅 GT"
+    echo "         bash $0 0,1,2,3 --ALL --preprocess_only"
     exit 1
 fi
+shift
 
 IFS=, read -r -a GPU_LIST <<< "$DEVICES"
 GPU_NUM=${#GPU_LIST[@]}
@@ -30,8 +39,23 @@ LOG_DIR=NeutronGT_logs
 RUN_TAG=$(date +%Y%m%d_%H%M)
 EPOCHS=21
 PREPROCESS_ONLY=0
+MODELS=()
 
-# 三个模型共享的 PPR 参数
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --GT|--GPH_Slim|--GPH_Large) MODELS+=("${1:2}") ;;
+        --ALL)                       MODELS=(GT GPH_Slim GPH_Large) ;;
+        --preprocess_only)           PREPROCESS_ONLY=1 ;;
+        *) echo "Error: unknown argument: $1" >&2; exit 1 ;;
+    esac
+    shift
+done
+
+if [ ${#MODELS[@]} -eq 0 ]; then
+    MODELS=(GT GPH_Slim GPH_Large)
+fi
+
+# 共享参数
 ATTN_TYPE="sparse"
 PPR_BACKEND="appnp"
 PPR_TOPK=5
@@ -40,11 +64,12 @@ PPR_NUM_ITER=10
 PPR_BATCH_SIZE=2048
 PPR_ITER_TOPK=64
 USE_CACHE=1
+USE_PREPROCESS_CACHE=1
 TIMEOUT=640
 
 mkdir -p "${LOG_DIR}"
 
-for MODEL_ALIAS in GT GPH_Slim GPH_Large; do
+for MODEL_ALIAS in "${MODELS[@]}"; do
     case "$MODEL_ALIAS" in
         "GT")
             MODEL="gt_sw"
@@ -63,7 +88,11 @@ for MODEL_ALIAS in GT GPH_Slim GPH_Large; do
             ;;
     esac
 
-    LOG_FILE="${LOG_DIR}/${DATASET}_${MODEL_ALIAS}_e${EPOCHS}_${RUN_TAG}.log"
+    MODE_LABEL="train"
+    if [ "$PREPROCESS_ONLY" -eq 1 ]; then
+        MODE_LABEL="preprocess"
+    fi
+    LOG_FILE="${LOG_DIR}/${DATASET}_${MODEL_ALIAS}_e${EPOCHS}_${MODE_LABEL}_${RUN_TAG}.log"
     MASTER_PORT=$((8000 + RANDOM % 1000))
 
     echo "============================================================="
@@ -88,7 +117,7 @@ for MODEL_ALIAS in GT GPH_Slim GPH_Large; do
         --num_heads "${NUM_HEADS}" \
         --epochs "${EPOCHS}" \
         --use_cache "${USE_CACHE}" \
-        --use_preprocess_cache 0 \
+        --use_preprocess_cache "${USE_PREPROCESS_CACHE}" \
         --n_parts "${NPARTS}" \
         --related_nodes_topk_rate "${RELATED_TOPK}" \
         --ppr_backend "${PPR_BACKEND}" \
@@ -110,4 +139,4 @@ for MODEL_ALIAS in GT GPH_Slim GPH_Large; do
     echo "[${MODEL_ALIAS}] Done."
 done
 
-echo "All three models finished."
+echo "All done."
