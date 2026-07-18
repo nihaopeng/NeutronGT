@@ -49,13 +49,18 @@ def build_zero_loss(model: torch.nn.Module, device: str):
 def build_model(args,feature,device,y,**kwargs):
     graph_in_degree = kwargs["graph_in_degree"]
     graph_out_degree = kwargs["graph_out_degree"]
+    num_classes = kwargs.get("num_classes")
+    if num_classes is None:
+        num_classes = int(y.max().item()) + 1
+    else:
+        num_classes = int(num_classes)
     if args.model == "graphormer":
         model = Graphormer(
             n_layers=args.n_layers,
             num_heads=args.num_heads,
             input_dim=feature.shape[1],
             hidden_dim=args.hidden_dim,
-            output_dim=y.max().item()+1,
+            output_dim=num_classes,
             attn_bias_dim=args.attn_bias_dim,
             dropout_rate=args.dropout_rate,
             input_dropout_rate=args.input_dropout_rate,
@@ -76,7 +81,7 @@ def build_model(args,feature,device,y,**kwargs):
              num_heads=args.num_heads,
              input_dim=feature.shape[1],
              hidden_dim=args.hidden_dim,
-             output_dim=y.max().item()+1,
+             output_dim=num_classes,
              attn_bias_dim=args.attn_bias_dim,
              dropout_rate=args.dropout_rate,
              input_dropout_rate=args.input_dropout_rate,
@@ -97,7 +102,7 @@ def build_model(args,feature,device,y,**kwargs):
              num_heads=args.num_heads,
              input_dim=feature.shape[1],
              hidden_dim=args.hidden_dim,
-             output_dim=y.max().item()+1,
+             output_dim=num_classes,
              attn_bias_dim=args.attn_bias_dim,
              dropout_rate=args.dropout_rate,
              input_dropout_rate=args.input_dropout_rate,

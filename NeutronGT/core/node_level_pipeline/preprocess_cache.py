@@ -47,6 +47,7 @@ def preprocess_cache_path(args, cache_key: str):
 
 
 def build_preprocess_cache_payload(struct_info: Any, args_snapshot, cache_key: str):
+    struct_enc_enabled = args_snapshot.get('struct_enc') == 'True'
     return {
         'cache_version': _PREPROCESS_CACHE_VERSION,
         'cache_key': cache_key,
@@ -54,9 +55,9 @@ def build_preprocess_cache_payload(struct_info: Any, args_snapshot, cache_key: s
         'num_nodes': struct_info.num_nodes,
         'graph_in_degree': struct_info.graph_in_degree,
         'graph_out_degree': struct_info.graph_out_degree,
-        'sorted_ppr_matrix': struct_info.sorted_ppr_matrix,
-        'graph_edge_index': struct_info.graph_edge_index,
-        'graph_csr_data': struct_info.graph_csr_data,
+        'sorted_ppr_matrix': struct_info.sorted_ppr_matrix if struct_enc_enabled else None,
+        'graph_edge_index': struct_info.graph_edge_index if struct_enc_enabled else None,
+        'graph_csr_data': struct_info.graph_csr_data if struct_enc_enabled else None,
         'wm': {
             'partitioned_results': struct_info.wm.partitioned_results,
             'sub_edge_index_for_partition_results': struct_info.wm.sub_edge_index_for_partition_results,

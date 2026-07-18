@@ -1,4 +1,5 @@
 import time
+import os
 from types import SimpleNamespace
 
 import torch
@@ -60,19 +61,32 @@ def get_rank_source_range(num_nodes: int, rank: int, world_size: int):
 
 
 def _ppr_shard_dir(dataset_dir: str, dataset: str) -> str:
-    import os
     d = os.path.join(dataset_dir, dataset, 'ppr_temp')
     os.makedirs(d, exist_ok=True)
     return d
 
 
-def _ppr_shard_path(dataset_dir: str, dataset: str, rank: int) -> str:
-    import os
-    return os.path.join(_ppr_shard_dir(dataset_dir, dataset), f'ppr_shard_{rank}.pt')
+def _ppr_shard_path(dataset_dir: str, dataset: str, rank: int, run_id: str = 'default') -> str:
+    return os.path.join(_ppr_shard_dir(dataset_dir, dataset), f'ppr_shard_{run_id}_{rank}.pt')
+
+
+def _wait_for_path(path: str, timeout_seconds: float, poll_seconds: float = 30.0):
+    start = time.time()
+    while not os.path.exists(path):
+        if time.time() - start > timeout_seconds:
+            raise TimeoutError(f"Timed out waiting for file: {path}")
+        time.sleep(poll_seconds)
+
+
+def _atomic_torch_save(obj, path: str):
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    torch.save(obj, tmp_path)
+    os.replace(tmp_path, path)
 
 
 def gather_ppr_shards(local_ppr: tuple[torch.Tensor, torch.Tensor], rank: int,
-                       world_size: int, dataset_dir: str = '', dataset: str = ''):
+                       world_size: int, dataset_dir: str = '', dataset: str = '',
+                       run_id: str = 'default', timeout_seconds: float | None = None):
     edge_index, edge_value = local_ppr
     if world_size <= 1:
         return edge_index, edge_value
@@ -80,26 +94,22 @@ def gather_ppr_shards(local_ppr: tuple[torch.Tensor, torch.Tensor], rank: int,
     # 各 rank 将 PPR 结果写入磁盘，避免 dist.gather_object 在 rank 0 上
     # 同时持有所有 shard 的内存拷贝（papers100M: 4 shard ≈ 22 GB）
     value_dtype = edge_value.dtype  # 在 del 前保存，空 shard 路径需要用到
-    shard_path = _ppr_shard_path(dataset_dir, dataset, rank)
-    torch.save((edge_index.cpu(), edge_value.cpu()), shard_path)
+    shard_path = _ppr_shard_path(dataset_dir, dataset, rank, run_id=run_id)
+    _atomic_torch_save((edge_index.cpu(), edge_value.cpu()), shard_path)
     del edge_index, edge_value
-
-    try:
-        dist.barrier()
-    except Exception as exc:
-        raise RuntimeError(
-            "Distributed PPR shard synchronization failed at barrier. "
-            "This usually means at least one rank did not finish saving its PPR shard."
-        ) from exc
 
     if rank != 0:
         return None
+
+    timeout_seconds = (24 * 60 * 60.0) if timeout_seconds is None else float(timeout_seconds)
+    for r in range(world_size):
+        _wait_for_path(_ppr_shard_path(dataset_dir, dataset, r, run_id=run_id), timeout_seconds=timeout_seconds)
 
     # rank 0 逐个从磁盘加载 shard 并增量合并，每个 shard 加载后立即释放
     result_edge_index = None
     result_edge_value = None
     for r in range(world_size):
-        shard_path_r = _ppr_shard_path(dataset_dir, dataset, r)
+        shard_path_r = _ppr_shard_path(dataset_dir, dataset, r, run_id=run_id)
         try:
             shard_ei, shard_ev = torch.load(shard_path_r, map_location='cpu')
         except Exception as exc:
@@ -118,9 +128,8 @@ def gather_ppr_shards(local_ppr: tuple[torch.Tensor, torch.Tensor], rank: int,
             del shard_ei, shard_ev
 
     # 清理临时文件
-    import os
     for r in range(world_size):
-        p = _ppr_shard_path(dataset_dir, dataset, r)
+        p = _ppr_shard_path(dataset_dir, dataset, r, run_id=run_id)
         if os.path.exists(p):
             os.remove(p)
     shard_dir = _ppr_shard_dir(dataset_dir, dataset)
@@ -145,13 +154,15 @@ def _build_struct_info_from_cache_payload(payload, graph_in_degree, graph_out_de
         sub_edge_index_for_partition_results=wm_data['sub_edge_index_for_partition_results'],
         dup_nodes_per_partition=wm_data['dup_nodes_per_partition'],
     )
+    cached_graph_edge_index = payload.get('graph_edge_index')
+    cached_graph_csr_data = payload.get('graph_csr_data')
     return StructInfo(
         graph_in_degree=payload.get('graph_in_degree', graph_in_degree),
         graph_out_degree=payload.get('graph_out_degree', graph_out_degree),
         sorted_ppr_matrix=payload.get('sorted_ppr_matrix'),
         wm=wm,
-        graph_edge_index=payload.get('graph_edge_index', edge_index),
-        graph_csr_data=payload.get('graph_csr_data', edge_csr_data),
+        graph_edge_index=cached_graph_edge_index if cached_graph_edge_index is not None else edge_index,
+        graph_csr_data=cached_graph_csr_data if cached_graph_csr_data is not None else edge_csr_data,
         num_nodes=payload.get('num_nodes', num_nodes),
     )
 
@@ -254,8 +265,11 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
             print(f'[Preprocess] PPR computation done ({ppr_time:.1f}s), gathering shards from disk...')
         sync_device(device)
         gather_start = time.time()
+        wait_timeout = max(float(getattr(args, 'distributed_timeout_minutes', 10)) * 60.0 * 4.0, 24 * 60 * 60.0)
         sorted_ppr_matrix = gather_ppr_shards(local_sorted_ppr_matrix, rank=args.rank, world_size=world_size,
-                                                 dataset_dir=args.dataset_dir, dataset=args.dataset)
+                                                 dataset_dir=args.dataset_dir, dataset=args.dataset,
+                                                 run_id=getattr(args, 'sync_run_id', 'default'),
+                                                 timeout_seconds=wait_timeout)
         sync_device(device)
         gather_time = time.time() - gather_start
         if args.rank == 0 and sorted_ppr_matrix is not None:

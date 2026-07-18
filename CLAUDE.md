@@ -10,16 +10,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-NeutronGT is a window-level Graph Transformer framework for node-level graph learning. It partitions large graphs into subgraphs ("windows") using Personalized PageRank (PPR) affinity and Metis partitioning, then trains a Graph Transformer model where **each GPU independently processes its assigned windows** — attention is computed only within each window, not across windows.
+NeutronGT is a window-level Graph Transformer framework for node-level graph learning. It partitions large graphs into subgraphs ("windows") using Personalized PageRank (PPR) affinity and Metis partitioning, then trains a Graph Transformer model where **each GPU independently processes its assigned windows**. Attention is computed only within each local window, not across windows.
 
-**Key difference from Baseline:** The Baseline (TorchGT) uses sequence parallelism, splitting a full-graph attention computation across multiple GPUs via all-to-all communication. NeutronGT **does not use sequence parallelism** — each GPU owns its windows and computes attention locally within each window. This eliminates inter-GPU communication during attention computation and makes large-graph training feasible via sparse attention within bounded-size windows.
+**Key difference from Baseline:** The Baseline (TorchGT) uses sequence parallelism, splitting each sampled `seq_len` training sequence across GPUs and using all-to-all communication in the attention layer. It is not PPR-window based. NeutronGT still initializes the legacy "sequence parallel" process group, but the model attention path does **not** use sequence-parallel all-to-all; each GPU owns its assigned windows and computes attention locally within each window. This eliminates inter-GPU communication during attention computation and makes large-graph training feasible via sparse attention within bounded-size windows.
 
-The `NeutronGT/` directory contains the PPR-based windowed approach. The `Baseline/` directory contains the original TorchGT approach (sequence-parallel full-graph attention, no PPR windows) used for comparison experiments.
+The `NeutronGT/` directory contains the PPR-based windowed approach. The `Baseline/` directory contains the original TorchGT-style approach (sequence-parallel attention over sampled/reordered sequences, no PPR windows) used for comparison experiments.
 
 ## Environment
 
-- **CUDA 12.1 required** for the APPNP cuSPARSE backend (`cusparse_spgemm.cu` is compiled JIT)
-- Python dependencies: PyTorch, PyG, `pymetis`, `torch_scatter`, `ogb`, `dgl` (Baseline only)
+- The provided scripts export `/usr/local/cuda-12.1`. The APPNP cuSPARSE backend itself requires a CUDA toolkit discoverable by `CUDA_HOME`/`CUDA_PATH` or `nvcc`, with `cusparse.h` available.
+- Python dependencies: PyTorch, PyG, `pymetis`, `torch_scatter`, `ogb`, `dgl`; Baseline also imports `flash_attn` for flash attention mode.
 - Conda environment: `gt` (used in scripts)
 
 ```shell
@@ -35,9 +35,9 @@ Datasets are stored under `./dataset/<name>/` with files:
 - `x.pt` — node features
 - `y.pt` — labels
 - `edge_index.pt` — COO edge index `[2, E]`
-- `edge_index_csr.pt` — (NeutronGT only) CSR format with `{"rowptr": ..., "col": ...}`
+- `edge_index_csr.pt` — optional NeutronGT CSR format with `{"rowptr": ..., "col": ...}`. APPNP uses it when present; otherwise it builds CSR from `edge_index.pt`.
 
-Run `python utils/preprocess_data.py <dataset_name>` to download and preprocess datasets from PyG/OGB.
+Run `python utils/preprocess_data.py <dataset_name>` to download and preprocess datasets from PyG/OGB. This script saves `x.pt`, `y.pt`, and `edge_index.pt`; it does not currently generate `edge_index_csr.pt`.
 
 ## Key Scripts
 
@@ -92,8 +92,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=<port> \
 
 `NeutronGT/main_sp_node_level_ppr.py` — the single entry point. The `main()` function executes this pipeline:
 
-1. **Distributed init** — `initialize_distributed(args)` sets up distributed process groups (used for data-parallel window distribution and gradient all-reduce; NOT sequence parallel)
-2. **Data loading** — loads `x.pt`, `y.pt`, `edge_index.pt` (or `edge_index_csr.pt` for APPNP)
+1. **Distributed init** — `initialize_distributed(args)` sets up torch distributed and a legacy sequence-parallel group. In NeutronGT this group is used for rank/world-size helpers, parameter broadcast, gradient all-reduce, barriers, and object exchange; attention itself does not use sequence-parallel all-to-all.
+2. **Data loading** — loads `x.pt` and `y.pt`; for APPNP it tries optional `edge_index_csr.pt` first, otherwise loads `edge_index.pt`
 3. **Graph preprocessing** — `build_graph_struct_info()` computes PPR → builds Metis partitions → creates `StructInfo`
 4. **Window state broadcast** — `broadcast_window_state()` distributes window assignments across ranks (each rank receives a disjoint subset of windows)
 5. **Model build** — `build_model()` creates Graphormer / GT_SW
@@ -114,10 +114,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=<port> \
   - `_merge_related_nodes()` — adds external neighbors with highest edge-weight connections (halo)
   - `_merge_feature_sim()` — samples nodes from the most similar window in the other parent partition, with virtual edges
 - `_find_duplicate_nodes_and_rerange()` — identifies duplicate nodes (appearing in multiple windows) and places them at the front for KV cache reuse
-- `node_out()` / `node_in()` — **deprecated, abandoned feature.** Originally intended for dynamic window adjustment during training (pruning low-attention nodes, replenishing from a global expired-node buffer), but this approach is no longer pursued. The code remains in `metisPartition.py` for reference only.
+- `node_out()` / `node_in()` — dynamic window adjustment path. It is still reachable when `--use_cache 0` and `LossStagnationDetector` fires: rank 0 prunes low-attention nodes, refills from the expired-node buffer, increments `window_state_version`, and rebroadcasts window state. The mainstream fixed-window/cache path is `--use_cache 1`; checkpoint resume and preprocess cache only support that path.
 
 **Pipeline modules** (`core/node_level_pipeline/`):
-- `struct_info.py` — `StructInfo` class holds all graph/window metadata; `build_graph_struct_info()` orchestrates the full preprocessing pipeline and caches results via `preprocess_cache`
+- `struct_info.py` — `StructInfo` class holds all graph/window metadata; `build_graph_struct_info()` orchestrates the full preprocessing pipeline and can cache results via `preprocess_cache` when `--use_cache 1 --use_preprocess_cache 1`
 - `window_state.py` — `broadcast_window_state()` serializes per-rank window bundles to disk, each rank loads its own; `build_local_partitions()` / `build_dup_cache_metadata()` rebuild local edge indices, spatial positions, and KV cache indices
 - `train_eval.py` — `train_epoch()` iterates over this rank's windows independently (no cross-GPU communication during attention); uses dummy steps for load balancing when ranks have unequal window counts. `eval_epoch()` gathers predictions across ranks for accuracy computation only on rank 0
 - `graph_data.py` — utilities for loading CSR edge data and converting CSR ↔ COO
@@ -127,13 +127,13 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=<port> \
 ### Models (`models/`)
 
 - **`Graphormer`** (`graphormer_dist_node_level.py`) — Windowized Graphormer with CentralityEncoding (in/out degree), spatial positional encoding (AttnBias), pre-norm transformer layers. Supports KV cache for duplicate nodes. Two attention modes: `full` and `sparse`.
-- **`GT_SW`** (`gt_dist_node_level_single_window.py`) — "GT Single Window" model. Same architecture as Graphormer but with an MLPReadout head instead of a single linear projection. Also handles KV cache for duplicate nodes.
+- **`GT_SW`** (`gt_dist_node_level_single_window.py`) — "GT Single Window" model. It uses the same windowized inputs and local attention idea as Graphormer, but its encoder block follows the older GT-style implementation (`O` projection, post-residual norms, ReLU FFN, MLPReadout head). Also includes KV cache handling for duplicate nodes.
 - Both models receive per-window inputs: `x [N, d]`, `edge_index [2, E]`, optional `in_degree`, `out_degree`, `spatial_pos`, `dup_nodes_kv_cache`
-- KV cache mechanism: duplicate nodes' K/V are precomputed once and reused across layers; the model concatenates cached K/V with dynamically computed K/V for non-duplicate nodes
+- Intended KV cache mechanism: duplicate nodes are placed at the front of each local window, and the model can concatenate cached K/V for those duplicate nodes with dynamically computed K/V for non-duplicate nodes. Current implementation caveat: `train_epoch()` initializes each partition cache as `None`, and the model only materializes a new cache when a non-`None` cache is passed in, so the K/V reuse path appears not to warm up under the current code.
 
 ### Distributed communication (`gt_sp/`)
 
-Adapted from Microsoft DeepSpeed's sequence parallelism, but in NeutronGT only the **gradient synchronization** and **parameter broadcast** utilities are used. The attention-level `_SeqAllToAll` / `DistributedAttentionNodeLevel` is present in the code but **not used** — NeutronGT models call `self.local_attn(...)` directly (see the commented-out `# x,score = self.dist_attn(...)` in `MultiHeadAttention.forward()`).
+Adapted from Microsoft DeepSpeed's sequence parallelism, but in NeutronGT only the **distributed bookkeeping, gradient synchronization, parameter broadcast, barriers, and object/metric communication** are used. The attention-level `_SeqAllToAll` / `DistributedAttentionNodeLevel` is present in the code but **not used by NeutronGT model forward paths**; NeutronGT models call `self.local_attn(...)` directly (see the commented-out `# x,score = self.dist_attn(...)` in `GT_SW.MultiHeadAttention.forward()`). Baseline has its own copied `gt_sp/` modules and does use sequence-parallel attention.
 
 - `initialize.py` — sets up distributed process groups, manages rank/world_size
 - `gt_layer.py` — `DistributedAttentionNodeLevel` wraps local attention with all-to-all for sequence-parallel attention (used by Baseline, NOT by NeutronGT)
@@ -142,22 +142,29 @@ Adapted from Microsoft DeepSpeed's sequence parallelism, but in NeutronGT only t
 ### Attention modes
 
 - **`sparse`** — the **primary and commonly used mode.** Edge-index-based sparse attention using `torch_scatter`. Computes attention only along graph edges within each window, O(E). This is what makes large-graph training feasible.
-- **`full`** — standard `Q @ K^T` dense attention, O(N²). Only practical for very small graphs or tiny windows; essentially impossible on large graphs. The ablation experiments use full attention with small `seq_len=16K` only as a controlled baseline for comparison.
+- **`full`** — standard `Q @ K^T` dense attention, O(N^2). Only practical for very small graphs or tiny windows. In NeutronGT, `run_ablation_2.sh` uses full attention inside PPR/Metis windows with more partitions and `--use_cache 0`; Baseline's full-attention ablation controls sequence length via `seq_len`.
 
 ### Key configuration flags
 
 | Flag | Meaning |
 |------|---------|
-| `--use_cache 1` | Enable KV cache for duplicate nodes across windows (standard mode) |
-| `--use_cache 0` | Disable KV cache; formerly used for abandoned dynamic window adjustment |
+| `--use_cache 1` | Enable fixed-window duplicate-node/cache code path (standard mode; see KV cache caveat above) |
+| `--use_cache 0` | Disable KV cache; enables the dynamic `node_out()` / `node_in()` path if loss stagnation is detected |
 | `--attn_type sparse/full` | Sparse (edge-based) or full (dense) attention |
-| `--use_preprocess_cache 0/1` | Cache/reuse the PPR+Metis preprocess result (only with `--use_cache 1`) |
+| `--use_preprocess_cache 0/1` | Cache/reuse the PPR+Metis preprocess result (only with `--use_cache 1`; default is 1, but most non-papers100M scripts pass 0 to force rebuild) |
 | `--ppr_backend appnp/torch_geometric` | cuSPARSE GPU PPR vs PyG CPU PPR |
-| `--n_parts` | Number of graph windows (must be even) |
+| `--n_parts` | Requested number of graph windows; should be even because construction makes 2 parents and `n_parts // 2` children per parent |
 | `--related_nodes_topk_rate` | % of external neighbors merged into each window |
 | `--struct_enc True` | Enable centrality + spatial positional encoding |
 | `--preprocess_only 1` | Stop after preprocessing, before training |
 
 ## CUDA custom op
 
-`core/ppr_backends/csrc/cusparse_spgemm.cu` — a cuSPARSE SpGEMM kernel compiled via `torch.utils.cpp_extension.load_inline()` in `cusparse_ops.py`. First run triggers JIT compilation (slow); subsequent runs reuse the cached `.so`.
+`core/ppr_backends/csrc/cusparse_spgemm.cpp` and `core/ppr_backends/csrc/cusparse_spgemm.cu` implement a cuSPARSE SpGEMM extension compiled via `torch.utils.cpp_extension.load()` in `cusparse_ops.py`. First run triggers JIT compilation (slow); subsequent runs reuse the cached `.so`.
+
+## Current Implementation Notes
+
+- `README.md` is stale and still references an Ascend/TorchGT setup; use this file and the scripts under `NeutronGT/scripts/` as the current guide.
+- APPNP distributed PPR shards source nodes by rank, writes shard files under `dataset/<name>/ppr_temp/`, and rank 0 merges them from disk to reduce rank-0 memory pressure.
+- Window bundle broadcast is also disk-backed via `dataset/<name>/window_state_cache/`, then rank 0 deletes the temporary bundle files.
+- With `struct_enc=False` (the default), `StructInfo.sorted_ppr_matrix` is released after Metis construction to save memory; spatial position is only rebuilt when `--struct_enc True`.

@@ -20,7 +20,39 @@ def _window_state_dir(args):
 
 
 def _bundle_path(args, version: int, rank: int):
-    return os.path.join(_window_state_dir(args), f'window_state_v{version}_rank{rank}.pt')
+    run_id = getattr(args, 'sync_run_id', 'default')
+    return os.path.join(_window_state_dir(args), f'window_state_{run_id}_v{version}_rank{rank}.pt')
+
+
+def _done_path(args, version: int, rank: int):
+    run_id = getattr(args, 'sync_run_id', 'default')
+    return os.path.join(_window_state_dir(args), f'window_state_{run_id}_v{version}_rank{rank}.done')
+
+
+def _wait_timeout_seconds(args) -> float:
+    return max(float(getattr(args, 'distributed_timeout_minutes', 10)) * 60.0 * 4.0, 24 * 60 * 60.0)
+
+
+def _wait_for_path(path: str, timeout_seconds: float, poll_seconds: float = 30.0):
+    start = time.time()
+    while not os.path.exists(path):
+        if time.time() - start > timeout_seconds:
+            raise TimeoutError(f"Timed out waiting for file: {path}")
+        time.sleep(poll_seconds)
+
+
+def _atomic_torch_save(obj, path: str):
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    torch.save(obj, tmp_path)
+    os.replace(tmp_path, path)
+
+
+def _touch_done(path: str, timing_stats: dict):
+    tmp_path = f"{path}.tmp.{os.getpid()}"
+    with open(tmp_path, 'w') as f:
+        f.write(repr(timing_stats))
+        f.write('\n')
+    os.replace(tmp_path, path)
 
 
 def _stash_global_window_state_cpu(structInfo: StructInfo):
@@ -47,6 +79,8 @@ def _release_hot_global_window_state(structInfo: StructInfo):
 def _assign_local_window_bundle(structInfo: StructInfo, bundle):
     structInfo.local_partition_ids = bundle['local_partition_ids']
     structInfo.local_partitions = bundle['local_partitions']
+    structInfo.local_dup_nodes_per_partition = bundle.get('local_dup_nodes_per_partition', [])
+    structInfo.local_sub_edge_index_for_partition_results = bundle.get('local_sub_edge_index_list', [])
 
 
 def _compute_local_duplicate_nodes(local_partitions):
@@ -71,6 +105,41 @@ def _compute_local_duplicate_nodes(local_partitions):
         reranged_partitions.append(torch.cat([dup_nodes, non_dup_nodes], dim=0))
         dup_nodes_per_partition.append(dup_nodes)
     return reranged_partitions, dup_nodes_per_partition
+
+
+def _remap_sub_edge_index_for_reordered_partition(old_partition: torch.Tensor,
+                                                  new_partition: torch.Tensor,
+                                                  old_edge_index: torch.Tensor):
+    old_edge_index = old_edge_index.to(torch.long).cpu()
+    if old_edge_index.numel() == 0:
+        return torch.empty((2, 0), dtype=torch.long)
+
+    old_partition = old_partition.to(torch.long).cpu()
+    new_partition = new_partition.to(torch.long).cpu()
+    if old_partition.numel() != new_partition.numel():
+        raise RuntimeError(
+            f"Partition remap size mismatch: old={old_partition.numel()}, new={new_partition.numel()}"
+        )
+    if torch.equal(old_partition, new_partition):
+        return old_edge_index
+
+    sorted_new_nodes, sorted_to_new_local = torch.sort(new_partition)
+    edge_src_global = old_partition[old_edge_index[0]]
+    edge_dst_global = old_partition[old_edge_index[1]]
+
+    def lookup_new_local(edge_nodes_global: torch.Tensor):
+        pos = torch.searchsorted(sorted_new_nodes, edge_nodes_global)
+        in_bounds = pos < sorted_new_nodes.numel()
+        matched = torch.zeros_like(in_bounds, dtype=torch.bool)
+        if bool(in_bounds.any().item()):
+            matched[in_bounds] = sorted_new_nodes[pos[in_bounds]] == edge_nodes_global[in_bounds]
+        if not bool(matched.all().item()):
+            raise RuntimeError("Cached sub-edge remap failed: new partition is not the same node set as old partition.")
+        return sorted_to_new_local[pos].to(torch.long)
+
+    new_src = lookup_new_local(edge_src_global)
+    new_dst = lookup_new_local(edge_dst_global)
+    return torch.stack([new_src, new_dst], dim=0)
 
 
 def _build_local_ppr_sub_edge_index_list(structInfo: StructInfo, local_partitions):
@@ -209,13 +278,36 @@ def build_dup_cache_metadata(structInfo: StructInfo, feature: torch.Tensor, devi
 def _build_local_bundle_for_rank(args, structInfo: StructInfo, rank: int):
     wm = structInfo.wm
     local_partition_ids = list(range(rank, len(wm.partitioned_results), args.world_size))
-    local_partitions = [wm.partitioned_results[pid].to(torch.long).cpu() for pid in local_partition_ids]
+    original_local_partitions = [wm.partitioned_results[pid].to(torch.long).cpu() for pid in local_partition_ids]
+    local_partitions = original_local_partitions
+    local_dup_nodes_per_partition = [torch.empty((0,), dtype=torch.long) for _ in local_partitions]
+
+    cached_sub_edges = getattr(wm, 'sub_edge_index_for_partition_results', None) or []
+    has_cached_sub_edges = len(cached_sub_edges) == len(wm.partitioned_results)
+    local_sub_edge_index_list = None
+    if has_cached_sub_edges:
+        local_sub_edge_index_list = [cached_sub_edges[pid].to(torch.long).cpu() for pid in local_partition_ids]
+
     if args.use_cache:
-        local_partitions, _ = _compute_local_duplicate_nodes(local_partitions)
+        reranged_partitions, local_dup_nodes_per_partition = _compute_local_duplicate_nodes(local_partitions)
+        if local_sub_edge_index_list is not None:
+            local_sub_edge_index_list = [
+                _remap_sub_edge_index_for_reordered_partition(old_part, new_part, old_edge_index)
+                for old_part, new_part, old_edge_index in zip(
+                    original_local_partitions,
+                    reranged_partitions,
+                    local_sub_edge_index_list,
+                )
+            ]
+        local_partitions = reranged_partitions
+
     bundle = {
         'local_partition_ids': local_partition_ids,
         'local_partitions': local_partitions,
+        'local_dup_nodes_per_partition': local_dup_nodes_per_partition,
     }
+    if local_sub_edge_index_list is not None:
+        bundle['local_sub_edge_index_list'] = local_sub_edge_index_list
     if args.struct_enc == 'True':
         bundle['local_ppr_sub_edge_index_list'] = _build_local_ppr_sub_edge_index_list(structInfo, local_partitions)
     return bundle
@@ -233,9 +325,10 @@ def _rebuild_local_window_structures(args, structInfo: StructInfo, feature: torc
 
     dup_start = time.time()
     if args.use_cache:
-        local_partitions, local_dup_nodes_per_partition = _compute_local_duplicate_nodes(structInfo.local_partitions)
-        structInfo.local_partitions = local_partitions
-        structInfo.local_dup_nodes_per_partition = local_dup_nodes_per_partition
+        if len(structInfo.local_dup_nodes_per_partition) != len(structInfo.local_partitions):
+            local_partitions, local_dup_nodes_per_partition = _compute_local_duplicate_nodes(structInfo.local_partitions)
+            structInfo.local_partitions = local_partitions
+            structInfo.local_dup_nodes_per_partition = local_dup_nodes_per_partition
         build_dup_cache_metadata(structInfo, feature, device)
     else:
         structInfo.local_dup_nodes_per_partition = [torch.empty((0,), dtype=torch.long) for _ in structInfo.local_partitions]
@@ -244,7 +337,13 @@ def _rebuild_local_window_structures(args, structInfo: StructInfo, feature: torc
     timing_stats['local_dup_cache_rebuild_time'] = time.time() - dup_start
 
     subgraph_start = time.time()
-    structInfo.local_sub_edge_index_for_partition_results = _build_local_sub_edge_index_list(structInfo, structInfo.local_partitions)
+    if len(structInfo.local_sub_edge_index_for_partition_results) == len(structInfo.local_partitions):
+        structInfo.local_sub_edge_index_for_partition_results = [
+            edge_index.to(torch.long).cpu()
+            for edge_index in structInfo.local_sub_edge_index_for_partition_results
+        ]
+    else:
+        structInfo.local_sub_edge_index_for_partition_results = _build_local_sub_edge_index_list(structInfo, structInfo.local_partitions)
     timing_stats['local_subgraph_rebuild_time'] = time.time() - subgraph_start
 
     spatial_start = time.time()
@@ -291,18 +390,21 @@ def broadcast_window_state(args, structInfo: StructInfo, feature: torch.Tensor, 
 
     version = structInfo.window_state_version # 这是窗口状态版本号，避免 node_out/node_in 重新分发时覆盖混淆
 
-    # 对每个 rank 生成一个 bundle,including
+    # 对每个 rank 生成一个 bundle, including
     # local_partition_ids、local_partitions、如果开结构编码，再加 local_ppr_sub_edge_index_list
     # 写到磁盘
     if args.rank == 0:
         bundle_write_start = time.time()
         for rank in range(args.world_size):
+            for path in (_bundle_path(args, version, rank), _done_path(args, version, rank)):
+                if os.path.exists(path):
+                    os.remove(path)
             bundle = _build_local_bundle_for_rank(args, structInfo, rank)
-            torch.save(bundle, _bundle_path(args, version, rank))
+            _atomic_torch_save(bundle, _bundle_path(args, version, rank))
         timing_stats['bundle_write_time'] = time.time() - bundle_write_start
-    dist.barrier()
 
     # 每个 rank 读自己的 bundle，并本地重建结构
+    _wait_for_path(_bundle_path(args, version, args.rank), timeout_seconds=_wait_timeout_seconds(args))
     bundle_load_start = time.time()
     bundle = torch.load(_bundle_path(args, version, args.rank), map_location='cpu')
     timing_stats['bundle_load_time'] = time.time() - bundle_load_start
@@ -310,16 +412,19 @@ def broadcast_window_state(args, structInfo: StructInfo, feature: torch.Tensor, 
     local_ppr_sub_edge_index_list = bundle.get('local_ppr_sub_edge_index_list', [])
     rebuild_stats = _rebuild_local_window_structures(args, structInfo, feature, device, local_ppr_sub_edge_index_list)
     timing_stats.update(rebuild_stats)
+    timing_stats['window_state_total_time'] = time.time() - overall_start
+    print(f"[WindowState] rank={args.rank} timing={timing_stats}", flush=True)
 
-    dist.barrier()
+    _touch_done(_done_path(args, version, args.rank), timing_stats)
 
     #  rank 0 删除这些临时 bundle 文件，并释放全局窗口对象
     if args.rank == 0:
         for rank in range(args.world_size):
-            path = _bundle_path(args, version, rank)
-            if os.path.exists(path):
-                os.remove(path)
+            _wait_for_path(_done_path(args, version, rank), timeout_seconds=_wait_timeout_seconds(args))
+        for rank in range(args.world_size):
+            for path in (_bundle_path(args, version, rank), _done_path(args, version, rank)):
+                if os.path.exists(path):
+                    os.remove(path)
     if args.rank == 0:
         _release_hot_global_window_state(structInfo)
-    timing_stats['window_state_total_time'] = time.time() - overall_start
     return timing_stats

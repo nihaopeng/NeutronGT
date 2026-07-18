@@ -2,6 +2,7 @@ import argparse
 import os
 import random
 import time
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -40,6 +41,27 @@ from core.node_level_pipeline import (
 )
 
 
+def _sync_dir(args):
+    path = Path(args.dataset_dir) / args.dataset / "runtime_sync"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _wait_for_marker(path: Path, timeout_seconds: float, poll_seconds: float = 30.0):
+    start = time.time()
+    while not path.exists():
+        if time.time() - start > timeout_seconds:
+            raise TimeoutError(f"Timed out waiting for marker file: {path}")
+        time.sleep(poll_seconds)
+
+
+def _touch_marker(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    tmp_path.write_text("done\n")
+    os.replace(tmp_path, path)
+
+
 def main():
     logger.IS_LOGGING = False
     parser = argparse.ArgumentParser(description='TorchGT node-level training arguments.')
@@ -60,6 +82,13 @@ def main():
     
     if args.resume_checkpoint or args.resume_latest:
         validate_resume_supported(args)
+
+    sync_run_id = f"{int(time.time_ns())}" if args.rank == 0 else ""
+    if args.world_size > 1:
+        sync_box = [sync_run_id]
+        dist.broadcast_object_list(sync_box, src=0)
+        sync_run_id = sync_box[0]
+    args.sync_run_id = sync_run_id
 
     if args.rank == 0:
         os.makedirs(args.model_dir, exist_ok=True)
@@ -93,6 +122,11 @@ def main():
             raise KeyError(f"Unsupported split_idx.pt format in {split_idx_path}: {list(local_split_idx.keys())}")
     else:
         split_idx = random_split_idx(y, frac_train=0.6, frac_valid=0.2, frac_test=0.2, seed=args.seed)
+
+    if args.dataset == "ogbn-papers100M":
+        num_classes = int(y[split_idx["train"]].max().item()) + 1
+    else:
+        num_classes = int(y.max().item()) + 1
 
     if args.rank == 0:
         print(args)
@@ -150,22 +184,26 @@ def main():
     if args.rank == 0:
         print('[Preprocess] build_graph_struct_info done, waiting for all ranks to sync...')
     if seq_parallel_world_size > 1:
-        dist.barrier()
+        marker = _sync_dir(args) / f"preprocess_done_{args.sync_run_id}.txt"
+        if args.rank == 0:
+            _touch_marker(marker)
+        else:
+            wait_timeout = max(float(args.distributed_timeout_minutes) * 60.0 * 4.0, 24 * 60 * 60.0)
+            _wait_for_marker(marker, timeout_seconds=wait_timeout)
     if args.rank == 0:
         print('[Preprocess] all ranks synced, starting broadcast_window_state...')
+
+    if args.preprocess_only == 1:
+        if args.rank == 0:
+            print("Preprocess-only mode enabled, exiting before window-state broadcast/model build/training.")
+        return
 
     broadcast_window_state(args, structInfo, feature, device)
     sync_device(device)
 
     local_partition_ids, local_partitions = build_local_partitions(structInfo, args.rank, seq_parallel_world_size)
-    if args.preprocess_only == 1:
-        if seq_parallel_world_size > 1:
-            torch.distributed.barrier()
-        if args.rank == 0:
-            print("Preprocess-only mode enabled, exiting before model build/training.")
-        return
 
-    model = build_model(args,feature,device,y,graph_in_degree=structInfo.graph_in_degree,graph_out_degree=structInfo.graph_out_degree)
+    model = build_model(args,feature,device,y,graph_in_degree=structInfo.graph_in_degree,graph_out_degree=structInfo.graph_out_degree,num_classes=num_classes)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.peak_lr, weight_decay=args.weight_decay)
     lr_scheduler = PolynomialDecayLR(
