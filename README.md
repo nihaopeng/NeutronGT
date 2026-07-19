@@ -8,17 +8,17 @@
 
 ## torch_npu
 
-`bash run.sh origin 0,1 cora True 5 vis_dir 8080`[代码版本][启动的GPU][数据集][是否启用位置编码][最大路径距离][可视化数据存放文件夹路径][port]
+`bash run.sh origin 0,1 cora True 5 vis_dir 8080`[code version][GPUs][dataset][is enable position embedding][max path distance][visual data path][port]
 
 ## install
-## 安装可视化字体
+## install visual font
 `sudo apt install fonts-wqy-microhei`
 *`rm -rf ~/.cache/matplotlib/`
 
-## 安装torch
-install torch, torch_npu (租的服务器已经安装，1.11版本)
+## install torch
+install torch, torch_npu (租的服务器已经安装has been installed on renting server，version:1.11)
 
-## 安装依赖包
+## install dependencies
 `pip install torch-geometric==2.0.0 torch-scatter==2.1.1 torch-summary==1.4.5 dgl==1.0.1 -i https://pypi.org/simple`
 
 `pip install torch-sparse -f https://data.pyg.org/whl/torch-2.1.0+cpu.html`
