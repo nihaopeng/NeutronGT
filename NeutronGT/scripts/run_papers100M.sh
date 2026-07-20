@@ -11,21 +11,24 @@ export PATH=$CUDA_HOME/bin:${PATH:-}
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}
 
 # ==================== Usage ====================
-#   bash scripts/run_papers100M.sh <devices> [--GT|--GPH_Slim|--GPH_Large|--ALL] [--preprocess_only]
+#   bash scripts/run_papers100M.sh <devices> [--GT|--GPH_Slim|--GPH_Large|--ALL] [--preprocess_only] [--refresh_preprocess_cache] [--epochs N]
 #
 #   默认 running --ALL 三个模型。
 #   --ALL       GT → GPH_Slim → GPH_Large
 #   --GT        仅 GT
 #   --GPH_Slim  仅 GPH_Slim
 #   --GPH_Large 仅 GPH_Large
+#   --epochs N  指定训练轮数，默认 41
+#   --refresh_preprocess_cache  强制重建并保存新的预处理 cache
 # ===============================================
 
 DEVICES=${1-}
 if [ -z "$DEVICES" ] || [[ "$DEVICES" == -* ]]; then
-    echo "Usage: bash $0 <devices> [--GT|--GPH_Slim|--GPH_Large|--ALL] [--preprocess_only]"
-    echo "Example: bash $0 0,1,2,3              # 默认 --ALL, 完整训练"
-    echo "         bash $0 0,1,2,3 --GT         # 仅 GT"
-    echo "         bash $0 0,1,2,3 --ALL --preprocess_only"
+    echo "Usage: bash $0 <devices> [--GT|--GPH_Slim|--GPH_Large|--ALL] [--preprocess_only] [--refresh_preprocess_cache] [--epochs N]"
+    echo "Example: bash $0 0,1,2,3                                             # 默认 --ALL, 41 epoch, 复用 cache"
+    echo "         bash $0 0,1,2,3 --GT                                        # 仅 GT"
+    echo "         bash $0 0,1,2,3 --ALL --epochs 41 --refresh_preprocess_cache # 三模型重建 cache 后训练"
+    echo "         bash $0 0,1,2,3 --ALL --preprocess_only --refresh_preprocess_cache"
     exit 1
 fi
 shift
@@ -37,8 +40,9 @@ DATASET="ogbn-papers100M"
 DATASET_DIR=./dataset/
 LOG_DIR=NeutronGT_logs
 RUN_TAG=$(date +%Y%m%d_%H%M)
-EPOCHS=21
+EPOCHS=41
 PREPROCESS_ONLY=0
+REFRESH_PREPROCESS_CACHE=0
 MODELS=()
 
 while [[ $# -gt 0 ]]; do
@@ -46,6 +50,19 @@ while [[ $# -gt 0 ]]; do
         --GT|--GPH_Slim|--GPH_Large) MODELS+=("${1:2}") ;;
         --ALL)                       MODELS=(GT GPH_Slim GPH_Large) ;;
         --preprocess_only)           PREPROCESS_ONLY=1 ;;
+        --refresh_preprocess_cache)  REFRESH_PREPROCESS_CACHE=1 ;;
+        --epochs)
+            shift
+            if [[ $# -eq 0 || "$1" == -* ]]; then
+                echo "Error: --epochs requires a positive integer argument." >&2
+                exit 1
+            fi
+            if ! [[ "$1" =~ ^[1-9][0-9]*$ ]]; then
+                echo "Error: --epochs must be a positive integer, got: $1" >&2
+                exit 1
+            fi
+            EPOCHS="$1"
+            ;;
         *) echo "Error: unknown argument: $1" >&2; exit 1 ;;
     esac
     shift
@@ -74,23 +91,26 @@ for MODEL_ALIAS in "${MODELS[@]}"; do
         "GT")
             MODEL="gt_sw"
             N_LAYERS=4; HIDDEN_DIM=128; FFN_DIM=128; NUM_HEADS=8
-            NPARTS=4096; RELATED_TOPK=4
+            NPARTS=800; RELATED_TOPK=4
             ;;
         "GPH_Slim")
             MODEL="graphormer"
             N_LAYERS=4; HIDDEN_DIM=64; FFN_DIM=64; NUM_HEADS=8
-            NPARTS=4096; RELATED_TOPK=4
+            NPARTS=800; RELATED_TOPK=4
             ;;
         "GPH_Large")
             MODEL="graphormer"
             N_LAYERS=12; HIDDEN_DIM=768; FFN_DIM=768; NUM_HEADS=32
-            NPARTS=8192; RELATED_TOPK=2
+            NPARTS=1600; RELATED_TOPK=2
             ;;
     esac
 
     MODE_LABEL="train"
     if [ "$PREPROCESS_ONLY" -eq 1 ]; then
         MODE_LABEL="preprocess"
+    fi
+    if [ "$REFRESH_PREPROCESS_CACHE" -eq 1 ]; then
+        MODE_LABEL="${MODE_LABEL}_refresh"
     fi
     LOG_FILE="${LOG_DIR}/${DATASET}_${MODEL_ALIAS}_e${EPOCHS}_${MODE_LABEL}_${RUN_TAG}.log"
     MASTER_PORT=$((8000 + RANDOM % 1000))
@@ -100,6 +120,7 @@ for MODEL_ALIAS in "${MODELS[@]}"; do
     echo "============================================================="
     echo "  layers=${N_LAYERS} hidden=${HIDDEN_DIM} ffn=${FFN_DIM} heads=${NUM_HEADS}"
     echo "  n_parts=${NPARTS} related_topk=${RELATED_TOPK} epochs=${EPOCHS}"
+    echo "  preprocess_cache=${USE_PREPROCESS_CACHE} refresh_preprocess_cache=${REFRESH_PREPROCESS_CACHE}"
     echo "  GPUs=${GPU_NUM}  timeout=${TIMEOUT}m  log=${LOG_FILE}"
     echo "============================================================="
 
@@ -118,6 +139,7 @@ for MODEL_ALIAS in "${MODELS[@]}"; do
         --epochs "${EPOCHS}" \
         --use_cache "${USE_CACHE}" \
         --use_preprocess_cache "${USE_PREPROCESS_CACHE}" \
+        --refresh_preprocess_cache "${REFRESH_PREPROCESS_CACHE}" \
         --n_parts "${NPARTS}" \
         --related_nodes_topk_rate "${RELATED_TOPK}" \
         --ppr_backend "${PPR_BACKEND}" \
