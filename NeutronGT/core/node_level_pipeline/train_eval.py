@@ -277,10 +277,20 @@ def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitio
                 kv_cache_per_partition[local_i] = updated_kv_cache
 
             scores_by_pid[global_pid] = score_spe[args.n_layers - 1]
-            loss = F.nll_loss(out_i, y[idx_i].to(device).long(), reduction='none')
             mask_train = torch.isin(idx_i.to(device), split_idx["train"].to(device))
-            if mask_train.any():
-                loss = loss[mask_train].mean()
+            target_i = y[idx_i].to(device).long()
+            valid_target = (target_i >= 0) & (target_i < out_i.shape[1])
+            train_loss_mask = mask_train & valid_target
+            if mask_train.any() and not bool(valid_target[mask_train].all().item()):
+                bad_targets = target_i[mask_train & ~valid_target].detach().cpu()
+                raise ValueError(
+                    f"rank:{args.rank},epoch:{epoch},global_pid:{global_pid},"
+                    f"invalid train labels for n_classes={out_i.shape[1]}: "
+                    f"min={int(bad_targets.min().item())}, max={int(bad_targets.max().item())}, "
+                    f"count={int(bad_targets.numel())}"
+                )
+            if train_loss_mask.any():
+                loss = F.nll_loss(out_i[train_loss_mask], target_i[train_loss_mask])
                 loss_list.append(loss.item())
             else:
                 print(f"rank:{args.rank},epoch:{epoch},no train nodes!")

@@ -124,7 +124,16 @@ def main():
         split_idx = random_split_idx(y, frac_train=0.6, frac_valid=0.2, frac_test=0.2, seed=args.seed)
 
     if args.dataset == "ogbn-papers100M":
-        num_classes = int(y[split_idx["train"]].max().item()) + 1
+        labeled_idx_for_classes = torch.cat([
+            split_idx["train"],
+            split_idx["valid"],
+            split_idx["test"],
+        ])
+        labeled_y_for_classes = y[labeled_idx_for_classes]
+        labeled_y_for_classes = labeled_y_for_classes[labeled_y_for_classes >= 0]
+        if labeled_y_for_classes.numel() == 0:
+            raise ValueError("Cannot infer num_classes for ogbn-papers100M: no non-negative labels in split_idx.")
+        num_classes = int(labeled_y_for_classes.max().item()) + 1
     else:
         num_classes = int(y.max().item()) + 1
 
