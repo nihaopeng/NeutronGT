@@ -23,6 +23,16 @@ _PREPROCESS_CACHE_KEY_FIELDS = (
     'max_dist',
 )
 
+_WINDOW_AUG_CACHE_KEY_FIELDS = (
+    'seed',
+    'window_aug_strategy',
+    'window_extra_node_ratio',
+    'window_related_ratio',
+    'window_feature_ratio',
+    'window_hub_ratio',
+    'feature_sim_virtual_edges_per_node',
+)
+
 
 def _preprocess_cache_dir(args):
     cache_dir = os.path.join(args.dataset_dir, args.dataset, 'preprocess_cache')
@@ -32,6 +42,8 @@ def _preprocess_cache_dir(args):
 
 def _args_snapshot(args, world_size: int):
     snapshot = {key: getattr(args, key) for key in _PREPROCESS_CACHE_KEY_FIELDS}
+    if getattr(args, 'window_aug_strategy', 'legacy') != 'legacy':
+        snapshot.update({key: getattr(args, key) for key in _WINDOW_AUG_CACHE_KEY_FIELDS})
     snapshot['world_size'] = int(world_size)
     return snapshot
 
@@ -69,8 +81,14 @@ def build_preprocess_cache_payload(struct_info: Any, args_snapshot, cache_key: s
 def save_preprocess_cache(args, struct_info: Any, cache_key: str, args_snapshot):
     cache_path = preprocess_cache_path(args, cache_key)
     payload = build_preprocess_cache_payload(struct_info, args_snapshot, cache_key)
+    tmp_path = f'{cache_path}.tmp.{os.getpid()}'
     save_start = time.time()
-    torch.save(payload, cache_path)
+    try:
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, cache_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
     return cache_path, time.time() - save_start
 
 

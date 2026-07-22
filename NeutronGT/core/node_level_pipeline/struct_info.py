@@ -306,6 +306,13 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
         related_nodes_topk_rate=related_nodes_topk_rate,
         attn_type=args.attn_type,
         sorted_ppr_matrix=sorted_ppr_matrix,
+        window_aug_strategy=getattr(args, 'window_aug_strategy', 'legacy'),
+        window_extra_node_ratio=getattr(args, 'window_extra_node_ratio', 0.20),
+        window_related_ratio=getattr(args, 'window_related_ratio', 0.10),
+        window_feature_ratio=getattr(args, 'window_feature_ratio', 0.07),
+        window_hub_ratio=getattr(args, 'window_hub_ratio', 0.03),
+        feature_sim_virtual_edges_per_node=getattr(args, 'feature_sim_virtual_edges_per_node', 4),
+        seed=getattr(args, 'seed', 42),
     )
     partition_build_time = time.time() - partition_build_start
     if args.rank == 0:
@@ -326,6 +333,8 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
         wm.timing_stats.get('centroid_build_time', 0.0)
         + wm.timing_stats.get('related_nodes_merge_time', 0.0)
         + wm.timing_stats.get('feature_sim_merge_time', 0.0)
+        + wm.timing_stats.get('hub_node_merge_time', 0.0)
+        + wm.timing_stats.get('random_fill_time', 0.0)
         + wm.timing_stats.get('expanded_edge_concat_time', 0.0)
         + wm.timing_stats.get('duplicate_rerange_time', 0.0)
         + wm.timing_stats.get('subgraph_build_time', 0.0)

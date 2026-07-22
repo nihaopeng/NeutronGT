@@ -29,7 +29,14 @@ class weightMetis_keepParent:
             n_parts:int,
             related_nodes_topk_rate:int,
             attn_type:str,
-            sorted_ppr_matrix:list[torch.Tensor]                   
+            sorted_ppr_matrix:list[torch.Tensor],
+            window_aug_strategy:str='legacy',
+            window_extra_node_ratio:float=0.20,
+            window_related_ratio:float=0.10,
+            window_feature_ratio:float=0.07,
+            window_hub_ratio:float=0.03,
+            feature_sim_virtual_edges_per_node:int=4,
+            seed:int=42,
         ) -> None:
         self.attn_type = attn_type
         self.csr_adjacency = csr_adjacency
@@ -38,6 +45,15 @@ class weightMetis_keepParent:
         self.n_parts = n_parts
         self.global_edge_index = edge_index
         self.partition_num_per_parent = n_parts // 2
+        self.num_nodes = len(self.csr_adjacency.adj_starts) - 1 if hasattr(self.csr_adjacency, 'adj_starts') else None
+        self.window_aug_strategy = window_aug_strategy
+        self.window_extra_node_ratio = float(window_extra_node_ratio)
+        self.window_related_ratio = float(window_related_ratio)
+        self.window_feature_ratio = float(window_feature_ratio)
+        self.window_hub_ratio = float(window_hub_ratio)
+        self.feature_sim_virtual_edges_per_node = int(feature_sim_virtual_edges_per_node)
+        self.seed = int(seed)
+        self.hub_node_order = None
         # print(len(torch.arange(0,len(csr_adjacency.adj_starts)-1)))
         # BUG:假设 n 个节点，csr_adjaceny.adj_starts 长度为 num_node + 1，则第一个参数是tensor: [0,1,2,...,num_node]
         # torch.range 已被弃用，改为torch.arange(0,len(csr_adjacency.adj_starts)-1)
@@ -68,6 +84,8 @@ class weightMetis_keepParent:
             'centroid_build_time': 0.0,
             'related_nodes_merge_time': 0.0,
             'feature_sim_merge_time': 0.0,
+            'hub_node_merge_time': 0.0,
+            'random_fill_time': 0.0,
             'expanded_edge_concat_time': 0.0,
             'duplicate_rerange_time': 0.0,
             'subgraph_build_time': 0.0,
@@ -97,36 +115,54 @@ class weightMetis_keepParent:
             self.child_partition_centroids.append(centroid_group)
         self.timing_stats['centroid_build_time'] = time.time() - centroid_build_start
 
+        if self.window_aug_strategy in ('hub', 'ours'):
+            hub_start = time.time()
+            self.hub_node_order = self._compute_hub_node_order()
+            self.timing_stats['hub_node_merge_time'] += time.time() - hub_start
+
         expanded_child_partitions = []
         for parent_id, parent_group in enumerate(self.child_partitions):
             expanded_group = []
             for child_idx, part in enumerate(parent_group):
-                halo_extended = torch.tensor([])
-                # halo: partition包括原本partition的节点和邻居节点
-                related_merge_start = time.time()
-                halo_extended = self._merge_related_nodes(part,related_nodes_topk_rate)
-                self.timing_stats['related_nodes_merge_time'] += time.time() - related_merge_start
-                # feature: partition包括原本的partition的节点和对侧最相似窗口中采样的节点
-                feature_merge_start = time.time()
-                feature_extended,expanded_edge_p = self._merge_feature_sim(part.long(), n_nodes=1, current_parent_id=parent_id, current_child_idx=child_idx)
-                self.timing_stats['feature_sim_merge_time'] += time.time() - feature_merge_start
-                merged = torch.cat([halo_extended, feature_extended], dim=0)
-                merged = torch.unique(merged)  # 自动排序 + 去重
+                part = part.long()
+                partition_id = parent_id * self.partition_num_per_parent + child_idx
+                if self.window_aug_strategy == 'legacy':
+                    # halo: partition包括原本partition的节点和邻居节点
+                    related_merge_start = time.time()
+                    halo_extended = self._merge_related_nodes(part,related_nodes_topk_rate)
+                    self.timing_stats['related_nodes_merge_time'] += time.time() - related_merge_start
+                    # feature: partition包括原本的partition的节点和对侧最相似窗口中采样的节点
+                    feature_merge_start = time.time()
+                    feature_extended,expanded_edge_p = self._merge_feature_sim(part, n_nodes=1, current_parent_id=parent_id, current_child_idx=child_idx)
+                    self.timing_stats['feature_sim_merge_time'] += time.time() - feature_merge_start
+                    merged = torch.cat([halo_extended, feature_extended], dim=0)
+                    merged = torch.unique(merged)  # 自动排序 + 去重
+                else:
+                    merged, expanded_edge_p = self._augment_partition_equal_size(
+                        core_partition=part,
+                        related_nodes_topk_rate=related_nodes_topk_rate,
+                        parent_id=parent_id,
+                        child_idx=child_idx,
+                        partition_id=partition_id,
+                    )
                 expanded_group.append(merged)
-                self.expanded_edge[0].extend(expanded_edge_p[0])
-                self.expanded_edge[1].extend(expanded_edge_p[1])
+                self.expanded_edge[0].extend(expanded_edge_p[0].tolist())
+                self.expanded_edge[1].extend(expanded_edge_p[1].tolist())
             expanded_child_partitions.append(expanded_group)
         self.child_partitions = expanded_child_partitions
         expanded_edge_concat_start = time.time()
-        self.global_edge_index = torch.cat([self.global_edge_index,torch.tensor(self.expanded_edge)],dim=1)
+        if self.expanded_edge[0]:
+            expanded_edge_tensor = torch.tensor(
+                self.expanded_edge,
+                dtype=self.global_edge_index.dtype,
+            )
+            self.global_edge_index = torch.cat([self.global_edge_index, expanded_edge_tensor], dim=1)
         self.timing_stats['expanded_edge_concat_time'] = time.time() - expanded_edge_concat_start
         # TODO:rerange of partition for kv cache √
         duplicate_start = time.time()
         self.dup_nodes_per_partition = self._find_duplicate_nodes_and_rerange()
         self.timing_stats['duplicate_rerange_time'] = time.time() - duplicate_start
         self.dup_nodes_per_partition_feature = []
-        # 保存 num_nodes 供后续使用（csr_adjacency 将被释放）
-        self.num_nodes = len(self.csr_adjacency.adj_starts) - 1 if hasattr(self.csr_adjacency, 'adj_starts') else None
         # 先构建 partitioned_results
         for parent_group in self.child_partitions:
             for part in parent_group:
@@ -310,6 +346,9 @@ class weightMetis_keepParent:
         替代原有的逐分区 torch_geometric.utils.subgraph() 调用，
         将 50 次全量边扫描合并为 1 次。
         """
+        if self.window_aug_strategy != 'legacy':
+            return self._build_all_sub_edge_indices_multi_membership()
+
         num_parts = len(self.partitioned_results)
         if num_parts == 0:
             return []
@@ -388,6 +427,124 @@ class weightMetis_keepParent:
             part_dsts[pid] = None
 
         del global_to_local, node_to_part
+        return sub_edge_list
+
+    def _build_all_sub_edge_indices_multi_membership(self) -> list:
+        """Build subgraph edges when copied nodes may belong to many windows."""
+        num_parts = len(self.partitioned_results)
+        if num_parts == 0:
+            return []
+
+        num_nodes = self.num_nodes or int(self.global_edge_index.max().item()) + 1
+        node_to_part = torch.full((num_nodes,), -1, dtype=torch.int32)
+        node_to_local = torch.full((num_nodes,), -1, dtype=torch.int32)
+        duplicate_memberships: dict[int, list[tuple[int, int]]] = {}
+
+        for pid, part in enumerate(self.partitioned_results):
+            for local_idx, node in enumerate(part.to(torch.long).cpu().tolist()):
+                node = int(node)
+                previous_pid = int(node_to_part[node].item())
+                if previous_pid == -1:
+                    node_to_part[node] = pid
+                    node_to_local[node] = local_idx
+                elif previous_pid >= 0:
+                    previous_local = int(node_to_local[node].item())
+                    duplicate_memberships[node] = [(previous_pid, previous_local), (pid, local_idx)]
+                    node_to_part[node] = -2
+                    node_to_local[node] = -1
+                else:
+                    duplicate_memberships[node].append((pid, local_idx))
+
+        src_all = self.global_edge_index[0]
+        dst_all = self.global_edge_index[1]
+        total_edges = src_all.numel()
+        CHUNK = 50_000_000
+
+        part_srcs: list[list] = [[] for _ in range(num_parts)]
+        part_dsts: list[list] = [[] for _ in range(num_parts)]
+        part_src_extra: list[list[int]] = [[] for _ in range(num_parts)]
+        part_dst_extra: list[list[int]] = [[] for _ in range(num_parts)]
+
+        for chunk_start in range(0, total_edges, CHUNK):
+            chunk_end = min(chunk_start + CHUNK, total_edges)
+            src = src_all[chunk_start:chunk_end]
+            dst = dst_all[chunk_start:chunk_end]
+
+            src_part = node_to_part[src]
+            dst_part = node_to_part[dst]
+            src_local = node_to_local[src]
+            dst_local = node_to_local[dst]
+
+            single_same_part = (src_part >= 0) & (src_part == dst_part)
+            if single_same_part.any():
+                valid_part = src_part[single_same_part]
+                valid_src_local = src_local[single_same_part]
+                valid_dst_local = dst_local[single_same_part]
+                order = torch.argsort(valid_part)
+                valid_part = valid_part[order]
+                valid_src_local = valid_src_local[order]
+                valid_dst_local = valid_dst_local[order]
+                boundaries = torch.searchsorted(
+                    valid_part,
+                    torch.arange(num_parts + 1, device=valid_part.device)
+                )
+                for pid in range(num_parts):
+                    s, e = int(boundaries[pid].item()), int(boundaries[pid + 1].item())
+                    if s == e:
+                        continue
+                    part_srcs[pid].append(valid_src_local[s:e].cpu())
+                    part_dsts[pid].append(valid_dst_local[s:e].cpu())
+                del valid_part, valid_src_local, valid_dst_local, order, boundaries
+
+            has_duplicate_endpoint = (src_part == -2) | (dst_part == -2)
+            if has_duplicate_endpoint.any():
+                dup_src = src[has_duplicate_endpoint].to(torch.long).cpu().tolist()
+                dup_dst = dst[has_duplicate_endpoint].to(torch.long).cpu().tolist()
+                dup_src_part = src_part[has_duplicate_endpoint].cpu().tolist()
+                dup_dst_part = dst_part[has_duplicate_endpoint].cpu().tolist()
+                dup_src_local = src_local[has_duplicate_endpoint].cpu().tolist()
+                dup_dst_local = dst_local[has_duplicate_endpoint].cpu().tolist()
+
+                for u, v, sp, dp, sl, dl in zip(
+                    dup_src,
+                    dup_dst,
+                    dup_src_part,
+                    dup_dst_part,
+                    dup_src_local,
+                    dup_dst_local,
+                ):
+                    if sp == -1 or dp == -1:
+                        continue
+                    src_members = duplicate_memberships.get(int(u)) if sp == -2 else [(int(sp), int(sl))]
+                    dst_members = duplicate_memberships.get(int(v)) if dp == -2 else [(int(dp), int(dl))]
+                    if not src_members or not dst_members:
+                        continue
+                    dst_by_pid = {pid: local for pid, local in dst_members}
+                    for pid, src_local_idx in src_members:
+                        dst_local_idx = dst_by_pid.get(pid)
+                        if dst_local_idx is None:
+                            continue
+                        part_src_extra[pid].append(src_local_idx)
+                        part_dst_extra[pid].append(dst_local_idx)
+
+            del src, dst, src_part, dst_part, src_local, dst_local, single_same_part, has_duplicate_endpoint
+
+        sub_edge_list = []
+        for pid in range(num_parts):
+            if part_src_extra[pid]:
+                part_srcs[pid].append(torch.tensor(part_src_extra[pid], dtype=torch.int32))
+                part_dsts[pid].append(torch.tensor(part_dst_extra[pid], dtype=torch.int32))
+            if not part_srcs[pid]:
+                sub_edge_list.append(torch.empty((2, 0), dtype=torch.long))
+                continue
+            cat_src = torch.cat(part_srcs[pid]).to(torch.long)
+            cat_dst = torch.cat(part_dsts[pid]).to(torch.long)
+            sub_edge_list.append(torch.stack([cat_src, cat_dst], dim=0))
+            del cat_src, cat_dst
+            part_srcs[pid] = None
+            part_dsts[pid] = None
+
+        del node_to_part, node_to_local, duplicate_memberships
         return sub_edge_list
 
 
@@ -486,36 +643,322 @@ class weightMetis_keepParent:
         duplicate_edges_tensor = torch.stack([dup_u, dup_v], dim=1) # [N_dup, 2]
         return duplicate_edges_tensor
 
+    def _target_extra_count(self, core_partition: torch.Tensor) -> int:
+        if core_partition.numel() == 0 or self.num_nodes is None:
+            return 0
+        raw_target = int(core_partition.numel() * max(self.window_extra_node_ratio, 0.0))
+        max_possible = max(int(self.num_nodes) - int(torch.unique(core_partition).numel()), 0)
+        return min(raw_target, max_possible)
+
+    def _compute_hub_node_order(self) -> torch.Tensor:
+        if self.num_nodes is None or self.num_nodes <= 0:
+            return torch.empty((0,), dtype=torch.long)
+        src = self.global_edge_index[0].to(torch.long)
+        dst = self.global_edge_index[1].to(torch.long)
+        degree_score = torch.bincount(src, minlength=self.num_nodes)
+        degree_score += torch.bincount(dst, minlength=self.num_nodes)
+        hub_order = torch.argsort(degree_score, descending=True)
+        del src, dst, degree_score
+        return hub_order.to(torch.long).cpu()
+
+    def _select_from_ordered_candidates(
+        self,
+        candidates: torch.Tensor,
+        selected_set: set[int],
+        max_nodes: int,
+    ) -> list[int]:
+        if max_nodes <= 0 or candidates.numel() == 0:
+            return []
+        selected = []
+        for node in candidates.to(torch.long).cpu().tolist():
+            node = int(node)
+            if node in selected_set:
+                continue
+            selected.append(node)
+            selected_set.add(node)
+            if len(selected) >= max_nodes:
+                break
+        return selected
+
+    def _select_random_nodes(
+        self,
+        selected_set: set[int],
+        max_nodes: int,
+        partition_id: int,
+        salt: int,
+    ) -> list[int]:
+        if max_nodes <= 0 or self.num_nodes is None or self.num_nodes <= 0:
+            return []
+        max_nodes = min(max_nodes, max(self.num_nodes - len(selected_set), 0))
+        if max_nodes <= 0:
+            return []
+
+        selected = []
+        gen = torch.Generator(device='cpu')
+        gen.manual_seed((self.seed + 1_000_003 * (partition_id + 1) + salt) % (2**63 - 1))
+        attempts = 0
+        while len(selected) < max_nodes and attempts < 20:
+            need = max_nodes - len(selected)
+            batch_size = min(max(need * 4, 1024), 1_000_000)
+            samples = torch.randint(0, self.num_nodes, (batch_size,), generator=gen, dtype=torch.long)
+            for node in samples.tolist():
+                node = int(node)
+                if node in selected_set:
+                    continue
+                selected.append(node)
+                selected_set.add(node)
+                if len(selected) >= max_nodes:
+                    break
+            attempts += 1
+
+        if len(selected) < max_nodes:
+            start = (self.seed + 97_531 * (partition_id + 1) + salt) % self.num_nodes
+            for offset in range(self.num_nodes):
+                node = int((start + offset) % self.num_nodes)
+                if node in selected_set:
+                    continue
+                selected.append(node)
+                selected_set.add(node)
+                if len(selected) >= max_nodes:
+                    break
+        return selected
+
+    def _select_related_nodes(
+        self,
+        partition: torch.Tensor,
+        topk_percent: int,
+        max_nodes: int | None = None,
+    ) -> torch.Tensor:
+        xadj = self.csr_adjacency.adj_starts
+        adjncy = self.csr_adjacency.adjacent
+        partition_set = set(int(x) for x in partition.tolist())
+        external_neighbors = {}
+        for node in partition.tolist():
+            node = int(node)
+            start, end = xadj[node], xadj[node + 1]
+            if end <= start:
+                continue
+            neighbors = adjncy[start:end]
+            weights = self.eweights[start:end]
+            for nb, w in zip(neighbors, weights):
+                nb = int(nb)
+                if nb not in partition_set:
+                    external_neighbors[nb] = external_neighbors.get(nb, 0) + w
+
+        sorted_items = sorted(external_neighbors.items(), key=lambda x: x[1], reverse=True)
+        n_select = len(sorted_items) * topk_percent // 100 if topk_percent > 0 else 0
+        if max_nodes is not None:
+            n_select = min(n_select, max_nodes)
+        selected_nodes = [node for node, _ in sorted_items[:n_select]]
+        return torch.tensor(selected_nodes, dtype=torch.long)
 
     def _merge_related_nodes(self, partition: torch.Tensor, topk_percent:int) -> torch.Tensor:
         """
         将分区 partition 中所有节点的外部邻居（即不在 partition 中的邻居）合并进来，
         返回扩展后的分区（全局节点索引）。
         """
-        xadj = self.csr_adjacency.adj_starts
-        adjncy = self.csr_adjacency.adjacent
-        partition_set = set(partition.tolist())
-        external_neighbors = {}
-        for node in partition.tolist():
-            start, end = xadj[node], xadj[node + 1]   # 节点 u 的邻居存储在 adjncy[xadj[u] : xadj[u+1]]
-            deg = end - start
-            if deg == 0:
+        selected_nodes = self._select_related_nodes(partition, topk_percent)
+        return torch.unique(torch.cat([partition.to(torch.long), selected_nodes], dim=0))
+
+    def _select_feature_sim_nodes(
+        self,
+        partition: torch.Tensor,
+        n_nodes: int,
+        current_parent_id: int,
+        current_child_idx: int | None = None,
+        exclude_nodes: set[int] | None = None,
+        generator: torch.Generator | None = None,
+    ) -> torch.Tensor:
+        assert current_parent_id in (0, 1), "Only two parent partitions supported."
+        other_parent_id = 1 - current_parent_id
+        if partition.numel() == 0 or n_nodes <= 0:
+            return torch.empty((0,), dtype=torch.long)
+
+        if current_child_idx is not None and self.child_partition_centroids[current_parent_id][current_child_idx] is not None:
+            centroid = self.child_partition_centroids[current_parent_id][current_child_idx]
+        else:
+            centroid = self.feature[partition].mean(dim=0)
+
+        candidate_centroids = []
+        candidate_child_indices = []
+        for child_idx, child_centroid in enumerate(self.child_partition_centroids[other_parent_id]):
+            if child_centroid is None:
                 continue
-            neighbors = adjncy[start:end]
-            weights = self.eweights[start:end]
-            # weights = self.eweights[edge_ptr : edge_ptr + deg]
-            # BUG: 为什么要以edge_ptr访问eweight?
-            # 已经改为了self.eweights[start:end]
-            for nb, w in zip(neighbors, weights):
-                if nb not in partition_set:
-                    external_neighbors[nb] = external_neighbors.get(nb, 0) + w
-        # 排序并选 topk%
-        sorted_items = sorted(external_neighbors.items(), key=lambda x: x[1], reverse=True)
-        n_select = len(sorted_items) * topk_percent // 100 if topk_percent > 0 else 0
-        selected_nodes = {node for node, _ in sorted_items[:n_select]}
-        expanded_nodes = list(partition_set | selected_nodes)
-        expanded_nodes.sort()
-        return torch.tensor(expanded_nodes, dtype=torch.long)
+            candidate_centroids.append(child_centroid)
+            candidate_child_indices.append(child_idx)
+
+        if not candidate_centroids:
+            return torch.empty((0,), dtype=torch.long)
+
+        centroid_matrix = torch.stack(candidate_centroids, dim=0)
+        distances = torch.norm(centroid_matrix - centroid, dim=1)
+        best_child_idx = candidate_child_indices[int(torch.argmin(distances).item())]
+        matched_window_nodes = self.child_partitions[other_parent_id][best_child_idx].to(torch.long)
+        if matched_window_nodes.numel() == 0:
+            return torch.empty((0,), dtype=torch.long)
+
+        if exclude_nodes:
+            keep_mask = torch.tensor(
+                [int(node) not in exclude_nodes for node in matched_window_nodes.tolist()],
+                dtype=torch.bool,
+            )
+            matched_window_nodes = matched_window_nodes[keep_mask]
+            if matched_window_nodes.numel() == 0:
+                return torch.empty((0,), dtype=torch.long)
+
+        num_to_select = min(n_nodes, int(matched_window_nodes.numel()))
+        if generator is None:
+            sampled_indices = torch.randperm(matched_window_nodes.numel())[:num_to_select]
+        else:
+            sampled_indices = torch.randperm(matched_window_nodes.numel(), generator=generator)[:num_to_select]
+        return matched_window_nodes[sampled_indices]
+
+    def _build_feature_virtual_edges(
+        self,
+        core_partition: torch.Tensor,
+        selected_nodes: torch.Tensor,
+        partition_id: int,
+        connect_prob: float = 0.01,
+        max_edges_per_node: int | None = None,
+    ) -> torch.Tensor:
+        if selected_nodes.numel() == 0 or core_partition.numel() == 0:
+            return torch.empty((2, 0), dtype=torch.long)
+
+        virtual_edges = []
+        old_nodes = core_partition.to(torch.long).cpu()
+        if max_edges_per_node is None:
+            for new_node in selected_nodes.tolist():
+                for old_node in old_nodes.tolist():
+                    if torch.rand(1).item() < connect_prob:
+                        virtual_edges.append([int(old_node), int(new_node)])
+                        virtual_edges.append([int(new_node), int(old_node)])
+        else:
+            max_edges_per_node = max(int(max_edges_per_node), 0)
+            if max_edges_per_node <= 0:
+                return torch.empty((2, 0), dtype=torch.long)
+            per_node = min(max_edges_per_node, int(old_nodes.numel()))
+            for i, new_node in enumerate(selected_nodes.tolist()):
+                gen = torch.Generator(device='cpu')
+                gen.manual_seed((self.seed + 65_537 * (partition_id + 1) + i) % (2**63 - 1))
+                perm = torch.randperm(old_nodes.numel(), generator=gen)[:per_node]
+                for old_node in old_nodes[perm].tolist():
+                    virtual_edges.append([int(old_node), int(new_node)])
+                    virtual_edges.append([int(new_node), int(old_node)])
+
+        if virtual_edges:
+            return torch.tensor(virtual_edges, dtype=torch.long).t()
+        return torch.empty((2, 0), dtype=torch.long)
+
+    def _augment_partition_equal_size(
+        self,
+        core_partition: torch.Tensor,
+        related_nodes_topk_rate: int,
+        parent_id: int,
+        child_idx: int,
+        partition_id: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        core_partition = torch.unique(core_partition.to(torch.long))
+        target_extra = self._target_extra_count(core_partition)
+        selected_set = set(int(x) for x in core_partition.tolist())
+        selected_by_source = {'feature': []}
+
+        def remaining() -> int:
+            return target_extra - (len(selected_set) - int(core_partition.numel()))
+
+        def append_candidates(source: str, candidates: torch.Tensor, max_nodes: int):
+            take = min(max_nodes, remaining())
+            chosen = self._select_from_ordered_candidates(candidates, selected_set, take)
+            if source == 'feature':
+                selected_by_source['feature'].extend(chosen)
+
+        if target_extra <= 0:
+            return core_partition, torch.empty((2, 0), dtype=torch.long)
+
+        if self.window_aug_strategy == 'random':
+            random_start = time.time()
+            self._select_random_nodes(selected_set, remaining(), partition_id, salt=11)
+            self.timing_stats['random_fill_time'] += time.time() - random_start
+        elif self.window_aug_strategy == 'hub':
+            if self.hub_node_order is None:
+                hub_start = time.time()
+                self.hub_node_order = self._compute_hub_node_order()
+                self.timing_stats['hub_node_merge_time'] += time.time() - hub_start
+            hub_start = time.time()
+            append_candidates('hub', self.hub_node_order, remaining())
+            self.timing_stats['hub_node_merge_time'] += time.time() - hub_start
+        elif self.window_aug_strategy == 'remote':
+            feature_start = time.time()
+            gen = torch.Generator(device='cpu')
+            gen.manual_seed((self.seed + 31_337 * (partition_id + 1)) % (2**63 - 1))
+            feature_candidates = self._select_feature_sim_nodes(
+                core_partition,
+                target_extra,
+                current_parent_id=parent_id,
+                current_child_idx=child_idx,
+                exclude_nodes=selected_set,
+                generator=gen,
+            )
+            append_candidates('feature', feature_candidates, remaining())
+            self.timing_stats['feature_sim_merge_time'] += time.time() - feature_start
+        elif self.window_aug_strategy == 'ours':
+            related_quota = min(int(core_partition.numel() * max(self.window_related_ratio, 0.0)), target_extra)
+            feature_quota = min(int(core_partition.numel() * max(self.window_feature_ratio, 0.0)), target_extra)
+            hub_quota = min(int(core_partition.numel() * max(self.window_hub_ratio, 0.0)), target_extra)
+
+            related_start = time.time()
+            related_candidates = self._select_related_nodes(core_partition, related_nodes_topk_rate)
+            append_candidates('related', related_candidates, related_quota)
+            self.timing_stats['related_nodes_merge_time'] += time.time() - related_start
+
+            feature_start = time.time()
+            gen = torch.Generator(device='cpu')
+            gen.manual_seed((self.seed + 31_337 * (partition_id + 1)) % (2**63 - 1))
+            feature_candidates = self._select_feature_sim_nodes(
+                core_partition,
+                target_extra,
+                current_parent_id=parent_id,
+                current_child_idx=child_idx,
+                exclude_nodes=set(int(x) for x in core_partition.tolist()),
+                generator=gen,
+            )
+            append_candidates('feature', feature_candidates, feature_quota)
+            self.timing_stats['feature_sim_merge_time'] += time.time() - feature_start
+
+            if self.hub_node_order is None:
+                hub_start = time.time()
+                self.hub_node_order = self._compute_hub_node_order()
+                self.timing_stats['hub_node_merge_time'] += time.time() - hub_start
+            hub_start = time.time()
+            append_candidates('hub', self.hub_node_order, hub_quota)
+            self.timing_stats['hub_node_merge_time'] += time.time() - hub_start
+
+            # If one source lacks enough unique candidates, keep the source priority before random fallback.
+            append_candidates('related', related_candidates, remaining())
+            append_candidates('feature', feature_candidates, remaining())
+            append_candidates('hub', self.hub_node_order, remaining())
+        else:
+            raise ValueError(f'Unsupported window_aug_strategy: {self.window_aug_strategy}')
+
+        if remaining() > 0:
+            random_start = time.time()
+            self._select_random_nodes(selected_set, remaining(), partition_id, salt=23)
+            self.timing_stats['random_fill_time'] += time.time() - random_start
+
+        final_nodes = torch.tensor(sorted(selected_set), dtype=torch.long)
+        expected_size = int(core_partition.numel()) + target_extra
+        if int(final_nodes.numel()) != expected_size:
+            raise RuntimeError(
+                f"Window augmentation size mismatch: strategy={self.window_aug_strategy}, "
+                f"partition={partition_id}, expected={expected_size}, actual={final_nodes.numel()}"
+            )
+        feature_nodes = torch.tensor(selected_by_source['feature'], dtype=torch.long)
+        virtual_edge_index = self._build_feature_virtual_edges(
+            core_partition,
+            feature_nodes,
+            partition_id=partition_id,
+            max_edges_per_node=self.feature_sim_virtual_edges_per_node,
+        )
+        return final_nodes, virtual_edge_index
     
     def _merge_feature_sim(
         self,
