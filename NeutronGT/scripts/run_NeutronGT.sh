@@ -107,46 +107,34 @@ esac
 if [ "$dataset" = "AmazonProducts" ]; then
     if [ "$MODEL_ALIAS" = "GT" ]; then
         NPARTS=128
-        RELATED_TOPK=4
     elif [ "$MODEL_ALIAS" = "GPH_Slim" ]; then
         NPARTS=128
-        RELATED_TOPK=4
     elif [ "$MODEL_ALIAS" = "GPH_Large" ]; then
         NPARTS=400
-        RELATED_TOPK=4
     fi
 elif [ "$dataset" = "ogbn-arxiv" ]; then
     if [ "$MODEL_ALIAS" = "GT" ]; then
         NPARTS=16
-        RELATED_TOPK=8
     elif [ "$MODEL_ALIAS" = "GPH_Slim" ]; then
         NPARTS=16
-        RELATED_TOPK=8
     elif [ "$MODEL_ALIAS" = "GPH_Large" ]; then
         NPARTS=32
-        RELATED_TOPK=8
     fi
 elif [ "$dataset" = "ogbn-products" ]; then
     if [ "$MODEL_ALIAS" = "GT" ]; then
         NPARTS=128
-        RELATED_TOPK=6
     elif [ "$MODEL_ALIAS" = "GPH_Slim" ]; then
         NPARTS=128
-        RELATED_TOPK=6
     elif [ "$MODEL_ALIAS" = "GPH_Large" ]; then
         NPARTS=512
-        RELATED_TOPK=4
     fi
 elif [ "$dataset" = "reddit" ]; then
     if [ "$MODEL_ALIAS" = "GT" ]; then
         NPARTS=32
-        RELATED_TOPK=10
     elif [ "$MODEL_ALIAS" = "GPH_Slim" ]; then
         NPARTS=32
-        RELATED_TOPK=10
     elif [ "$MODEL_ALIAS" = "GPH_Large" ]; then
         NPARTS=80
-        RELATED_TOPK=4
     fi
 else
     echo "Error: unsupported dataset: $dataset" >&2
@@ -161,13 +149,13 @@ GPU_NUM=${#GPU_LIST[@]}
 mkdir -p "${LOG_DIR}"
 
 WINDOW_AUG_STRATEGY="ours"
-WINDOW_EXTRA_RATIO=0.20
-WINDOW_RELATED_RATIO=0.06
+WINDOW_EXTRA_RATIO=0.30
+WINDOW_RELATED_RATIO=0.12
 WINDOW_FEATURE_RATIO=0.06
-WINDOW_HUB_RATIO=0.08
+WINDOW_HUB_RATIO=0.12
 FEATURE_SIM_VIRTUAL_EDGES_PER_NODE=4
 
-LOG_FILE="${LOG_DIR}/${dataset}_${MODEL_ALIAS}_${WINDOW_AUG_STRATEGY}_nparts${NPARTS}_rtopk${RELATED_TOPK}_${RUN_TAG}.log"
+LOG_FILE="${LOG_DIR}/${dataset}_${MODEL_ALIAS}_${WINDOW_AUG_STRATEGY}_nparts${NPARTS}_${RUN_TAG}.log"
 MASTER_PORT=$((8000 + RANDOM % 1000))
 
 echo "-------------------------------------------------------------"
@@ -178,7 +166,7 @@ echo "GPUs: ${GPU_NUM} (CUDA_VISIBLE_DEVICES=${DEVICES})"
 echo "Log: ${LOG_FILE}"
 echo "-------------------------------------------------------------"
 
-CUDA_VISIBLE_DEVICES="${DEVICES}" torchrun   --nproc_per_node="${GPU_NUM}"   --master_port="${MASTER_PORT}"   main_sp_node_level_ppr.py   --dataset "${dataset}"   --dataset_dir "${DATASET_DIR}"   --model "${MODEL}"   --attn_type "${ATTN_TYPE}"   --n_layers "${N_LAYERS}"   --hidden_dim "${HIDDEN_DIM}"   --ffn_dim "${FFN_DIM}"   --num_heads "${NUM_HEADS}"   --epochs "${EPOCHS}"   --use_cache 1   --use_preprocess_cache 0   --n_parts "${NPARTS}"   --related_nodes_topk_rate "${RELATED_TOPK}"   --window_aug_strategy "${WINDOW_AUG_STRATEGY}"   --window_extra_node_ratio "${WINDOW_EXTRA_RATIO}"   --window_related_ratio "${WINDOW_RELATED_RATIO}"   --window_feature_ratio "${WINDOW_FEATURE_RATIO}"   --window_hub_ratio "${WINDOW_HUB_RATIO}"   --feature_sim_virtual_edges_per_node "${FEATURE_SIM_VIRTUAL_EDGES_PER_NODE}"   --ppr_backend appnp   --ppr_topk 5   --ppr_alpha 0.85   --ppr_num_iterations 10   --ppr_batch_size 8192   --ppr_iter_topk 5   --distributed-backend nccl   --distributed-timeout-minutes 120   > "${LOG_FILE}" 2>&1
+CUDA_VISIBLE_DEVICES="${DEVICES}" torchrun   --nproc_per_node="${GPU_NUM}"   --master_port="${MASTER_PORT}"   main_sp_node_level_ppr.py   --dataset "${dataset}"   --dataset_dir "${DATASET_DIR}"   --model "${MODEL}"   --attn_type "${ATTN_TYPE}"   --n_layers "${N_LAYERS}"   --hidden_dim "${HIDDEN_DIM}"   --ffn_dim "${FFN_DIM}"   --num_heads "${NUM_HEADS}"   --epochs "${EPOCHS}"   --use_cache 1   --use_preprocess_cache 0   --n_parts "${NPARTS}"   --window_aug_strategy "${WINDOW_AUG_STRATEGY}"   --window_extra_node_ratio "${WINDOW_EXTRA_RATIO}"   --window_related_ratio "${WINDOW_RELATED_RATIO}"   --window_feature_ratio "${WINDOW_FEATURE_RATIO}"   --window_hub_ratio "${WINDOW_HUB_RATIO}"   --feature_sim_virtual_edges_per_node "${FEATURE_SIM_VIRTUAL_EDGES_PER_NODE}"   --ppr_backend appnp   --ppr_topk 5   --ppr_alpha 0.85   --ppr_num_iterations 10   --ppr_batch_size 8192   --ppr_iter_topk 5   --distributed-backend nccl   --distributed-timeout-minutes 120   > "${LOG_FILE}" 2>&1
 
 if [ $? -eq 0 ]; then
     echo "Status: Success"

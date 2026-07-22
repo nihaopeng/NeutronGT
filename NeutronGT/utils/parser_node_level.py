@@ -86,8 +86,6 @@ def parser_add_main_args(parser):
                        help='torch_geometric backend only: epsilon used by get_ppr')
     parser.add_argument('--n_parts', type=int, default=50,
                        help='number of graph partitions/windows used during Metis partitioning')
-    parser.add_argument('--related_nodes_topk_rate', type=int, default=2,
-                       help='top-k percent of external related neighbors merged into each partition')
     parser.add_argument('--preprocess_only', type=int, default=0, choices=[0, 1],
                        help='when set to 1, stop after graph/window preprocessing and exit before training')
     parser.add_argument('--use_preprocess_cache', type=int, default=1, choices=[0, 1],
@@ -97,13 +95,13 @@ def parser_add_main_args(parser):
     parser.add_argument('--window_aug_strategy', type=str, default='ours',
                        choices=['random', 'hub', 'related', 'ours'],
                        help='fixed-window augmentation strategy used during preprocessing')
-    parser.add_argument('--window_extra_node_ratio', type=float, default=0.20,
+    parser.add_argument('--window_extra_node_ratio', type=float, default=0.30,
                        help='target extra unique nodes per core window for window augmentation')
-    parser.add_argument('--window_related_ratio', type=float, default=0.06,
+    parser.add_argument('--window_related_ratio', type=float, default=0.12,
                        help='preferred related-node budget ratio for ours augmentation')
     parser.add_argument('--window_feature_ratio', type=float, default=0.06,
                        help='preferred feature-sim node budget ratio for ours augmentation')
-    parser.add_argument('--window_hub_ratio', type=float, default=0.08,
+    parser.add_argument('--window_hub_ratio', type=float, default=0.12,
                        help='preferred global hub-node budget ratio for ours augmentation')
     parser.add_argument('--feature_sim_virtual_edges_per_node', type=int, default=4,
                        help='max bidirectional virtual edges per feature-sim node for window augmentation')

@@ -89,10 +89,10 @@ USE_PREPROCESS_CACHE=0
 TIMEOUT=120
 PPR_BATCH_SIZE=8192
 PPR_ITER_TOPK=5
-WINDOW_EXTRA_RATIO=0.20
-WINDOW_RELATED_RATIO=0.06
+WINDOW_EXTRA_RATIO=0.30
+WINDOW_RELATED_RATIO=0.12
 WINDOW_FEATURE_RATIO=0.06
-WINDOW_HUB_RATIO=0.08
+WINDOW_HUB_RATIO=0.12
 FEATURE_SIM_VIRTUAL_EDGES_PER_NODE=4
 
 if [ ${#SELECTED_DATASET_FLAGS[@]} -eq 0 ]; then
@@ -122,27 +122,27 @@ resolve_window_params() {
     local model_alias="$2"
     if [ "$dataset" = "AmazonProducts" ]; then
         if [ "$model_alias" = "GPH_Large" ]; then
-            echo "400 4"
+            echo "400"
         else
-            echo "128 4"
+            echo "128"
         fi
     elif [ "$dataset" = "ogbn-arxiv" ]; then
         if [ "$model_alias" = "GPH_Large" ]; then
-            echo "32 8"
+            echo "32"
         else
-            echo "16 8"
+            echo "16"
         fi
     elif [ "$dataset" = "ogbn-products" ]; then
         if [ "$model_alias" = "GPH_Large" ]; then
-            echo "512 4"
+            echo "512"
         else
-            echo "128 6"
+            echo "128"
         fi
     elif [ "$dataset" = "reddit" ]; then
         if [ "$model_alias" = "GPH_Large" ]; then
-            echo "80 4"
+            echo "80"
         else
-            echo "32 10"
+            echo "32"
         fi
     else
         return 1
@@ -151,7 +151,7 @@ resolve_window_params() {
 
 for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
     DATASET=$(resolve_dataset "${DATASET_FLAG}")
-    read -r NPARTS RELATED_TOPK < <(resolve_window_params "${DATASET}" "${MODEL_ALIAS}")
+    NPARTS=$(resolve_window_params "${DATASET}" "${MODEL_ALIAS}")
 
     for STRATEGY in "${STRATEGIES[@]}"; do
         MODE_LABEL="train"
@@ -162,7 +162,7 @@ for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
             MODE_LABEL="${MODE_LABEL}_refresh"
         fi
 
-        LOG_FILE="${LOG_DIR}/${DATASET}_${MODEL_ALIAS}_${STRATEGY}_e${EPOCHS}_nparts${NPARTS}_rtopk${RELATED_TOPK}_${MODE_LABEL}_${RUN_TAG}.log"
+        LOG_FILE="${LOG_DIR}/${DATASET}_${MODEL_ALIAS}_${STRATEGY}_e${EPOCHS}_nparts${NPARTS}_${MODE_LABEL}_${RUN_TAG}.log"
         MASTER_PORT=$((8000 + RANDOM % 1000))
 
         echo "============================================================="
@@ -170,7 +170,7 @@ for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
         echo "Dataset: ${DATASET}"
         echo "Model: ${MODEL_ALIAS}"
         echo "Strategy: ${STRATEGY}"
-        echo "n_parts=${NPARTS} related_topk=${RELATED_TOPK} epochs=${EPOCHS}"
+        echo "n_parts=${NPARTS} epochs=${EPOCHS}"
         echo "cache=${USE_CACHE} preprocess_cache=${USE_PREPROCESS_CACHE} refresh=${REFRESH_PREPROCESS_CACHE}"
         echo "GPUs=${GPU_NUM} CUDA_VISIBLE_DEVICES=${DEVICES}"
         echo "Log: ${LOG_FILE}"
@@ -193,7 +193,6 @@ for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
             --use_preprocess_cache "${USE_PREPROCESS_CACHE}" \
             --refresh_preprocess_cache "${REFRESH_PREPROCESS_CACHE}" \
             --n_parts "${NPARTS}" \
-            --related_nodes_topk_rate "${RELATED_TOPK}" \
             --window_aug_strategy "${STRATEGY}" \
             --window_extra_node_ratio "${WINDOW_EXTRA_RATIO}" \
             --window_related_ratio "${WINDOW_RELATED_RATIO}" \

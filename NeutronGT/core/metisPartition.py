@@ -28,14 +28,13 @@ class weightMetis_keepParent:
             edge_index:list[torch.Tensor,torch.Tensor],
             edge_csr_data:dict | None,
             n_parts:int,
-            related_nodes_topk_rate:int,
             attn_type:str,
             sorted_ppr_matrix:list[torch.Tensor],
             window_aug_strategy:str='ours',
-            window_extra_node_ratio:float=0.20,
-            window_related_ratio:float=0.06,
+            window_extra_node_ratio:float=0.30,
+            window_related_ratio:float=0.12,
             window_feature_ratio:float=0.06,
-            window_hub_ratio:float=0.08,
+            window_hub_ratio:float=0.12,
             feature_sim_virtual_edges_per_node:int=4,
             seed:int=42,
         ) -> None:
@@ -135,7 +134,6 @@ class weightMetis_keepParent:
                 partition_id = parent_id * self.partition_num_per_parent + child_idx
                 merged, expanded_edge_p = self._augment_partition_equal_size(
                     core_partition=part,
-                    related_nodes_topk_rate=related_nodes_topk_rate,
                     parent_id=parent_id,
                     child_idx=child_idx,
                     partition_id=partition_id,
@@ -669,7 +667,6 @@ class weightMetis_keepParent:
     def _select_related_nodes(
         self,
         partition: torch.Tensor,
-        topk_percent: int,
         max_nodes: int | None = None,
     ) -> torch.Tensor:
         xadj = self.original_rowptr
@@ -691,16 +688,16 @@ class weightMetis_keepParent:
         if max_nodes is not None:
             n_select = min(len(sorted_items), max_nodes)
         else:
-            n_select = len(sorted_items) * topk_percent // 100 if topk_percent > 0 else 0
+            n_select = len(sorted_items)
         selected_nodes = [node for node, _ in sorted_items[:n_select]]
         return torch.tensor(selected_nodes, dtype=torch.long)
 
-    def _merge_related_nodes(self, partition: torch.Tensor, topk_percent:int) -> torch.Tensor:
+    def _merge_related_nodes(self, partition: torch.Tensor) -> torch.Tensor:
         """
         将分区 partition 中所有节点的外部邻居（即不在 partition 中的邻居）合并进来，
         返回扩展后的分区（全局节点索引）。
         """
-        selected_nodes = self._select_related_nodes(partition, topk_percent)
+        selected_nodes = self._select_related_nodes(partition)
         return torch.unique(torch.cat([partition.to(torch.long), selected_nodes], dim=0))
 
     def _select_feature_sim_nodes(
@@ -797,7 +794,6 @@ class weightMetis_keepParent:
     def _augment_partition_equal_size(
         self,
         core_partition: torch.Tensor,
-        related_nodes_topk_rate: int,
         parent_id: int,
         child_idx: int,
         partition_id: int,
@@ -835,7 +831,7 @@ class weightMetis_keepParent:
             self.timing_stats['hub_node_merge_time'] += time.time() - hub_start
         elif self.window_aug_strategy == 'related':
             related_start = time.time()
-            related_candidates = self._select_related_nodes(core_partition, related_nodes_topk_rate, max_nodes=target_extra)
+            related_candidates = self._select_related_nodes(core_partition, max_nodes=target_extra)
             append_candidates('related', related_candidates, remaining())
             self.timing_stats['related_nodes_merge_time'] += time.time() - related_start
         elif self.window_aug_strategy == 'ours':
@@ -844,7 +840,7 @@ class weightMetis_keepParent:
             hub_quota = min(int(core_partition.numel() * max(self.window_hub_ratio, 0.0)), target_extra)
 
             related_start = time.time()
-            related_candidates = self._select_related_nodes(core_partition, related_nodes_topk_rate, max_nodes=target_extra)
+            related_candidates = self._select_related_nodes(core_partition, max_nodes=target_extra)
             append_candidates('related', related_candidates, related_quota)
             self.timing_stats['related_nodes_merge_time'] += time.time() - related_start
 
@@ -990,7 +986,6 @@ if __name__ == "__main__":
         n_parts=n_parts,
         edge_index=edge_index,
         edge_csr_data=None,
-        related_nodes_topk_rate=5,
         attn_type="full", # 测试 full attention 模式
         sorted_ppr_matrix=sorted_ppr_matrix
     )

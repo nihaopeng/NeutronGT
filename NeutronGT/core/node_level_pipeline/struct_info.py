@@ -253,7 +253,7 @@ def _build_struct_info_from_cache_payload(payload, graph_in_degree, graph_out_de
 
 
 def build_graph_struct_info(args, N, edge_index, feature, world_size, device, topk=50, n_parts=50,
-                            related_nodes_topk_rate=5, connect_prob=0.01, edge_csr_data=None):
+                            connect_prob=0.01, edge_csr_data=None):
     preprocess_start = time.time()
     graph_in_degree, graph_out_degree = None, None
     if args.struct_enc == "True":
@@ -401,14 +401,13 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
         feature=feature,
         edge_index=graph_edge_index,
         edge_csr_data=edge_csr_data,
-        related_nodes_topk_rate=related_nodes_topk_rate,
         attn_type=args.attn_type,
         sorted_ppr_matrix=sorted_ppr_matrix,
         window_aug_strategy=getattr(args, 'window_aug_strategy', 'ours'),
-        window_extra_node_ratio=getattr(args, 'window_extra_node_ratio', 0.20),
-        window_related_ratio=getattr(args, 'window_related_ratio', 0.06),
+        window_extra_node_ratio=getattr(args, 'window_extra_node_ratio', 0.30),
+        window_related_ratio=getattr(args, 'window_related_ratio', 0.12),
         window_feature_ratio=getattr(args, 'window_feature_ratio', 0.06),
-        window_hub_ratio=getattr(args, 'window_hub_ratio', 0.08),
+        window_hub_ratio=getattr(args, 'window_hub_ratio', 0.12),
         feature_sim_virtual_edges_per_node=getattr(args, 'feature_sim_virtual_edges_per_node', 4),
         seed=getattr(args, 'seed', 42),
     )

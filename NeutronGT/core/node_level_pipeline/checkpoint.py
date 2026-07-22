@@ -15,7 +15,6 @@ _CHECKPOINT_COMPAT_KEYS = (
     'num_heads',
     'attn_type',
     'n_parts',
-    'related_nodes_topk_rate',
     'ppr_topk',
 )
 

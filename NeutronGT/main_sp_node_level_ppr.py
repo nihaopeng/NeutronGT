@@ -184,7 +184,6 @@ def main():
             args,N,edge_index,feature,seq_parallel_world_size,device,
             topk=args.ppr_topk,
             n_parts=args.n_parts,
-            related_nodes_topk_rate=args.related_nodes_topk_rate,
             edge_csr_data=edge_csr_data
         )
     sync_device(device)
