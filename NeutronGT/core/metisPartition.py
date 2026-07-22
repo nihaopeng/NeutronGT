@@ -26,15 +26,16 @@ class weightMetis_keepParent:
             eweights:list,
             feature:torch.Tensor,
             edge_index:list[torch.Tensor,torch.Tensor],
+            edge_csr_data:dict | None,
             n_parts:int,
             related_nodes_topk_rate:int,
             attn_type:str,
             sorted_ppr_matrix:list[torch.Tensor],
-            window_aug_strategy:str='legacy',
+            window_aug_strategy:str='ours',
             window_extra_node_ratio:float=0.20,
-            window_related_ratio:float=0.10,
-            window_feature_ratio:float=0.07,
-            window_hub_ratio:float=0.03,
+            window_related_ratio:float=0.06,
+            window_feature_ratio:float=0.06,
+            window_hub_ratio:float=0.08,
             feature_sim_virtual_edges_per_node:int=4,
             seed:int=42,
         ) -> None:
@@ -44,8 +45,9 @@ class weightMetis_keepParent:
         self.feature = feature
         self.n_parts = n_parts
         self.global_edge_index = edge_index
-        self.partition_num_per_parent = n_parts // 2
         self.num_nodes = len(self.csr_adjacency.adj_starts) - 1 if hasattr(self.csr_adjacency, 'adj_starts') else None
+        self.original_rowptr, self.original_col = self._prepare_original_graph_csr(edge_index, edge_csr_data)
+        self.partition_num_per_parent = n_parts // 2
         self.window_aug_strategy = window_aug_strategy
         self.window_extra_node_ratio = float(window_extra_node_ratio)
         self.window_related_ratio = float(window_related_ratio)
@@ -86,6 +88,11 @@ class weightMetis_keepParent:
             'feature_sim_merge_time': 0.0,
             'hub_node_merge_time': 0.0,
             'random_fill_time': 0.0,
+            'augmentation_target_extra_nodes': 0,
+            'augmentation_related_nodes': 0,
+            'augmentation_feature_nodes': 0,
+            'augmentation_hub_nodes': 0,
+            'augmentation_filler_nodes': 0,
             'expanded_edge_concat_time': 0.0,
             'duplicate_rerange_time': 0.0,
             'subgraph_build_time': 0.0,
@@ -126,25 +133,13 @@ class weightMetis_keepParent:
             for child_idx, part in enumerate(parent_group):
                 part = part.long()
                 partition_id = parent_id * self.partition_num_per_parent + child_idx
-                if self.window_aug_strategy == 'legacy':
-                    # halo: partition包括原本partition的节点和邻居节点
-                    related_merge_start = time.time()
-                    halo_extended = self._merge_related_nodes(part,related_nodes_topk_rate)
-                    self.timing_stats['related_nodes_merge_time'] += time.time() - related_merge_start
-                    # feature: partition包括原本的partition的节点和对侧最相似窗口中采样的节点
-                    feature_merge_start = time.time()
-                    feature_extended,expanded_edge_p = self._merge_feature_sim(part, n_nodes=1, current_parent_id=parent_id, current_child_idx=child_idx)
-                    self.timing_stats['feature_sim_merge_time'] += time.time() - feature_merge_start
-                    merged = torch.cat([halo_extended, feature_extended], dim=0)
-                    merged = torch.unique(merged)  # 自动排序 + 去重
-                else:
-                    merged, expanded_edge_p = self._augment_partition_equal_size(
-                        core_partition=part,
-                        related_nodes_topk_rate=related_nodes_topk_rate,
-                        parent_id=parent_id,
-                        child_idx=child_idx,
-                        partition_id=partition_id,
-                    )
+                merged, expanded_edge_p = self._augment_partition_equal_size(
+                    core_partition=part,
+                    related_nodes_topk_rate=related_nodes_topk_rate,
+                    parent_id=parent_id,
+                    child_idx=child_idx,
+                    partition_id=partition_id,
+                )
                 expanded_group.append(merged)
                 self.expanded_edge[0].extend(expanded_edge_p[0].tolist())
                 self.expanded_edge[1].extend(expanded_edge_p[1].tolist())
@@ -175,6 +170,30 @@ class weightMetis_keepParent:
         # 释放预处理中间数据：Metis 划分完成后不再需要
         del self.csr_adjacency, self.eweights
         del self.ppr_edge_index, self.ppr_val
+
+    def _prepare_original_graph_csr(self, edge_index: torch.Tensor, edge_csr_data: dict | None):
+        if edge_csr_data is not None:
+            return (
+                torch.as_tensor(edge_csr_data["rowptr"], device='cpu'),
+                torch.as_tensor(edge_csr_data["col"], device='cpu'),
+            )
+
+        num_nodes = int(self.num_nodes) if self.num_nodes is not None else 0
+        if num_nodes <= 0 and edge_index is not None and edge_index.numel() > 0:
+            num_nodes = int(edge_index.max().item()) + 1
+            self.num_nodes = num_nodes
+        if edge_index is None or edge_index.numel() == 0:
+            return torch.zeros((num_nodes + 1,), dtype=torch.long), torch.empty((0,), dtype=torch.long)
+
+        src = edge_index[0].to(device='cpu', dtype=torch.long)
+        dst = edge_index[1].to(device='cpu', dtype=torch.long)
+        order = torch.argsort(src)
+        src = src[order]
+        dst = dst[order]
+        counts = torch.bincount(src, minlength=num_nodes)
+        rowptr = torch.zeros((num_nodes + 1,), dtype=torch.long)
+        rowptr[1:] = torch.cumsum(counts, dim=0)
+        return rowptr, dst
 
     def partition(self,partition:torch.Tensor,csr_adjacency:pymetis.CSRAdjacency,eweights:list[list],n_parts:int):
         try:
@@ -346,88 +365,7 @@ class weightMetis_keepParent:
         替代原有的逐分区 torch_geometric.utils.subgraph() 调用，
         将 50 次全量边扫描合并为 1 次。
         """
-        if self.window_aug_strategy != 'legacy':
-            return self._build_all_sub_edge_indices_multi_membership()
-
-        num_parts = len(self.partitioned_results)
-        if num_parts == 0:
-            return []
-
-        # 构建 node → partition 映射（int32: papers100M 111M 节点 888MB → 444MB）
-        num_nodes = self.num_nodes or int(self.global_edge_index.max().item()) + 1
-        node_to_part = torch.full((num_nodes,), -1, dtype=torch.int32)
-        for pid, part in enumerate(self.partitioned_results):
-            node_to_part[part.long()] = pid
-
-        # 分块处理 global_edge_index，控制峰值内存（edge_index 已为 int32，无需 .long()）
-        src_all = self.global_edge_index[0]
-        dst_all = self.global_edge_index[1]
-        total_edges = src_all.numel()
-        CHUNK = 200_000_000  # 2 亿条边每块
-
-        # 每个分区累积 [src_local, dst_local]
-        part_srcs: list[list] = [[] for _ in range(num_parts)]
-        part_dsts: list[list] = [[] for _ in range(num_parts)]
-
-        for chunk_start in range(0, total_edges, CHUNK):
-            chunk_end = min(chunk_start + CHUNK, total_edges)
-            src = src_all[chunk_start:chunk_end]
-            dst = dst_all[chunk_start:chunk_end]
-
-            src_part = node_to_part[src]
-            dst_part = node_to_part[dst]
-            same_part = (src_part == dst_part) & (src_part >= 0)
-
-            valid_src = src[same_part]
-            valid_dst = dst[same_part]
-            valid_part = src_part[same_part]
-
-            if valid_src.numel() == 0:
-                continue
-
-            # 按分区排序后分组
-            order = torch.argsort(valid_part)
-            valid_part = valid_part[order]
-            valid_src = valid_src[order]
-            valid_dst = valid_dst[order]
-            boundaries = torch.searchsorted(
-                valid_part,
-                torch.arange(num_parts + 1, device=valid_part.device)
-            )
-
-            for pid in range(num_parts):
-                s, e = int(boundaries[pid].item()), int(boundaries[pid + 1].item())
-                if s == e:
-                    continue
-                part_srcs[pid].append(valid_src[s:e].cpu())
-                part_dsts[pid].append(valid_dst[s:e].cpu())
-
-            del src, dst, src_part, dst_part, same_part, valid_src, valid_dst, valid_part, order, boundaries
-
-        # 每个分区内 relabel: global → local（复用 global_to_local 缓冲区，int32 省一半内存）
-        sub_edge_list = []
-        global_to_local = torch.full((num_nodes,), -1, dtype=torch.int32)
-        for pid in range(num_parts):
-            if not part_srcs[pid]:
-                sub_edge_list.append(torch.empty((2, 0), dtype=torch.long))
-                continue
-            cat_src = torch.cat(part_srcs[pid])
-            cat_dst = torch.cat(part_dsts[pid])
-            part_nodes = self.partitioned_results[pid]
-            # 标记当前分区节点 → local index
-            global_to_local[part_nodes.long()] = torch.arange(len(part_nodes), dtype=torch.int32)
-            local_src = global_to_local[cat_src]
-            local_dst = global_to_local[cat_dst]
-            sub_edge_list.append(torch.stack([local_src, local_dst], dim=0))
-            del local_src, local_dst
-            # 清除当前分区的映射，为下一分区复用缓冲区
-            global_to_local[part_nodes.long()] = -1
-            del cat_src, cat_dst
-            part_srcs[pid] = None
-            part_dsts[pid] = None
-
-        del global_to_local, node_to_part
-        return sub_edge_list
+        return self._build_all_sub_edge_indices_multi_membership()
 
     def _build_all_sub_edge_indices_multi_membership(self) -> list:
         """Build subgraph edges when copied nodes may belong to many windows."""
@@ -653,12 +591,18 @@ class weightMetis_keepParent:
     def _compute_hub_node_order(self) -> torch.Tensor:
         if self.num_nodes is None or self.num_nodes <= 0:
             return torch.empty((0,), dtype=torch.long)
-        src = self.global_edge_index[0].to(torch.long)
-        dst = self.global_edge_index[1].to(torch.long)
-        degree_score = torch.bincount(src, minlength=self.num_nodes)
-        degree_score += torch.bincount(dst, minlength=self.num_nodes)
+        rowptr = self.original_rowptr.to(device='cpu')
+        col = self.original_col.to(device='cpu')
+        out_degree = (rowptr[1:].to(torch.long) - rowptr[:-1].to(torch.long)).clamp_min(0)
+        degree_score = out_degree
+        chunk_size = 100_000_000
+        in_degree = torch.zeros(int(self.num_nodes), dtype=torch.long)
+        for start in range(0, int(col.numel()), chunk_size):
+            end = min(start + chunk_size, int(col.numel()))
+            in_degree += torch.bincount(col[start:end].to(torch.long), minlength=int(self.num_nodes))
+        degree_score += in_degree
         hub_order = torch.argsort(degree_score, descending=True)
-        del src, dst, degree_score
+        del rowptr, col, out_degree, in_degree, degree_score
         return hub_order.to(torch.long).cpu()
 
     def _select_from_ordered_candidates(
@@ -680,12 +624,11 @@ class weightMetis_keepParent:
                 break
         return selected
 
-    def _select_random_nodes(
+    def _select_shared_filler_nodes(
         self,
         selected_set: set[int],
         max_nodes: int,
         partition_id: int,
-        salt: int,
     ) -> list[int]:
         if max_nodes <= 0 or self.num_nodes is None or self.num_nodes <= 0:
             return []
@@ -695,7 +638,7 @@ class weightMetis_keepParent:
 
         selected = []
         gen = torch.Generator(device='cpu')
-        gen.manual_seed((self.seed + 1_000_003 * (partition_id + 1) + salt) % (2**63 - 1))
+        gen.manual_seed((self.seed + 1_000_003 * (partition_id + 1) + 17) % (2**63 - 1))
         attempts = 0
         while len(selected) < max_nodes and attempts < 20:
             need = max_nodes - len(selected)
@@ -712,7 +655,7 @@ class weightMetis_keepParent:
             attempts += 1
 
         if len(selected) < max_nodes:
-            start = (self.seed + 97_531 * (partition_id + 1) + salt) % self.num_nodes
+            start = (self.seed + 97_531 * (partition_id + 1) + 17) % self.num_nodes
             for offset in range(self.num_nodes):
                 node = int((start + offset) % self.num_nodes)
                 if node in selected_set:
@@ -729,26 +672,26 @@ class weightMetis_keepParent:
         topk_percent: int,
         max_nodes: int | None = None,
     ) -> torch.Tensor:
-        xadj = self.csr_adjacency.adj_starts
-        adjncy = self.csr_adjacency.adjacent
+        xadj = self.original_rowptr
+        adjncy = self.original_col
         partition_set = set(int(x) for x in partition.tolist())
         external_neighbors = {}
         for node in partition.tolist():
             node = int(node)
-            start, end = xadj[node], xadj[node + 1]
+            start, end = int(xadj[node].item()), int(xadj[node + 1].item())
             if end <= start:
                 continue
             neighbors = adjncy[start:end]
-            weights = self.eweights[start:end]
-            for nb, w in zip(neighbors, weights):
+            for nb in neighbors.tolist():
                 nb = int(nb)
                 if nb not in partition_set:
-                    external_neighbors[nb] = external_neighbors.get(nb, 0) + w
+                    external_neighbors[nb] = external_neighbors.get(nb, 0) + 1
 
         sorted_items = sorted(external_neighbors.items(), key=lambda x: x[1], reverse=True)
-        n_select = len(sorted_items) * topk_percent // 100 if topk_percent > 0 else 0
         if max_nodes is not None:
-            n_select = min(n_select, max_nodes)
+            n_select = min(len(sorted_items), max_nodes)
+        else:
+            n_select = len(sorted_items) * topk_percent // 100 if topk_percent > 0 else 0
         selected_nodes = [node for node, _ in sorted_items[:n_select]]
         return torch.tensor(selected_nodes, dtype=torch.long)
 
@@ -807,11 +750,13 @@ class weightMetis_keepParent:
                 return torch.empty((0,), dtype=torch.long)
 
         num_to_select = min(n_nodes, int(matched_window_nodes.numel()))
-        if generator is None:
-            sampled_indices = torch.randperm(matched_window_nodes.numel())[:num_to_select]
-        else:
-            sampled_indices = torch.randperm(matched_window_nodes.numel(), generator=generator)[:num_to_select]
-        return matched_window_nodes[sampled_indices]
+        matched_features = self.feature[matched_window_nodes].to(device='cpu', dtype=torch.float32)
+        centroid = centroid.to(device='cpu', dtype=torch.float32)
+        centroid_norm = torch.norm(centroid).clamp_min(1e-12)
+        feature_norm = torch.norm(matched_features, dim=1).clamp_min(1e-12)
+        scores = torch.matmul(matched_features, centroid) / (feature_norm * centroid_norm)
+        selected_indices = torch.argsort(scores, descending=True)[:num_to_select]
+        return matched_window_nodes[selected_indices]
 
     def _build_feature_virtual_edges(
         self,
@@ -859,8 +804,10 @@ class weightMetis_keepParent:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         core_partition = torch.unique(core_partition.to(torch.long))
         target_extra = self._target_extra_count(core_partition)
+        self.timing_stats['augmentation_target_extra_nodes'] += int(target_extra)
         selected_set = set(int(x) for x in core_partition.tolist())
-        selected_by_source = {'feature': []}
+        selected_by_source = {'related': [], 'feature': [], 'hub': []}
+        filler_nodes = []
 
         def remaining() -> int:
             return target_extra - (len(selected_set) - int(core_partition.numel()))
@@ -868,15 +815,15 @@ class weightMetis_keepParent:
         def append_candidates(source: str, candidates: torch.Tensor, max_nodes: int):
             take = min(max_nodes, remaining())
             chosen = self._select_from_ordered_candidates(candidates, selected_set, take)
-            if source == 'feature':
-                selected_by_source['feature'].extend(chosen)
+            if source in selected_by_source:
+                selected_by_source[source].extend(chosen)
 
         if target_extra <= 0:
             return core_partition, torch.empty((2, 0), dtype=torch.long)
 
         if self.window_aug_strategy == 'random':
             random_start = time.time()
-            self._select_random_nodes(selected_set, remaining(), partition_id, salt=11)
+            filler_nodes.extend(self._select_shared_filler_nodes(selected_set, remaining(), partition_id))
             self.timing_stats['random_fill_time'] += time.time() - random_start
         elif self.window_aug_strategy == 'hub':
             if self.hub_node_order is None:
@@ -886,27 +833,18 @@ class weightMetis_keepParent:
             hub_start = time.time()
             append_candidates('hub', self.hub_node_order, remaining())
             self.timing_stats['hub_node_merge_time'] += time.time() - hub_start
-        elif self.window_aug_strategy == 'remote':
-            feature_start = time.time()
-            gen = torch.Generator(device='cpu')
-            gen.manual_seed((self.seed + 31_337 * (partition_id + 1)) % (2**63 - 1))
-            feature_candidates = self._select_feature_sim_nodes(
-                core_partition,
-                target_extra,
-                current_parent_id=parent_id,
-                current_child_idx=child_idx,
-                exclude_nodes=selected_set,
-                generator=gen,
-            )
-            append_candidates('feature', feature_candidates, remaining())
-            self.timing_stats['feature_sim_merge_time'] += time.time() - feature_start
+        elif self.window_aug_strategy == 'related':
+            related_start = time.time()
+            related_candidates = self._select_related_nodes(core_partition, related_nodes_topk_rate, max_nodes=target_extra)
+            append_candidates('related', related_candidates, remaining())
+            self.timing_stats['related_nodes_merge_time'] += time.time() - related_start
         elif self.window_aug_strategy == 'ours':
             related_quota = min(int(core_partition.numel() * max(self.window_related_ratio, 0.0)), target_extra)
             feature_quota = min(int(core_partition.numel() * max(self.window_feature_ratio, 0.0)), target_extra)
             hub_quota = min(int(core_partition.numel() * max(self.window_hub_ratio, 0.0)), target_extra)
 
             related_start = time.time()
-            related_candidates = self._select_related_nodes(core_partition, related_nodes_topk_rate)
+            related_candidates = self._select_related_nodes(core_partition, related_nodes_topk_rate, max_nodes=target_extra)
             append_candidates('related', related_candidates, related_quota)
             self.timing_stats['related_nodes_merge_time'] += time.time() - related_start
 
@@ -918,7 +856,7 @@ class weightMetis_keepParent:
                 target_extra,
                 current_parent_id=parent_id,
                 current_child_idx=child_idx,
-                exclude_nodes=set(int(x) for x in core_partition.tolist()),
+                exclude_nodes=selected_set,
                 generator=gen,
             )
             append_candidates('feature', feature_candidates, feature_quota)
@@ -941,8 +879,12 @@ class weightMetis_keepParent:
 
         if remaining() > 0:
             random_start = time.time()
-            self._select_random_nodes(selected_set, remaining(), partition_id, salt=23)
+            filler_nodes.extend(self._select_shared_filler_nodes(selected_set, remaining(), partition_id))
             self.timing_stats['random_fill_time'] += time.time() - random_start
+        self.timing_stats['augmentation_related_nodes'] += len(selected_by_source['related'])
+        self.timing_stats['augmentation_feature_nodes'] += len(selected_by_source['feature'])
+        self.timing_stats['augmentation_hub_nodes'] += len(selected_by_source['hub'])
+        self.timing_stats['augmentation_filler_nodes'] += len(filler_nodes)
 
         final_nodes = torch.tensor(sorted(selected_set), dtype=torch.long)
         expected_size = int(core_partition.numel()) + target_extra
@@ -1047,6 +989,7 @@ if __name__ == "__main__":
         feature=feature,
         n_parts=n_parts,
         edge_index=edge_index,
+        edge_csr_data=None,
         related_nodes_topk_rate=5,
         attn_type="full", # 测试 full attention 模式
         sorted_ppr_matrix=sorted_ppr_matrix

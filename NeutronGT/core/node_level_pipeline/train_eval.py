@@ -199,7 +199,8 @@ def eval_epoch(args, model, local_partition_ids, local_partitions, feature, y, s
         return train_acc*100, valid_acc*100, test_acc*100, kv_cache_per_partition
     return None, None, None, kv_cache_per_partition
 
-def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitions, feature, y, optimizer, lr_scheduler, world_size, split_idx, device, epoch, structInfo):
+def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitions, feature, y, optimizer, lr_scheduler, world_size, split_idx, device, epoch, structInfo, display_epoch=None):
+    log_epoch = epoch + 1 if display_epoch is None else display_epoch
     graph_in_degree = structInfo.graph_in_degree
     graph_out_degree = structInfo.graph_out_degree
     local_spatial_pos_by_pid = structInfo.local_spatial_pos_by_pid
@@ -284,7 +285,7 @@ def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitio
             if mask_train.any() and not bool(valid_target[mask_train].all().item()):
                 bad_targets = target_i[mask_train & ~valid_target].detach().cpu()
                 raise ValueError(
-                    f"rank:{args.rank},epoch:{epoch},global_pid:{global_pid},"
+                    f"rank:{args.rank},epoch:{log_epoch},global_pid:{global_pid},"
                     f"invalid train labels for n_classes={out_i.shape[1]}: "
                     f"min={int(bad_targets.min().item())}, max={int(bad_targets.max().item())}, "
                     f"count={int(bad_targets.numel())}"
@@ -293,7 +294,7 @@ def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitio
                 loss = F.nll_loss(out_i[train_loss_mask], target_i[train_loss_mask])
                 loss_list.append(loss.item())
             else:
-                print(f"rank:{args.rank},epoch:{epoch},no train nodes!")
+                print(f"rank:{args.rank},epoch:{log_epoch},no train nodes!")
                 loss = build_zero_loss(model, device)
                 loss_list.append(0.0)
         else:
@@ -343,7 +344,7 @@ def train_epoch(args, model:torch.nn.Module, local_partition_ids, local_partitio
         print("------------------------------------------------------------------------------------")
         print(
             "Epoch: {:03d}, Loss: {:.4f}, Train Time: {:.3f}s, CPU->GPU Time: {:.3f}s, Window FW/BW Avg: {:.3f}s, Window FW/BW Total: {:.3f}s, Windows: {}, Max Window Steps: {}".format(
-                epoch,
+                log_epoch,
                 loss_mean,
                 time_stats["epoch_train_total_time"],
                 time_stats["cpu_to_gpu_total_time"],

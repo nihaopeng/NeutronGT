@@ -147,6 +147,91 @@ def _preprocess_cache_enabled(args):
     return int(getattr(args, 'use_preprocess_cache', 1)) == 1 and int(getattr(args, 'use_cache', 0)) == 1
 
 
+def _print_cache_hit_preprocess_timing(total_wall_time: float, cache_lookup_load_time: float, refresh_preprocess_cache: int):
+    print(f"[PreprocessTiming] total_wall={total_wall_time:.3f}")
+    print(
+        f"[PreprocessTiming] cache hit=True "
+        f"lookup_load={cache_lookup_load_time:.3f} "
+        f"save=0.000 refresh={refresh_preprocess_cache}"
+    )
+    print("[PreprocessTiming] cache_hit=True; stage timings skipped because preprocess cache was reused.")
+
+
+def _print_preprocess_timing(args, timing: dict, wm_timing_stats: dict):
+    ppr_compute_time = timing.get('ppr_compute_time', 0.0)
+    ppr_gather_time = timing.get('ppr_gather_time', 0.0)
+    isolated_time = timing.get('isolated_time', 0.0)
+    adj_build_time = timing.get('adj_build_time', 0.0)
+    parent_partition_time = wm_timing_stats.get('parent_partition_time', 0.0)
+    child_partition_time = wm_timing_stats.get('child_partition_time', 0.0)
+
+    stage1_base_time = ppr_compute_time + ppr_gather_time + isolated_time + adj_build_time
+    stage1_metis_time = parent_partition_time + child_partition_time
+    stage1_time = stage1_base_time + stage1_metis_time
+    stage2_time = (
+        wm_timing_stats.get('centroid_build_time', 0.0)
+        + wm_timing_stats.get('related_nodes_merge_time', 0.0)
+        + wm_timing_stats.get('feature_sim_merge_time', 0.0)
+        + wm_timing_stats.get('hub_node_merge_time', 0.0)
+        + wm_timing_stats.get('random_fill_time', 0.0)
+        + wm_timing_stats.get('expanded_edge_concat_time', 0.0)
+        + wm_timing_stats.get('duplicate_rerange_time', 0.0)
+        + wm_timing_stats.get('subgraph_build_time', 0.0)
+    )
+
+    print(f"[PreprocessTiming] total_wall={timing.get('total_wall_time', 0.0):.3f}")
+    print(
+        f"[PreprocessTiming] cache hit={timing.get('cache_hit', False)} "
+        f"lookup_load={timing.get('cache_lookup_load_time', 0.0):.3f} "
+        f"save={timing.get('cache_save_time', 0.0):.3f} "
+        f"refresh={int(getattr(args, 'refresh_preprocess_cache', 0))}"
+    )
+    print(
+        f"[PreprocessTiming] stage1_base "
+        f"ppr_compute={ppr_compute_time:.3f} "
+        f"ppr_gather={ppr_gather_time:.3f} "
+        f"isolated={isolated_time:.3f} "
+        f"build_adj={adj_build_time:.3f} "
+        f"total={stage1_base_time:.3f}"
+    )
+    print(
+        f"[PreprocessTiming] stage1_metis "
+        f"parent={parent_partition_time:.3f} "
+        f"child={child_partition_time:.3f} "
+        f"total={stage1_metis_time:.3f}"
+    )
+    print(
+        f"[PreprocessTiming] stage2_window "
+        f"centroid={wm_timing_stats.get('centroid_build_time', 0.0):.3f} "
+        f"related={wm_timing_stats.get('related_nodes_merge_time', 0.0):.3f} "
+        f"feature={wm_timing_stats.get('feature_sim_merge_time', 0.0):.3f} "
+        f"hub={wm_timing_stats.get('hub_node_merge_time', 0.0):.3f} "
+        f"filler={wm_timing_stats.get('random_fill_time', 0.0):.3f} "
+        f"expanded_edge={wm_timing_stats.get('expanded_edge_concat_time', 0.0):.3f} "
+        f"duplicate_rerange={wm_timing_stats.get('duplicate_rerange_time', 0.0):.3f} "
+        f"subgraph={wm_timing_stats.get('subgraph_build_time', 0.0):.3f} "
+        f"total={stage2_time:.3f}"
+    )
+
+    target_extra_nodes = int(wm_timing_stats.get('augmentation_target_extra_nodes', 0))
+    related_nodes = int(wm_timing_stats.get('augmentation_related_nodes', 0))
+    feature_nodes = int(wm_timing_stats.get('augmentation_feature_nodes', 0))
+    hub_nodes = int(wm_timing_stats.get('augmentation_hub_nodes', 0))
+    filler_nodes = int(wm_timing_stats.get('augmentation_filler_nodes', 0))
+    filler_ratio = (filler_nodes / target_extra_nodes) if target_extra_nodes > 0 else 0.0
+    print(
+        f"[PreprocessTiming] window_aug={getattr(args, 'window_aug_strategy', 'ours')} "
+        f"target_extra_nodes={target_extra_nodes} "
+        f"related_nodes={related_nodes} "
+        f"feature_nodes={feature_nodes} "
+        f"hub_nodes={hub_nodes} "
+        f"filler_nodes={filler_nodes} "
+        f"filler_ratio={filler_ratio:.6f}"
+    )
+    print(f"Preprocess Stage 1 Time: {stage1_time:.3f}s")
+    print(f"Preprocess Stage 2 Time: {stage2_time:.3f}s")
+
+
 def _build_struct_info_from_cache_payload(payload, graph_in_degree, graph_out_degree, edge_index=None, edge_csr_data=None, num_nodes=None):
     wm_data = payload['wm']
     wm = SimpleNamespace(
@@ -169,6 +254,7 @@ def _build_struct_info_from_cache_payload(payload, graph_in_degree, graph_out_de
 
 def build_graph_struct_info(args, N, edge_index, feature, world_size, device, topk=50, n_parts=50,
                             related_nodes_topk_rate=5, connect_prob=0.01, edge_csr_data=None):
+    preprocess_start = time.time()
     graph_in_degree, graph_out_degree = None, None
     if args.struct_enc == "True":
         if edge_csr_data is not None:
@@ -183,6 +269,7 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
     cache_key = None
     cache_path = None
     cache_args_snapshot = None
+    cache_lookup_load_time = 0.0
     distributed_appnp_ppr = world_size > 1 and args.ppr_backend == "appnp"
 
     if cache_enabled and int(getattr(args, 'refresh_preprocess_cache', 0)) != 1:
@@ -197,6 +284,7 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
                     num_nodes=N,
                     world_size=world_size,
                 )
+                cache_lookup_load_time = cache_load_time
                 cache_hit = payload is not None
                 if cache_hit:
                     print(f"Preprocess cache hit: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s")
@@ -205,6 +293,11 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
                 hit_box = [cache_hit]
                 dist.broadcast_object_list(hit_box, src=0)
                 if cache_hit:
+                    _print_cache_hit_preprocess_timing(
+                        total_wall_time=time.time() - preprocess_start,
+                        cache_lookup_load_time=cache_lookup_load_time,
+                        refresh_preprocess_cache=int(getattr(args, 'refresh_preprocess_cache', 0)),
+                    )
                     return _build_struct_info_from_cache_payload(payload, graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
             else:
                 hit_box = [False]
@@ -221,8 +314,14 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
                 num_nodes=N,
                 world_size=world_size,
             )
+            cache_lookup_load_time = cache_load_time
             if payload is not None:
                 print(f"Preprocess cache hit: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s")
+                _print_cache_hit_preprocess_timing(
+                    total_wall_time=time.time() - preprocess_start,
+                    cache_lookup_load_time=cache_lookup_load_time,
+                    refresh_preprocess_cache=int(getattr(args, 'refresh_preprocess_cache', 0)),
+                )
                 return _build_struct_info_from_cache_payload(payload, graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
             print(f"Preprocess cache miss: path={cache_path}, key={cache_key[:12]}, load_time={cache_load_time:.3f}s")
     elif cache_enabled and args.rank == 0 and int(getattr(args, 'refresh_preprocess_cache', 0)) == 1:
@@ -255,14 +354,14 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
     )
     sync_device(device)
     local_ppr_time = time.time() - local_ppr_start
+    ppr_compute_time = local_ppr_time
     local_edge_count = int(local_sorted_ppr_matrix[1].numel())
 
     sorted_ppr_matrix = local_sorted_ppr_matrix
-    ppr_time = local_ppr_time
     gather_time = 0.0
     if distributed_appnp_ppr:
         if args.rank == 0:
-            print(f'[Preprocess] PPR computation done ({ppr_time:.1f}s), gathering shards from disk...')
+            print(f'[Preprocess] PPR computation done ({ppr_compute_time:.1f}s), gathering shards from disk...')
         sync_device(device)
         gather_start = time.time()
         wait_timeout = max(float(getattr(args, 'distributed_timeout_minutes', 10)) * 60.0 * 4.0, 24 * 60 * 60.0)
@@ -272,8 +371,6 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
                                                  timeout_seconds=wait_timeout)
         sync_device(device)
         gather_time = time.time() - gather_start
-        if args.rank == 0 and sorted_ppr_matrix is not None:
-            ppr_time += gather_time
         if args.rank != 0:
             return build_placeholder_struct_info(graph_in_degree, graph_out_degree, edge_index=edge_index, edge_csr_data=edge_csr_data, num_nodes=N)
 
@@ -303,14 +400,15 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
         n_parts=n_parts,
         feature=feature,
         edge_index=graph_edge_index,
+        edge_csr_data=edge_csr_data,
         related_nodes_topk_rate=related_nodes_topk_rate,
         attn_type=args.attn_type,
         sorted_ppr_matrix=sorted_ppr_matrix,
-        window_aug_strategy=getattr(args, 'window_aug_strategy', 'legacy'),
+        window_aug_strategy=getattr(args, 'window_aug_strategy', 'ours'),
         window_extra_node_ratio=getattr(args, 'window_extra_node_ratio', 0.20),
-        window_related_ratio=getattr(args, 'window_related_ratio', 0.10),
-        window_feature_ratio=getattr(args, 'window_feature_ratio', 0.07),
-        window_hub_ratio=getattr(args, 'window_hub_ratio', 0.03),
+        window_related_ratio=getattr(args, 'window_related_ratio', 0.06),
+        window_feature_ratio=getattr(args, 'window_feature_ratio', 0.06),
+        window_hub_ratio=getattr(args, 'window_hub_ratio', 0.08),
         feature_sim_virtual_edges_per_node=getattr(args, 'feature_sim_virtual_edges_per_node', 4),
         seed=getattr(args, 'seed', 42),
     )
@@ -319,28 +417,6 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
         print(f'[Preprocess] weightMetis_keepParent done ({partition_build_time:.1f}s)')
     # wm 已构造完毕，释放 build_adj_fromat 产物（PPR 矩阵后续 StructInfo 还需要）
     del csr_adjacency, eweights
-
-    # Stage 1: PPR 到基础 Metis 划分完成。
-    stage1_time = (
-        ppr_time
-        + isolated_time
-        + adj_build_time
-        + wm.timing_stats.get('parent_partition_time', 0.0)
-        + wm.timing_stats.get('child_partition_time', 0.0)
-    )
-    # Stage 2: 基础 Metis 之后到 build_graph_struct_info 返回，不包含后续窗口状态广播。
-    stage2_time = (
-        wm.timing_stats.get('centroid_build_time', 0.0)
-        + wm.timing_stats.get('related_nodes_merge_time', 0.0)
-        + wm.timing_stats.get('feature_sim_merge_time', 0.0)
-        + wm.timing_stats.get('hub_node_merge_time', 0.0)
-        + wm.timing_stats.get('random_fill_time', 0.0)
-        + wm.timing_stats.get('expanded_edge_concat_time', 0.0)
-        + wm.timing_stats.get('duplicate_rerange_time', 0.0)
-        + wm.timing_stats.get('subgraph_build_time', 0.0)
-    )
-    print(f"Preprocess Stage 1 Time: {stage1_time:.3f}s")
-    print(f"Preprocess Stage 2 Time: {stage2_time:.3f}s")
 
     struct_info = StructInfo(
         graph_in_degree=graph_in_degree,
@@ -352,11 +428,25 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
         num_nodes=N,
     )
 
+    cache_save_time = 0.0
     if cache_enabled and args.rank == 0:
         if cache_key is None or cache_args_snapshot is None:
             cache_key, cache_args_snapshot = compute_preprocess_cache_key(args, world_size)
         saved_cache_path, cache_save_time = save_preprocess_cache(args, struct_info, cache_key, cache_args_snapshot)
         print(f"Preprocess cache save: path={saved_cache_path}, key={cache_key[:12]}, save_time={cache_save_time:.3f}s")
+
+    preprocess_timing = {
+        'cache_hit': False,
+        'cache_lookup_load_time': cache_lookup_load_time,
+        'cache_save_time': cache_save_time,
+        'ppr_compute_time': ppr_compute_time,
+        'ppr_gather_time': gather_time,
+        'isolated_time': isolated_time,
+        'adj_build_time': adj_build_time,
+        'total_wall_time': time.time() - preprocess_start,
+    }
+    if args.rank == 0:
+        _print_preprocess_timing(args, preprocess_timing, wm.timing_stats)
 
     # 释放 full PPR matrix：struct_enc=False 时不使用，节省 ~11 GB
     if args.struct_enc != "True":

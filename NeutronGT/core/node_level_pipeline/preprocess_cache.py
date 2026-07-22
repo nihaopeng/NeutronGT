@@ -7,6 +7,7 @@ import torch
 from typing import Any
 
 _PREPROCESS_CACHE_VERSION = 1
+_WINDOW_AUG_IMPL_VERSION = 3
 _PREPROCESS_CACHE_KEY_FIELDS = (
     'dataset',
     'ppr_backend',
@@ -42,8 +43,8 @@ def _preprocess_cache_dir(args):
 
 def _args_snapshot(args, world_size: int):
     snapshot = {key: getattr(args, key) for key in _PREPROCESS_CACHE_KEY_FIELDS}
-    if getattr(args, 'window_aug_strategy', 'legacy') != 'legacy':
-        snapshot.update({key: getattr(args, key) for key in _WINDOW_AUG_CACHE_KEY_FIELDS})
+    snapshot.update({key: getattr(args, key) for key in _WINDOW_AUG_CACHE_KEY_FIELDS})
+    snapshot['window_aug_impl_version'] = _WINDOW_AUG_IMPL_VERSION
     snapshot['world_size'] = int(world_size)
     return snapshot
 

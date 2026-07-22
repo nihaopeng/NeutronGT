@@ -94,19 +94,19 @@ def parser_add_main_args(parser):
                        help='when set to 1, automatically load/save reusable PPR+Metis preprocess cache')
     parser.add_argument('--refresh_preprocess_cache', type=int, default=0, choices=[0, 1],
                        help='when set to 1, ignore any existing preprocess cache and rebuild it before saving')
-    parser.add_argument('--window_aug_strategy', type=str, default='legacy',
-                       choices=['legacy', 'random', 'hub', 'remote', 'ours'],
+    parser.add_argument('--window_aug_strategy', type=str, default='ours',
+                       choices=['random', 'hub', 'related', 'ours'],
                        help='fixed-window augmentation strategy used during preprocessing')
     parser.add_argument('--window_extra_node_ratio', type=float, default=0.20,
-                       help='target extra unique nodes per core window for non-legacy augmentation')
-    parser.add_argument('--window_related_ratio', type=float, default=0.10,
+                       help='target extra unique nodes per core window for window augmentation')
+    parser.add_argument('--window_related_ratio', type=float, default=0.06,
                        help='preferred related-node budget ratio for ours augmentation')
-    parser.add_argument('--window_feature_ratio', type=float, default=0.05,
-                       help='preferred feature-sim remote-node budget ratio for ours augmentation')
-    parser.add_argument('--window_hub_ratio', type=float, default=0.05,
+    parser.add_argument('--window_feature_ratio', type=float, default=0.06,
+                       help='preferred feature-sim node budget ratio for ours augmentation')
+    parser.add_argument('--window_hub_ratio', type=float, default=0.08,
                        help='preferred global hub-node budget ratio for ours augmentation')
     parser.add_argument('--feature_sim_virtual_edges_per_node', type=int, default=4,
-                       help='max bidirectional virtual edges per feature-sim node for non-legacy augmentation')
+                       help='max bidirectional virtual edges per feature-sim node for window augmentation')
     
     # distributed args
     parser.add_argument('--rank', type=int, default=None,

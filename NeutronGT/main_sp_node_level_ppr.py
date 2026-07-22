@@ -247,16 +247,19 @@ def main():
     detector = LossStagnationDetector(cooldown=0)
     
     for epoch in range(start_epoch, args.epochs):
+        display_epoch = epoch + 1
         loss_mean,scores_by_pid,updated_kv_cache,time_stats = train_epoch(args,model,local_partition_ids,local_partitions,feature,y,optimizer,lr_scheduler,seq_parallel_world_size,split_idx,device,
                     epoch=epoch,
-                    structInfo=structInfo)
+                    structInfo=structInfo,
+                    display_epoch=display_epoch)
         
         is_best_checkpoint = False
-        if epoch % 20 == 0:
+        should_eval = display_epoch == 1 or display_epoch % 20 == 0 or display_epoch == args.epochs
+        if should_eval:
             if args.rank == 0:
-                print(f"epoch {epoch}: lr = {lr_scheduler.get_last_lr()[0]:.2e}")
+                print(f"epoch {display_epoch}: lr = {lr_scheduler.get_last_lr()[0]:.2e}")
             train_acc, valid_acc, test_acc, _ = eval_epoch(args,model,local_partition_ids,local_partitions,feature,y,split_idx,device,
-                    epoch=epoch,
+                    epoch=display_epoch,
                     structInfo=structInfo)
             if args.rank == 0 and valid_acc is not None:
                 if valid_acc > best_val:

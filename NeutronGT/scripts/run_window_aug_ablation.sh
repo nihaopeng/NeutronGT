@@ -12,8 +12,10 @@ export LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}
 
 DEVICES=${1-}
 if [ -z "$DEVICES" ] || [[ "$DEVICES" == -* ]]; then
-    echo "Usage: bash $0 <devices> --GT|--GPH_Slim|--GPH_Large [--refresh_preprocess_cache] [--preprocess_only]"
+    echo "Usage: bash $0 <devices> --GT|--GPH_Slim|--GPH_Large [--arxiv|--amazon|--reddit|--products ...] [--refresh_preprocess_cache] [--preprocess_only]"
     echo "Example: bash $0 0,1,2,3 --GPH_Slim"
+    echo "         bash $0 0,1,2,3 --GPH_Slim --arxiv --products"
+    echo "         bash $0 0,1,2,3 --GPH_Large --reddit --refresh_preprocess_cache"
     exit 1
 fi
 shift
@@ -21,16 +23,18 @@ shift
 MODEL_INPUT=""
 REFRESH_PREPROCESS_CACHE=0
 PREPROCESS_ONLY=0
+SELECTED_DATASET_FLAGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --GT) MODEL_INPUT="GT" ;;
         --GPH_Slim) MODEL_INPUT="GPH_Slim" ;;
         --GPH_Large) MODEL_INPUT="GPH_Large" ;;
+        --arxiv|--amazon|--reddit|--products) SELECTED_DATASET_FLAGS+=("$1") ;;
         --refresh_preprocess_cache) REFRESH_PREPROCESS_CACHE=1 ;;
         --preprocess_only) PREPROCESS_ONLY=1 ;;
         *)
-            echo "Usage: bash $0 <devices> --GT|--GPH_Slim|--GPH_Large [--refresh_preprocess_cache] [--preprocess_only]" >&2
+            echo "Usage: bash $0 <devices> --GT|--GPH_Slim|--GPH_Large [--arxiv|--amazon|--reddit|--products ...] [--refresh_preprocess_cache] [--preprocess_only]" >&2
             echo "Error: unknown argument: $1" >&2
             exit 1
             ;;
@@ -40,7 +44,7 @@ done
 
 if [ -z "$MODEL_INPUT" ]; then
     echo "Error: model is required." >&2
-    echo "Usage: bash $0 <devices> --GT|--GPH_Slim|--GPH_Large [--refresh_preprocess_cache] [--preprocess_only]" >&2
+    echo "Usage: bash $0 <devices> --GT|--GPH_Slim|--GPH_Large [--arxiv|--amazon|--reddit|--products ...] [--refresh_preprocess_cache] [--preprocess_only]" >&2
     exit 1
 fi
 
@@ -81,18 +85,22 @@ RUN_TAG=$(date +%Y%m%d_%H%M)
 EPOCHS=500
 ATTN_TYPE="sparse"
 USE_CACHE=1
-USE_PREPROCESS_CACHE=1
+USE_PREPROCESS_CACHE=0
 TIMEOUT=120
 PPR_BATCH_SIZE=8192
 PPR_ITER_TOPK=5
 WINDOW_EXTRA_RATIO=0.20
-WINDOW_RELATED_RATIO=0.10
-WINDOW_FEATURE_RATIO=0.05
-WINDOW_HUB_RATIO=0.05
+WINDOW_RELATED_RATIO=0.06
+WINDOW_FEATURE_RATIO=0.06
+WINDOW_HUB_RATIO=0.08
 FEATURE_SIM_VIRTUAL_EDGES_PER_NODE=4
 
-DATASET_FLAGS=(--arxiv --amazon --reddit --products)
-STRATEGIES=(random hub remote ours)
+if [ ${#SELECTED_DATASET_FLAGS[@]} -eq 0 ]; then
+    DATASET_FLAGS=(--arxiv --amazon --reddit --products)
+else
+    DATASET_FLAGS=("${SELECTED_DATASET_FLAGS[@]}")
+fi
+STRATEGIES=(ours hub random related)
 
 IFS=, read -r -a GPU_LIST <<< "$DEVICES"
 GPU_NUM=${#GPU_LIST[@]}
