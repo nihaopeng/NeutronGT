@@ -7,7 +7,7 @@ import torch
 from typing import Any
 
 _PREPROCESS_CACHE_VERSION = 1
-_WINDOW_AUG_IMPL_VERSION = 4
+_WINDOW_AUG_IMPL_VERSION = 5
 _PREPROCESS_CACHE_KEY_FIELDS = (
     'dataset',
     'ppr_backend',

@@ -1,3 +1,4 @@
+import os
 import pymetis
 import time
 import torch
@@ -54,6 +55,7 @@ class weightMetis_keepParent:
         self.window_hub_ratio = float(window_hub_ratio)
         self.feature_sim_virtual_edges_per_node = int(feature_sim_virtual_edges_per_node)
         self.seed = int(seed)
+        self.window_aug_no_fallback = os.environ.get('NEUTRONGT_WINDOW_AUG_NO_FALLBACK', '0') == '1'
         self.hub_node_order = None
         # print(len(torch.arange(0,len(csr_adjacency.adj_starts)-1)))
         # BUG:假设 n 个节点，csr_adjaceny.adj_starts 长度为 num_node + 1，则第一个参数是tensor: [0,1,2,...,num_node]
@@ -839,41 +841,51 @@ class weightMetis_keepParent:
             feature_quota = min(int(core_partition.numel() * max(self.window_feature_ratio, 0.0)), target_extra)
             hub_quota = min(int(core_partition.numel() * max(self.window_hub_ratio, 0.0)), target_extra)
 
-            related_start = time.time()
-            related_candidates = self._select_related_nodes(core_partition, max_nodes=target_extra)
-            append_candidates('related', related_candidates, related_quota)
-            self.timing_stats['related_nodes_merge_time'] += time.time() - related_start
+            related_candidates = torch.empty(0, dtype=torch.long)
+            if related_quota > 0:
+                related_start = time.time()
+                related_candidates = self._select_related_nodes(core_partition, max_nodes=target_extra)
+                append_candidates('related', related_candidates, related_quota)
+                self.timing_stats['related_nodes_merge_time'] += time.time() - related_start
 
-            feature_start = time.time()
-            gen = torch.Generator(device='cpu')
-            gen.manual_seed((self.seed + 31_337 * (partition_id + 1)) % (2**63 - 1))
-            feature_candidates = self._select_feature_sim_nodes(
-                core_partition,
-                target_extra,
-                current_parent_id=parent_id,
-                current_child_idx=child_idx,
-                exclude_nodes=selected_set,
-                generator=gen,
-            )
-            append_candidates('feature', feature_candidates, feature_quota)
-            self.timing_stats['feature_sim_merge_time'] += time.time() - feature_start
-
-            if self.hub_node_order is None:
+            if hub_quota > 0:
+                if self.hub_node_order is None:
+                    hub_start = time.time()
+                    self.hub_node_order = self._compute_hub_node_order()
+                    self.timing_stats['hub_node_merge_time'] += time.time() - hub_start
                 hub_start = time.time()
-                self.hub_node_order = self._compute_hub_node_order()
+                append_candidates('hub', self.hub_node_order, hub_quota)
                 self.timing_stats['hub_node_merge_time'] += time.time() - hub_start
-            hub_start = time.time()
-            append_candidates('hub', self.hub_node_order, hub_quota)
-            self.timing_stats['hub_node_merge_time'] += time.time() - hub_start
 
-            # If one source lacks enough unique candidates, keep the source priority before random fallback.
-            append_candidates('related', related_candidates, remaining())
-            append_candidates('feature', feature_candidates, remaining())
-            append_candidates('hub', self.hub_node_order, remaining())
+            feature_candidates = torch.empty(0, dtype=torch.long)
+            if feature_quota > 0:
+                feature_start = time.time()
+                gen = torch.Generator(device='cpu')
+                gen.manual_seed((self.seed + 31_337 * (partition_id + 1)) % (2**63 - 1))
+                feature_candidates = self._select_feature_sim_nodes(
+                    core_partition,
+                    target_extra,
+                    current_parent_id=parent_id,
+                    current_child_idx=child_idx,
+                    exclude_nodes=selected_set,
+                    generator=gen,
+                )
+                append_candidates('feature', feature_candidates, feature_quota)
+                self.timing_stats['feature_sim_merge_time'] += time.time() - feature_start
+
+            # If one enabled source lacks enough unique candidates, normal ours can still use
+            # other enabled sources before random fallback. Cumulative ablations disable this.
+            if not self.window_aug_no_fallback:
+                if related_quota > 0:
+                    append_candidates('related', related_candidates, remaining())
+                if hub_quota > 0:
+                    append_candidates('hub', self.hub_node_order, remaining())
+                if feature_quota > 0:
+                    append_candidates('feature', feature_candidates, remaining())
         else:
             raise ValueError(f'Unsupported window_aug_strategy: {self.window_aug_strategy}')
 
-        if remaining() > 0:
+        if remaining() > 0 and not self.window_aug_no_fallback:
             random_start = time.time()
             filler_nodes.extend(self._select_shared_filler_nodes(selected_set, remaining(), partition_id))
             self.timing_stats['random_fill_time'] += time.time() - random_start
@@ -884,7 +896,11 @@ class weightMetis_keepParent:
 
         final_nodes = torch.tensor(sorted(selected_set), dtype=torch.long)
         expected_size = int(core_partition.numel()) + target_extra
-        if int(final_nodes.numel()) != expected_size:
+        if self.window_aug_no_fallback:
+            size_mismatch = int(final_nodes.numel()) > expected_size
+        else:
+            size_mismatch = int(final_nodes.numel()) != expected_size
+        if size_mismatch:
             raise RuntimeError(
                 f"Window augmentation size mismatch: strategy={self.window_aug_strategy}, "
                 f"partition={partition_id}, expected={expected_size}, actual={final_nodes.numel()}"
