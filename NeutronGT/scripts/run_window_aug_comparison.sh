@@ -89,9 +89,6 @@ USE_PREPROCESS_CACHE=0
 TIMEOUT=120
 PPR_BATCH_SIZE=8192
 PPR_ITER_TOPK=5
-WINDOW_EXTRA_RATIO=0.30
-WINDOW_RELATED_RATIO=0.15
-WINDOW_HUB_RATIO=0.15
 
 if [ ${#SELECTED_DATASET_FLAGS[@]} -eq 0 ]; then
     DATASET_FLAGS=(--arxiv --amazon --reddit --products)
@@ -120,27 +117,27 @@ resolve_window_params() {
     local model_alias="$2"
     if [ "$dataset" = "AmazonProducts" ]; then
         if [ "$model_alias" = "GPH_Large" ]; then
-            echo "400"
+            echo "1024 0.15 0.075 0.075"
         else
-            echo "128"
+            echo "512 0.15 0.075 0.075"
         fi
     elif [ "$dataset" = "ogbn-arxiv" ]; then
         if [ "$model_alias" = "GPH_Large" ]; then
-            echo "32"
+            echo "32 0.30 0.15 0.15"
         else
-            echo "16"
+            echo "16 0.30 0.15 0.15"
         fi
     elif [ "$dataset" = "ogbn-products" ]; then
         if [ "$model_alias" = "GPH_Large" ]; then
-            echo "512"
+            echo "2048 0.15 0.075 0.075"
         else
-            echo "128"
+            echo "1024 0.15 0.075 0.075"
         fi
     elif [ "$dataset" = "reddit" ]; then
         if [ "$model_alias" = "GPH_Large" ]; then
-            echo "80"
+            echo "128 0.20 0.10 0.10"
         else
-            echo "32"
+            echo "64 0.20 0.10 0.10"
         fi
     else
         return 1
@@ -149,7 +146,7 @@ resolve_window_params() {
 
 for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
     DATASET=$(resolve_dataset "${DATASET_FLAG}")
-    NPARTS=$(resolve_window_params "${DATASET}" "${MODEL_ALIAS}")
+    read -r NPARTS WINDOW_EXTRA_RATIO WINDOW_RELATED_RATIO WINDOW_HUB_RATIO <<< "$(resolve_window_params "${DATASET}" "${MODEL_ALIAS}")"
 
     for STRATEGY in "${STRATEGIES[@]}"; do
         MODE_LABEL="train"
@@ -169,6 +166,7 @@ for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
         echo "Model: ${MODEL_ALIAS}"
         echo "Strategy: ${STRATEGY}"
         echo "n_parts=${NPARTS} epochs=${EPOCHS}"
+        echo "window extra=${WINDOW_EXTRA_RATIO} related=${WINDOW_RELATED_RATIO} hub=${WINDOW_HUB_RATIO}"
         echo "cache=${USE_CACHE} preprocess_cache=${USE_PREPROCESS_CACHE} refresh=${REFRESH_PREPROCESS_CACHE}"
         echo "GPUs=${GPU_NUM} CUDA_VISIBLE_DEVICES=${DEVICES}"
         echo "Log: ${LOG_FILE}"

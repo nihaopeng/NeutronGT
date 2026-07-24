@@ -75,13 +75,25 @@ USE_CACHE=1
 EPOCHS=500
 
 if [ "$dataset" = "AmazonProducts" ]; then
-    NPARTS=400
+    NPARTS=1024
+    WINDOW_EXTRA_RATIO=0.15
+    WINDOW_RELATED_RATIO=0.075
+    WINDOW_HUB_RATIO=0.075
 elif [ "$dataset" = "ogbn-arxiv" ]; then
     NPARTS=32
+    WINDOW_EXTRA_RATIO=0.30
+    WINDOW_RELATED_RATIO=0.15
+    WINDOW_HUB_RATIO=0.15
 elif [ "$dataset" = "ogbn-products" ]; then
-    NPARTS=512
+    NPARTS=2048
+    WINDOW_EXTRA_RATIO=0.15
+    WINDOW_RELATED_RATIO=0.075
+    WINDOW_HUB_RATIO=0.075
 elif [ "$dataset" = "reddit" ]; then
-    NPARTS=80
+    NPARTS=128
+    WINDOW_EXTRA_RATIO=0.20
+    WINDOW_RELATED_RATIO=0.10
+    WINDOW_HUB_RATIO=0.10
 else
     echo "Error: unsupported dataset: $dataset" >&2
     exit 1
@@ -95,9 +107,6 @@ GPU_NUM=${#GPU_LIST[@]}
 mkdir -p "${LOG_DIR}"
 
 WINDOW_AUG_STRATEGY="ours"
-WINDOW_EXTRA_RATIO=0.30
-WINDOW_RELATED_RATIO=0.15
-WINDOW_HUB_RATIO=0.15
 
 LOG_FILE="${LOG_DIR}/${dataset}_${MODEL_ALIAS}_Runtimebreakdown_sparse_cache_500ep_nparts${NPARTS}_${RUN_TAG}.log"
 MASTER_PORT=$((8000 + RANDOM % 1000))

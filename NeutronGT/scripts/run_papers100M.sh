@@ -18,16 +18,16 @@ export LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}
 #   --GT        仅 GT
 #   --GPH_Slim  仅 GPH_Slim
 #   --GPH_Large 仅 GPH_Large
-#   --epochs N  指定训练轮数，默认 41
+#   --epochs N  指定训练轮数，默认 40
 #   --refresh_preprocess_cache  强制重建并保存新的预处理 cache
 # ===============================================
 
 DEVICES=${1-}
 if [ -z "$DEVICES" ] || [[ "$DEVICES" == -* ]]; then
     echo "Usage: bash $0 <devices> [--GT|--GPH_Slim|--GPH_Large|--ALL] [--preprocess_only] [--refresh_preprocess_cache] [--epochs N]"
-    echo "Example: bash $0 0,1,2,3                                             # 默认 --ALL, 41 epoch, 复用 cache"
+    echo "Example: bash $0 0,1,2,3                                             # 默认 --ALL, 40 epoch, 复用 cache"
     echo "         bash $0 0,1,2,3 --GT                                        # 仅 GT"
-    echo "         bash $0 0,1,2,3 --ALL --epochs 41 --refresh_preprocess_cache # 三模型重建 cache 后训练"
+    echo "         bash $0 0,1,2,3 --ALL --epochs 40 --refresh_preprocess_cache # 三模型重建 cache 后训练"
     echo "         bash $0 0,1,2,3 --ALL --preprocess_only --refresh_preprocess_cache"
     exit 1
 fi
@@ -40,7 +40,7 @@ DATASET="ogbn-papers100M"
 DATASET_DIR=./dataset/
 LOG_DIR=NeutronGT_logs
 RUN_TAG=$(date +%Y%m%d_%H%M)
-EPOCHS=41
+EPOCHS=40
 PREPROCESS_ONLY=0
 REFRESH_PREPROCESS_CACHE=0
 MODELS=()
@@ -91,26 +91,26 @@ for MODEL_ALIAS in "${MODELS[@]}"; do
         "GT")
             MODEL="gt_sw"
             N_LAYERS=4; HIDDEN_DIM=128; FFN_DIM=128; NUM_HEADS=8
-            NPARTS=800
-            WINDOW_EXTRA_RATIO=0.30
-            WINDOW_RELATED_RATIO=0.15
-            WINDOW_HUB_RATIO=0.15
+            NPARTS=2048
+            WINDOW_EXTRA_RATIO=0.10
+            WINDOW_RELATED_RATIO=0.05
+            WINDOW_HUB_RATIO=0.05
             ;;
         "GPH_Slim")
             MODEL="graphormer"
             N_LAYERS=4; HIDDEN_DIM=64; FFN_DIM=64; NUM_HEADS=8
-            NPARTS=800
-            WINDOW_EXTRA_RATIO=0.30
-            WINDOW_RELATED_RATIO=0.15
-            WINDOW_HUB_RATIO=0.15
+            NPARTS=2048
+            WINDOW_EXTRA_RATIO=0.10
+            WINDOW_RELATED_RATIO=0.05
+            WINDOW_HUB_RATIO=0.05
             ;;
         "GPH_Large")
             MODEL="graphormer"
             N_LAYERS=12; HIDDEN_DIM=768; FFN_DIM=768; NUM_HEADS=32
-            NPARTS=4096
-            WINDOW_EXTRA_RATIO=0.30
-            WINDOW_RELATED_RATIO=0.15
-            WINDOW_HUB_RATIO=0.15
+            NPARTS=8192
+            WINDOW_EXTRA_RATIO=0.10
+            WINDOW_RELATED_RATIO=0.05
+            WINDOW_HUB_RATIO=0.05
             ;;
     esac
 

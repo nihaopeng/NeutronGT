@@ -60,9 +60,6 @@ GPU_NUM=${#GPU_LIST[@]}
 mkdir -p "${LOG_DIR}"
 
 WINDOW_AUG_STRATEGY="ours"
-WINDOW_EXTRA_RATIO=0.30
-WINDOW_RELATED_RATIO=0.15
-WINDOW_HUB_RATIO=0.15
 USE_CACHE=1
 USE_PREPROCESS_CACHE=1
 ATTN_TYPE="sparse"
@@ -97,36 +94,36 @@ resolve_run_params() {
 
     if [ "$dataset" = "ogbn-papers100M" ]; then
         if [ "$model_alias" = "GPH_Large" ]; then
-            echo "4096 40 2048 64 640"
+            echo "8192 40 2048 64 640 0.10 0.05 0.05"
         else
-            echo "800 40 2048 64 640"
+            echo "2048 40 2048 64 640 0.10 0.05 0.05"
         fi
         return 0
     fi
 
     if [ "$dataset" = "AmazonProducts" ]; then
         if [ "$model_alias" = "GPH_Large" ]; then
-            echo "400 40 8192 5 120"
+            echo "1024 40 8192 5 120 0.15 0.075 0.075"
         else
-            echo "128 40 8192 5 120"
+            echo "512 40 8192 5 120 0.15 0.075 0.075"
         fi
     elif [ "$dataset" = "ogbn-arxiv" ]; then
         if [ "$model_alias" = "GPH_Large" ]; then
-            echo "32 40 8192 5 120"
+            echo "32 40 8192 5 120 0.30 0.15 0.15"
         else
-            echo "16 40 8192 5 120"
+            echo "16 40 8192 5 120 0.30 0.15 0.15"
         fi
     elif [ "$dataset" = "ogbn-products" ]; then
         if [ "$model_alias" = "GPH_Large" ]; then
-            echo "512 40 8192 5 120"
+            echo "2048 40 8192 5 120 0.15 0.075 0.075"
         else
-            echo "128 40 8192 5 120"
+            echo "1024 40 8192 5 120 0.15 0.075 0.075"
         fi
     elif [ "$dataset" = "reddit" ]; then
         if [ "$model_alias" = "GPH_Large" ]; then
-            echo "80 40 8192 5 120"
+            echo "128 40 8192 5 120 0.20 0.10 0.10"
         else
-            echo "32 40 8192 5 120"
+            echo "64 40 8192 5 120 0.20 0.10 0.10"
         fi
     else
         return 1
@@ -138,7 +135,7 @@ for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
 
     for MODEL_ALIAS in "${MODELS[@]}"; do
         read -r MODEL N_LAYERS HIDDEN_DIM FFN_DIM NUM_HEADS <<< "$(resolve_model_params "${MODEL_ALIAS}")"
-        read -r NPARTS EPOCHS PPR_BATCH_SIZE PPR_ITER_TOPK TIMEOUT <<< "$(resolve_run_params "${DATASET}" "${MODEL_ALIAS}")"
+        read -r NPARTS EPOCHS PPR_BATCH_SIZE PPR_ITER_TOPK TIMEOUT WINDOW_EXTRA_RATIO WINDOW_RELATED_RATIO WINDOW_HUB_RATIO <<< "$(resolve_run_params "${DATASET}" "${MODEL_ALIAS}")"
 
         MODE_LABEL="train"
         if [ "$PREPROCESS_ONLY" -eq 1 ]; then
