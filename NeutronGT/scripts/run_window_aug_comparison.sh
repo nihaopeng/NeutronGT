@@ -102,6 +102,10 @@ GPU_NUM=${#GPU_LIST[@]}
 
 mkdir -p "${LOG_DIR}"
 
+pick_free_port() {
+    python -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()'
+}
+
 resolve_dataset() {
     case "$1" in
         --arxiv) echo "ogbn-arxiv" ;;
@@ -117,7 +121,7 @@ resolve_window_params() {
     local model_alias="$2"
     if [ "$dataset" = "AmazonProducts" ]; then
         if [ "$model_alias" = "GPH_Large" ]; then
-            echo "800 0.10 0.05 0.05"
+            echo "640 0.10 0.05 0.05"
         else
             echo "256 0.10 0.05 0.05"
         fi
@@ -144,6 +148,9 @@ resolve_window_params() {
     fi
 }
 
+SUCCEEDED_RUNS=()
+FAILED_RUNS=()
+
 for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
     DATASET=$(resolve_dataset "${DATASET_FLAG}")
     read -r NPARTS WINDOW_EXTRA_RATIO WINDOW_RELATED_RATIO WINDOW_HUB_RATIO <<< "$(resolve_window_params "${DATASET}" "${MODEL_ALIAS}")"
@@ -158,7 +165,7 @@ for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
         fi
 
         LOG_FILE="${LOG_DIR}/${DATASET}_${MODEL_ALIAS}_${STRATEGY}_e${EPOCHS}_nparts${NPARTS}_${MODE_LABEL}_${RUN_TAG}.log"
-        MASTER_PORT=$((8000 + RANDOM % 1000))
+        MASTER_PORT=$(pick_free_port)
 
         echo "============================================================="
         echo "Window augmentation comparison"
@@ -168,7 +175,7 @@ for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
         echo "n_parts=${NPARTS} epochs=${EPOCHS}"
         echo "window extra=${WINDOW_EXTRA_RATIO} related=${WINDOW_RELATED_RATIO} hub=${WINDOW_HUB_RATIO}"
         echo "cache=${USE_CACHE} preprocess_cache=${USE_PREPROCESS_CACHE} refresh=${REFRESH_PREPROCESS_CACHE}"
-        echo "GPUs=${GPU_NUM} CUDA_VISIBLE_DEVICES=${DEVICES}"
+        echo "GPUs=${GPU_NUM} CUDA_VISIBLE_DEVICES=${DEVICES} master_port=${MASTER_PORT}"
         echo "Log: ${LOG_FILE}"
         echo "============================================================="
 
@@ -206,11 +213,32 @@ for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
 
         EXIT_CODE=$?
         if [ ${EXIT_CODE} -ne 0 ]; then
-            echo "[${DATASET} ${MODEL_ALIAS} ${STRATEGY}] Failed (exit ${EXIT_CODE}), stopping. Check ${LOG_FILE}"
-            exit ${EXIT_CODE}
+            echo "[${DATASET} ${MODEL_ALIAS} ${STRATEGY}] Failed (exit ${EXIT_CODE}), continuing. Check ${LOG_FILE}"
+            FAILED_RUNS+=("${DATASET} ${MODEL_ALIAS} ${STRATEGY} exit=${EXIT_CODE} log=${LOG_FILE}")
+            continue
         fi
+        SUCCEEDED_RUNS+=("${DATASET} ${MODEL_ALIAS} ${STRATEGY} log=${LOG_FILE}")
         echo "[${DATASET} ${MODEL_ALIAS} ${STRATEGY}] Done."
     done
 done
+
+echo "========== Run Summary =========="
+if [ ${#SUCCEEDED_RUNS[@]} -gt 0 ]; then
+    echo "Succeeded:"
+    for RUN in "${SUCCEEDED_RUNS[@]}"; do
+        echo "  ${RUN}"
+    done
+else
+    echo "Succeeded: none"
+fi
+
+if [ ${#FAILED_RUNS[@]} -gt 0 ]; then
+    echo "Failed:"
+    for RUN in "${FAILED_RUNS[@]}"; do
+        echo "  ${RUN}"
+    done
+    echo "Completed with failures."
+    exit 1
+fi
 
 echo "All window augmentation comparisons done."

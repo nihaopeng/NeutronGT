@@ -59,6 +59,10 @@ GPU_NUM=${#GPU_LIST[@]}
 
 mkdir -p "${LOG_DIR}"
 
+pick_free_port() {
+    python -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()'
+}
+
 WINDOW_AUG_STRATEGY="ours"
 USE_CACHE=1
 USE_PREPROCESS_CACHE=1
@@ -103,7 +107,7 @@ resolve_run_params() {
 
     if [ "$dataset" = "AmazonProducts" ]; then
         if [ "$model_alias" = "GPH_Large" ]; then
-            echo "800 40 8192 5 120 0.10 0.05 0.05"
+            echo "640 40 8192 5 120 0.10 0.05 0.05"
         else
             echo "256 40 8192 5 120 0.10 0.05 0.05"
         fi
@@ -130,6 +134,9 @@ resolve_run_params() {
     fi
 }
 
+SUCCEEDED_RUNS=()
+FAILED_RUNS=()
+
 for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
     DATASET=$(resolve_dataset "${DATASET_FLAG}")
 
@@ -146,7 +153,7 @@ for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
         fi
 
         LOG_FILE="${LOG_DIR}/${DATASET}_${MODEL_ALIAS}_${WINDOW_AUG_STRATEGY}_e${EPOCHS}_nparts${NPARTS}_${MODE_LABEL}_${RUN_TAG}.log"
-        MASTER_PORT=$((8000 + RANDOM % 1000))
+        MASTER_PORT=$(pick_free_port)
 
         echo "============================================================="
         echo "NeutronGT"
@@ -157,7 +164,7 @@ for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
         echo "window_aug=${WINDOW_AUG_STRATEGY} extra=${WINDOW_EXTRA_RATIO} related=${WINDOW_RELATED_RATIO} hub=${WINDOW_HUB_RATIO}"
         echo "cache=${USE_CACHE} preprocess_cache=${USE_PREPROCESS_CACHE} refresh=${REFRESH_PREPROCESS_CACHE}"
         echo "ppr_backend=${PPR_BACKEND} ppr_topk=${PPR_TOPK} ppr_batch=${PPR_BATCH_SIZE} ppr_iter_topk=${PPR_ITER_TOPK}"
-        echo "GPUs=${GPU_NUM} CUDA_VISIBLE_DEVICES=${DEVICES} timeout=${TIMEOUT}m"
+        echo "GPUs=${GPU_NUM} CUDA_VISIBLE_DEVICES=${DEVICES} master_port=${MASTER_PORT} timeout=${TIMEOUT}m"
         echo "Log: ${LOG_FILE}"
         echo "============================================================="
 
@@ -195,11 +202,32 @@ for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
 
         EXIT_CODE=$?
         if [ ${EXIT_CODE} -ne 0 ]; then
-            echo "[${DATASET} ${MODEL_ALIAS}] Failed (exit ${EXIT_CODE}), stopping. Check ${LOG_FILE}"
-            exit ${EXIT_CODE}
+            echo "[${DATASET} ${MODEL_ALIAS}] Failed (exit ${EXIT_CODE}), continuing. Check ${LOG_FILE}"
+            FAILED_RUNS+=("${DATASET} ${MODEL_ALIAS} exit=${EXIT_CODE} log=${LOG_FILE}")
+            continue
         fi
+        SUCCEEDED_RUNS+=("${DATASET} ${MODEL_ALIAS} log=${LOG_FILE}")
         echo "[${DATASET} ${MODEL_ALIAS}] Done."
     done
 done
+
+echo "========== Run Summary =========="
+if [ ${#SUCCEEDED_RUNS[@]} -gt 0 ]; then
+    echo "Succeeded:"
+    for RUN in "${SUCCEEDED_RUNS[@]}"; do
+        echo "  ${RUN}"
+    done
+else
+    echo "Succeeded: none"
+fi
+
+if [ ${#FAILED_RUNS[@]} -gt 0 ]; then
+    echo "Failed:"
+    for RUN in "${FAILED_RUNS[@]}"; do
+        echo "  ${RUN}"
+    done
+    echo "Completed with failures."
+    exit 1
+fi
 
 echo "All NeutronGT runs done."

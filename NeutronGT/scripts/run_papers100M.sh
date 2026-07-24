@@ -86,6 +86,13 @@ TIMEOUT=640
 
 mkdir -p "${LOG_DIR}"
 
+pick_free_port() {
+    python -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()'
+}
+
+SUCCEEDED_RUNS=()
+FAILED_RUNS=()
+
 for MODEL_ALIAS in "${MODELS[@]}"; do
     case "$MODEL_ALIAS" in
         "GT")
@@ -122,7 +129,7 @@ for MODEL_ALIAS in "${MODELS[@]}"; do
         MODE_LABEL="${MODE_LABEL}_refresh"
     fi
     LOG_FILE="${LOG_DIR}/${DATASET}_${MODEL_ALIAS}_e${EPOCHS}_${MODE_LABEL}_${RUN_TAG}.log"
-    MASTER_PORT=$((8000 + RANDOM % 1000))
+    MASTER_PORT=$(pick_free_port)
 
     echo "============================================================="
     echo "  NeutronGT - papers100M  ${MODEL_ALIAS}"
@@ -131,7 +138,7 @@ for MODEL_ALIAS in "${MODELS[@]}"; do
     echo "  n_parts=${NPARTS} epochs=${EPOCHS}"
     echo "  window_aug=ours extra=${WINDOW_EXTRA_RATIO} related=${WINDOW_RELATED_RATIO} hub=${WINDOW_HUB_RATIO}"
     echo "  preprocess_cache=${USE_PREPROCESS_CACHE} refresh_preprocess_cache=${REFRESH_PREPROCESS_CACHE}"
-    echo "  GPUs=${GPU_NUM}  timeout=${TIMEOUT}m  log=${LOG_FILE}"
+    echo "  GPUs=${GPU_NUM}  master_port=${MASTER_PORT}  timeout=${TIMEOUT}m  log=${LOG_FILE}"
     echo "============================================================="
 
     CUDA_VISIBLE_DEVICES="${DEVICES}" torchrun \
@@ -168,10 +175,31 @@ for MODEL_ALIAS in "${MODELS[@]}"; do
 
     EXIT_CODE=$?
     if [ ${EXIT_CODE} -ne 0 ]; then
-        echo "[${MODEL_ALIAS}] Failed (exit ${EXIT_CODE}), stopping. Check ${LOG_FILE}"
-        exit ${EXIT_CODE}
+        echo "[${MODEL_ALIAS}] Failed (exit ${EXIT_CODE}), continuing. Check ${LOG_FILE}"
+        FAILED_RUNS+=("${MODEL_ALIAS} exit=${EXIT_CODE} log=${LOG_FILE}")
+        continue
     fi
+    SUCCEEDED_RUNS+=("${MODEL_ALIAS} log=${LOG_FILE}")
     echo "[${MODEL_ALIAS}] Done."
 done
+
+echo "========== Run Summary =========="
+if [ ${#SUCCEEDED_RUNS[@]} -gt 0 ]; then
+    echo "Succeeded:"
+    for RUN in "${SUCCEEDED_RUNS[@]}"; do
+        echo "  ${RUN}"
+    done
+else
+    echo "Succeeded: none"
+fi
+
+if [ ${#FAILED_RUNS[@]} -gt 0 ]; then
+    echo "Failed:"
+    for RUN in "${FAILED_RUNS[@]}"; do
+        echo "  ${RUN}"
+    done
+    echo "Completed with failures."
+    exit 1
+fi
 
 echo "All done."

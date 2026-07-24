@@ -75,7 +75,7 @@ USE_CACHE=1
 EPOCHS=500
 
 if [ "$dataset" = "AmazonProducts" ]; then
-    NPARTS=800
+    NPARTS=640
     WINDOW_EXTRA_RATIO=0.10
     WINDOW_RELATED_RATIO=0.05
     WINDOW_HUB_RATIO=0.05
@@ -106,10 +106,14 @@ GPU_NUM=${#GPU_LIST[@]}
 
 mkdir -p "${LOG_DIR}"
 
+pick_free_port() {
+    python -c 'import socket; s = socket.socket(); s.bind(("", 0)); print(s.getsockname()[1]); s.close()'
+}
+
 WINDOW_AUG_STRATEGY="ours"
 
 LOG_FILE="${LOG_DIR}/${dataset}_${MODEL_ALIAS}_Runtimebreakdown_sparse_cache_500ep_nparts${NPARTS}_${RUN_TAG}.log"
-MASTER_PORT=$((8000 + RANDOM % 1000))
+MASTER_PORT=$(pick_free_port)
 
 echo "-------------------------------------------------------------"
 echo "Dataset: ${dataset}"
@@ -119,13 +123,16 @@ echo "Cache: ${USE_CACHE}"
 echo "Epochs: ${EPOCHS}"
 echo "Window Augmentation: ${WINDOW_AUG_STRATEGY} extra=${WINDOW_EXTRA_RATIO} related=${WINDOW_RELATED_RATIO} hub=${WINDOW_HUB_RATIO}"
 echo "GPUs: ${GPU_NUM} (CUDA_VISIBLE_DEVICES=${DEVICES})"
+echo "Master port: ${MASTER_PORT}"
 echo "Log: ${LOG_FILE}"
 echo "-------------------------------------------------------------"
 
 CUDA_VISIBLE_DEVICES="${DEVICES}" torchrun   --nproc_per_node="${GPU_NUM}"   --master_port="${MASTER_PORT}"   main_sp_node_level_ppr.py   --dataset "${dataset}"   --dataset_dir "${DATASET_DIR}"   --model "${MODEL}"   --attn_type "${ATTN_TYPE}"   --n_layers "${N_LAYERS}"   --hidden_dim "${HIDDEN_DIM}"   --ffn_dim "${FFN_DIM}"   --num_heads "${NUM_HEADS}"   --epochs "${EPOCHS}"   --use_cache "${USE_CACHE}"   --use_preprocess_cache 0   --n_parts "${NPARTS}"   --window_aug_strategy "${WINDOW_AUG_STRATEGY}"   --window_extra_node_ratio "${WINDOW_EXTRA_RATIO}"   --window_related_ratio "${WINDOW_RELATED_RATIO}"   --window_hub_ratio "${WINDOW_HUB_RATIO}"   --ppr_backend appnp   --ppr_topk 5   --ppr_alpha 0.85   --ppr_num_iterations 10   --ppr_batch_size 8192   --ppr_iter_topk 5   --distributed-backend nccl   --distributed-timeout-minutes 120   > "${LOG_FILE}" 2>&1
 
-if [ $? -eq 0 ]; then
+EXIT_CODE=$?
+if [ ${EXIT_CODE} -eq 0 ]; then
     echo "Status: Success"
 else
-    echo "Status: Failed. Check ${LOG_FILE}"
+    echo "Status: Failed (exit ${EXIT_CODE}). Check ${LOG_FILE}"
+    exit ${EXIT_CODE}
 fi
