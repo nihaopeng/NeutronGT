@@ -10,39 +10,33 @@ export CUDA_PATH=/usr/local/cuda-12.1
 export PATH=$CUDA_HOME/bin:${PATH:-}
 export LD_LIBRARY_PATH=$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}
 
-# 1. Parse the positional argument for GPUs
 DEVICES=${1-}
 if [ -z "$DEVICES" ] || [[ "$DEVICES" == -* ]]; then
-    echo "Error: CUDA_VISIBLE_DEVICES argument is required."
-    echo "Usage: bash $0 <devices> [dataset] [model]"
-    echo "Datasets: --arxiv | --amazon | --reddit | --products"
-    echo "Models:   --GT | --GPH_Slim | --GPH_Large"
-    echo "Example:  bash $0 0,1,2,3 --arxiv --GT"
+    echo "Usage: bash $0 <devices> [--arxiv|--amazon|--reddit|--products|--papers100M ...] [--GT|--GPH_Slim|--GPH_Large|--ALL] [--preprocess_only] [--refresh_preprocess_cache]"
+    echo "Example: bash $0 0,1,2,3"
+    echo "         bash $0 0,1,2,3 --arxiv --products --GPH_Slim"
+    echo "         bash $0 0,1,2,3 --papers100M --ALL --refresh_preprocess_cache"
     exit 1
 fi
 shift
 
-DATASET_INPUT=""
-MODEL_INPUT=""
 DATASET_DIR=./dataset/
-LOG_DIR=NeutronGT_logs
+LOG_DIR=NeutronGT_logs/run_NeutronGT
 RUN_TAG=$(date +%Y%m%d_%H%M)
+PREPROCESS_ONLY=0
+REFRESH_PREPROCESS_CACHE=0
+SELECTED_DATASET_FLAGS=()
+MODELS=()
 
-# 2. Parse long flags
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --arxiv)    DATASET_INPUT="ogbn-arxiv" ;;
-        --amazon)   DATASET_INPUT="AmazonProducts" ;;
-        --reddit)   DATASET_INPUT="reddit" ;;
-        --products) DATASET_INPUT="ogbn-products" ;;
-        --GT)       MODEL_INPUT="GT" ;;
-        --GPH_Slim)  MODEL_INPUT="GPH_Slim" ;;
-        --GPH_Large) MODEL_INPUT="GPH_Large" ;;
+        --arxiv|--amazon|--reddit|--products|--papers100M) SELECTED_DATASET_FLAGS+=("$1") ;;
+        --GT|--GPH_Slim|--GPH_Large) MODELS+=("${1:2}") ;;
+        --ALL) MODELS=(GT GPH_Slim GPH_Large) ;;
+        --preprocess_only) PREPROCESS_ONLY=1 ;;
+        --refresh_preprocess_cache) REFRESH_PREPROCESS_CACHE=1 ;;
         *)
-            echo "Usage: bash $0 <devices> [dataset] [model]"
-            echo "Datasets: --arxiv | --amazon | --reddit | --products"
-            echo "Models:   --GT | --GPH_Slim | --GPH_Large"
-            echo "Example:  bash $0 0,1,2,3 --arxiv --GT"
+            echo "Usage: bash $0 <devices> [--arxiv|--amazon|--reddit|--products|--papers100M ...] [--GT|--GPH_Slim|--GPH_Large|--ALL] [--preprocess_only] [--refresh_preprocess_cache]" >&2
             echo "Error: unknown argument: $1" >&2
             exit 1
             ;;
@@ -50,98 +44,15 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-# 3. Validate required selections
-if [ -z "$DATASET_INPUT" ]; then
-    echo "Error: dataset is required." >&2
-    echo "Usage: bash $0 <devices> --arxiv|--amazon|--reddit|--products --GT|--GPH_Slim|--GPH_Large" >&2
-    exit 1
-fi
-
-if [ -z "$MODEL_INPUT" ]; then
-    echo "Error: model is required." >&2
-    echo "Usage: bash $0 <devices> --arxiv|--amazon|--reddit|--products --GT|--GPH_Slim|--GPH_Large" >&2
-    exit 1
-fi
-
-# ================= Parameter Mapping =================
-
-dataset="$DATASET_INPUT"
-
-case "$MODEL_INPUT" in
-    "GT")
-        MODEL_ALIAS="GT"
-        MODEL="gt_sw"
-        N_LAYERS=4
-        HIDDEN_DIM=128
-        FFN_DIM=128
-        NUM_HEADS=8
-        ATTN_TYPE="sparse"
-        EPOCHS=500
-        ;;
-    "GPH_Slim")
-        MODEL_ALIAS="GPH_Slim"
-        MODEL="graphormer"
-        N_LAYERS=4
-        HIDDEN_DIM=64
-        FFN_DIM=64
-        NUM_HEADS=8
-        ATTN_TYPE="sparse"
-        EPOCHS=500
-        ;;
-    "GPH_Large")
-        MODEL_ALIAS="GPH_Large"
-        MODEL="graphormer"
-        N_LAYERS=12
-        HIDDEN_DIM=768
-        FFN_DIM=768
-        NUM_HEADS=32
-        ATTN_TYPE="sparse"
-        EPOCHS=200
-        ;;
-    *)
-        echo "Error: unsupported model: $MODEL_INPUT" >&2
-        exit 1
-        ;;
-esac
-
-if [ "$dataset" = "AmazonProducts" ]; then
-    if [ "$MODEL_ALIAS" = "GT" ]; then
-        NPARTS=128
-    elif [ "$MODEL_ALIAS" = "GPH_Slim" ]; then
-        NPARTS=128
-    elif [ "$MODEL_ALIAS" = "GPH_Large" ]; then
-        NPARTS=400
-    fi
-elif [ "$dataset" = "ogbn-arxiv" ]; then
-    if [ "$MODEL_ALIAS" = "GT" ]; then
-        NPARTS=16
-    elif [ "$MODEL_ALIAS" = "GPH_Slim" ]; then
-        NPARTS=16
-    elif [ "$MODEL_ALIAS" = "GPH_Large" ]; then
-        NPARTS=32
-    fi
-elif [ "$dataset" = "ogbn-products" ]; then
-    if [ "$MODEL_ALIAS" = "GT" ]; then
-        NPARTS=128
-    elif [ "$MODEL_ALIAS" = "GPH_Slim" ]; then
-        NPARTS=128
-    elif [ "$MODEL_ALIAS" = "GPH_Large" ]; then
-        NPARTS=512
-    fi
-elif [ "$dataset" = "reddit" ]; then
-    if [ "$MODEL_ALIAS" = "GT" ]; then
-        NPARTS=32
-    elif [ "$MODEL_ALIAS" = "GPH_Slim" ]; then
-        NPARTS=32
-    elif [ "$MODEL_ALIAS" = "GPH_Large" ]; then
-        NPARTS=80
-    fi
+if [ ${#SELECTED_DATASET_FLAGS[@]} -eq 0 ]; then
+    DATASET_FLAGS=(--arxiv --amazon --reddit --products --papers100M)
 else
-    echo "Error: unsupported dataset: $dataset" >&2
-    exit 1
+    DATASET_FLAGS=("${SELECTED_DATASET_FLAGS[@]}")
 fi
 
-# ================= Main Execution =================
+if [ ${#MODELS[@]} -eq 0 ]; then
+    MODELS=(GT GPH_Slim GPH_Large)
+fi
 
 IFS=, read -r -a GPU_LIST <<< "$DEVICES"
 GPU_NUM=${#GPU_LIST[@]}
@@ -150,26 +61,148 @@ mkdir -p "${LOG_DIR}"
 
 WINDOW_AUG_STRATEGY="ours"
 WINDOW_EXTRA_RATIO=0.30
-WINDOW_RELATED_RATIO=0.12
-WINDOW_FEATURE_RATIO=0.06
-WINDOW_HUB_RATIO=0.12
-FEATURE_SIM_VIRTUAL_EDGES_PER_NODE=4
+WINDOW_RELATED_RATIO=0.15
+WINDOW_HUB_RATIO=0.15
+USE_CACHE=1
+USE_PREPROCESS_CACHE=1
+ATTN_TYPE="sparse"
+PPR_BACKEND="appnp"
+PPR_TOPK=5
+PPR_ALPHA=0.85
+PPR_NUM_ITER=10
 
-LOG_FILE="${LOG_DIR}/${dataset}_${MODEL_ALIAS}_${WINDOW_AUG_STRATEGY}_nparts${NPARTS}_${RUN_TAG}.log"
-MASTER_PORT=$((8000 + RANDOM % 1000))
+resolve_dataset() {
+    case "$1" in
+        --arxiv) echo "ogbn-arxiv" ;;
+        --amazon) echo "AmazonProducts" ;;
+        --reddit) echo "reddit" ;;
+        --products) echo "ogbn-products" ;;
+        --papers100M) echo "ogbn-papers100M" ;;
+        *) return 1 ;;
+    esac
+}
 
-echo "-------------------------------------------------------------"
-echo "Dataset: ${dataset}"
-echo "Model: ${MODEL_ALIAS}"
-echo "Window Augmentation: ${WINDOW_AUG_STRATEGY} extra=${WINDOW_EXTRA_RATIO} related=${WINDOW_RELATED_RATIO} feature=${WINDOW_FEATURE_RATIO} hub=${WINDOW_HUB_RATIO}"
-echo "GPUs: ${GPU_NUM} (CUDA_VISIBLE_DEVICES=${DEVICES})"
-echo "Log: ${LOG_FILE}"
-echo "-------------------------------------------------------------"
+resolve_model_params() {
+    case "$1" in
+        GT) echo "gt_sw 4 128 128 8" ;;
+        GPH_Slim) echo "graphormer 4 64 64 8" ;;
+        GPH_Large) echo "graphormer 12 768 768 32" ;;
+        *) return 1 ;;
+    esac
+}
 
-CUDA_VISIBLE_DEVICES="${DEVICES}" torchrun   --nproc_per_node="${GPU_NUM}"   --master_port="${MASTER_PORT}"   main_sp_node_level_ppr.py   --dataset "${dataset}"   --dataset_dir "${DATASET_DIR}"   --model "${MODEL}"   --attn_type "${ATTN_TYPE}"   --n_layers "${N_LAYERS}"   --hidden_dim "${HIDDEN_DIM}"   --ffn_dim "${FFN_DIM}"   --num_heads "${NUM_HEADS}"   --epochs "${EPOCHS}"   --use_cache 1   --use_preprocess_cache 0   --n_parts "${NPARTS}"   --window_aug_strategy "${WINDOW_AUG_STRATEGY}"   --window_extra_node_ratio "${WINDOW_EXTRA_RATIO}"   --window_related_ratio "${WINDOW_RELATED_RATIO}"   --window_feature_ratio "${WINDOW_FEATURE_RATIO}"   --window_hub_ratio "${WINDOW_HUB_RATIO}"   --feature_sim_virtual_edges_per_node "${FEATURE_SIM_VIRTUAL_EDGES_PER_NODE}"   --ppr_backend appnp   --ppr_topk 5   --ppr_alpha 0.85   --ppr_num_iterations 10   --ppr_batch_size 8192   --ppr_iter_topk 5   --distributed-backend nccl   --distributed-timeout-minutes 120   > "${LOG_FILE}" 2>&1
+resolve_run_params() {
+    local dataset="$1"
+    local model_alias="$2"
 
-if [ $? -eq 0 ]; then
-    echo "Status: Success"
-else
-    echo "Status: Failed. Check ${LOG_FILE}"
-fi
+    if [ "$dataset" = "ogbn-papers100M" ]; then
+        if [ "$model_alias" = "GPH_Large" ]; then
+            echo "4096 40 2048 64 640"
+        else
+            echo "800 40 2048 64 640"
+        fi
+        return 0
+    fi
+
+    if [ "$dataset" = "AmazonProducts" ]; then
+        if [ "$model_alias" = "GPH_Large" ]; then
+            echo "400 40 8192 5 120"
+        else
+            echo "128 40 8192 5 120"
+        fi
+    elif [ "$dataset" = "ogbn-arxiv" ]; then
+        if [ "$model_alias" = "GPH_Large" ]; then
+            echo "32 40 8192 5 120"
+        else
+            echo "16 40 8192 5 120"
+        fi
+    elif [ "$dataset" = "ogbn-products" ]; then
+        if [ "$model_alias" = "GPH_Large" ]; then
+            echo "512 40 8192 5 120"
+        else
+            echo "128 40 8192 5 120"
+        fi
+    elif [ "$dataset" = "reddit" ]; then
+        if [ "$model_alias" = "GPH_Large" ]; then
+            echo "80 40 8192 5 120"
+        else
+            echo "32 40 8192 5 120"
+        fi
+    else
+        return 1
+    fi
+}
+
+for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
+    DATASET=$(resolve_dataset "${DATASET_FLAG}")
+
+    for MODEL_ALIAS in "${MODELS[@]}"; do
+        read -r MODEL N_LAYERS HIDDEN_DIM FFN_DIM NUM_HEADS <<< "$(resolve_model_params "${MODEL_ALIAS}")"
+        read -r NPARTS EPOCHS PPR_BATCH_SIZE PPR_ITER_TOPK TIMEOUT <<< "$(resolve_run_params "${DATASET}" "${MODEL_ALIAS}")"
+
+        MODE_LABEL="train"
+        if [ "$PREPROCESS_ONLY" -eq 1 ]; then
+            MODE_LABEL="preprocess"
+        fi
+        if [ "$REFRESH_PREPROCESS_CACHE" -eq 1 ]; then
+            MODE_LABEL="${MODE_LABEL}_refresh"
+        fi
+
+        LOG_FILE="${LOG_DIR}/${DATASET}_${MODEL_ALIAS}_${WINDOW_AUG_STRATEGY}_e${EPOCHS}_nparts${NPARTS}_${MODE_LABEL}_${RUN_TAG}.log"
+        MASTER_PORT=$((8000 + RANDOM % 1000))
+
+        echo "============================================================="
+        echo "NeutronGT"
+        echo "Dataset: ${DATASET}"
+        echo "Model: ${MODEL_ALIAS}"
+        echo "layers=${N_LAYERS} hidden=${HIDDEN_DIM} ffn=${FFN_DIM} heads=${NUM_HEADS}"
+        echo "epochs=${EPOCHS} n_parts=${NPARTS}"
+        echo "window_aug=${WINDOW_AUG_STRATEGY} extra=${WINDOW_EXTRA_RATIO} related=${WINDOW_RELATED_RATIO} hub=${WINDOW_HUB_RATIO}"
+        echo "cache=${USE_CACHE} preprocess_cache=${USE_PREPROCESS_CACHE} refresh=${REFRESH_PREPROCESS_CACHE}"
+        echo "ppr_backend=${PPR_BACKEND} ppr_topk=${PPR_TOPK} ppr_batch=${PPR_BATCH_SIZE} ppr_iter_topk=${PPR_ITER_TOPK}"
+        echo "GPUs=${GPU_NUM} CUDA_VISIBLE_DEVICES=${DEVICES} timeout=${TIMEOUT}m"
+        echo "Log: ${LOG_FILE}"
+        echo "============================================================="
+
+        CUDA_VISIBLE_DEVICES="${DEVICES}" torchrun \
+            --nproc_per_node="${GPU_NUM}" \
+            --master_port="${MASTER_PORT}" \
+            main_sp_node_level_ppr.py \
+            --dataset "${DATASET}" \
+            --dataset_dir "${DATASET_DIR}" \
+            --model "${MODEL}" \
+            --attn_type "${ATTN_TYPE}" \
+            --n_layers "${N_LAYERS}" \
+            --hidden_dim "${HIDDEN_DIM}" \
+            --ffn_dim "${FFN_DIM}" \
+            --num_heads "${NUM_HEADS}" \
+            --epochs "${EPOCHS}" \
+            --use_cache "${USE_CACHE}" \
+            --use_preprocess_cache "${USE_PREPROCESS_CACHE}" \
+            --refresh_preprocess_cache "${REFRESH_PREPROCESS_CACHE}" \
+            --n_parts "${NPARTS}" \
+            --window_aug_strategy "${WINDOW_AUG_STRATEGY}" \
+            --window_extra_node_ratio "${WINDOW_EXTRA_RATIO}" \
+            --window_related_ratio "${WINDOW_RELATED_RATIO}" \
+            --window_hub_ratio "${WINDOW_HUB_RATIO}" \
+            --ppr_backend "${PPR_BACKEND}" \
+            --ppr_topk "${PPR_TOPK}" \
+            --ppr_alpha "${PPR_ALPHA}" \
+            --ppr_num_iterations "${PPR_NUM_ITER}" \
+            --ppr_batch_size "${PPR_BATCH_SIZE}" \
+            --ppr_iter_topk "${PPR_ITER_TOPK}" \
+            --preprocess_only "${PREPROCESS_ONLY}" \
+            --distributed-backend nccl \
+            --distributed-timeout-minutes "${TIMEOUT}" \
+            > "${LOG_FILE}" 2>&1
+
+        EXIT_CODE=$?
+        if [ ${EXIT_CODE} -ne 0 ]; then
+            echo "[${DATASET} ${MODEL_ALIAS}] Failed (exit ${EXIT_CODE}), stopping. Check ${LOG_FILE}"
+            exit ${EXIT_CODE}
+        fi
+        echo "[${DATASET} ${MODEL_ALIAS}] Done."
+    done
+done
+
+echo "All NeutronGT runs done."

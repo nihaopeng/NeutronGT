@@ -90,10 +90,8 @@ TIMEOUT=120
 PPR_BATCH_SIZE=8192
 PPR_ITER_TOPK=5
 WINDOW_EXTRA_RATIO=0.30
-WINDOW_RELATED_RATIO=0.12
-WINDOW_FEATURE_RATIO=0.06
-WINDOW_HUB_RATIO=0.12
-FEATURE_SIM_VIRTUAL_EDGES_PER_NODE=4
+WINDOW_RELATED_RATIO=0.15
+WINDOW_HUB_RATIO=0.15
 
 if [ ${#SELECTED_DATASET_FLAGS[@]} -eq 0 ]; then
     DATASET_FLAGS=(--arxiv --amazon --reddit --products)
@@ -196,9 +194,7 @@ for DATASET_FLAG in "${DATASET_FLAGS[@]}"; do
             --window_aug_strategy "${STRATEGY}" \
             --window_extra_node_ratio "${WINDOW_EXTRA_RATIO}" \
             --window_related_ratio "${WINDOW_RELATED_RATIO}" \
-            --window_feature_ratio "${WINDOW_FEATURE_RATIO}" \
             --window_hub_ratio "${WINDOW_HUB_RATIO}" \
-            --feature_sim_virtual_edges_per_node "${FEATURE_SIM_VIRTUAL_EDGES_PER_NODE}" \
             --ppr_backend appnp \
             --ppr_topk 5 \
             --ppr_alpha 0.85 \

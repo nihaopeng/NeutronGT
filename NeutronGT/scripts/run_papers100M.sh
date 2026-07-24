@@ -93,27 +93,24 @@ for MODEL_ALIAS in "${MODELS[@]}"; do
             N_LAYERS=4; HIDDEN_DIM=128; FFN_DIM=128; NUM_HEADS=8
             NPARTS=800
             WINDOW_EXTRA_RATIO=0.30
-            WINDOW_RELATED_RATIO=0.12
-            WINDOW_FEATURE_RATIO=0.06
-            WINDOW_HUB_RATIO=0.12
+            WINDOW_RELATED_RATIO=0.15
+            WINDOW_HUB_RATIO=0.15
             ;;
         "GPH_Slim")
             MODEL="graphormer"
             N_LAYERS=4; HIDDEN_DIM=64; FFN_DIM=64; NUM_HEADS=8
             NPARTS=800
             WINDOW_EXTRA_RATIO=0.30
-            WINDOW_RELATED_RATIO=0.12
-            WINDOW_FEATURE_RATIO=0.06
-            WINDOW_HUB_RATIO=0.12
+            WINDOW_RELATED_RATIO=0.15
+            WINDOW_HUB_RATIO=0.15
             ;;
         "GPH_Large")
             MODEL="graphormer"
             N_LAYERS=12; HIDDEN_DIM=768; FFN_DIM=768; NUM_HEADS=32
             NPARTS=4096
             WINDOW_EXTRA_RATIO=0.30
-            WINDOW_RELATED_RATIO=0.12
-            WINDOW_FEATURE_RATIO=0.06
-            WINDOW_HUB_RATIO=0.12
+            WINDOW_RELATED_RATIO=0.15
+            WINDOW_HUB_RATIO=0.15
             ;;
     esac
 
@@ -132,7 +129,7 @@ for MODEL_ALIAS in "${MODELS[@]}"; do
     echo "============================================================="
     echo "  layers=${N_LAYERS} hidden=${HIDDEN_DIM} ffn=${FFN_DIM} heads=${NUM_HEADS}"
     echo "  n_parts=${NPARTS} epochs=${EPOCHS}"
-    echo "  window_aug=ours extra=${WINDOW_EXTRA_RATIO} related=${WINDOW_RELATED_RATIO} feature=${WINDOW_FEATURE_RATIO} hub=${WINDOW_HUB_RATIO}"
+    echo "  window_aug=ours extra=${WINDOW_EXTRA_RATIO} related=${WINDOW_RELATED_RATIO} hub=${WINDOW_HUB_RATIO}"
     echo "  preprocess_cache=${USE_PREPROCESS_CACHE} refresh_preprocess_cache=${REFRESH_PREPROCESS_CACHE}"
     echo "  GPUs=${GPU_NUM}  timeout=${TIMEOUT}m  log=${LOG_FILE}"
     echo "============================================================="
@@ -157,9 +154,7 @@ for MODEL_ALIAS in "${MODELS[@]}"; do
         --window_aug_strategy ours \
         --window_extra_node_ratio "${WINDOW_EXTRA_RATIO}" \
         --window_related_ratio "${WINDOW_RELATED_RATIO}" \
-        --window_feature_ratio "${WINDOW_FEATURE_RATIO}" \
         --window_hub_ratio "${WINDOW_HUB_RATIO}" \
-        --feature_sim_virtual_edges_per_node 4 \
         --ppr_backend "${PPR_BACKEND}" \
         --ppr_topk "${PPR_TOPK}" \
         --ppr_alpha "${PPR_ALPHA}" \

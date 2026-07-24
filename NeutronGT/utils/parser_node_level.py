@@ -97,14 +97,10 @@ def parser_add_main_args(parser):
                        help='fixed-window augmentation strategy used during preprocessing')
     parser.add_argument('--window_extra_node_ratio', type=float, default=0.30,
                        help='target extra unique nodes per core window for window augmentation')
-    parser.add_argument('--window_related_ratio', type=float, default=0.12,
+    parser.add_argument('--window_related_ratio', type=float, default=0.15,
                        help='preferred related-node budget ratio for ours augmentation')
-    parser.add_argument('--window_feature_ratio', type=float, default=0.06,
-                       help='preferred feature-sim node budget ratio for ours augmentation')
-    parser.add_argument('--window_hub_ratio', type=float, default=0.12,
+    parser.add_argument('--window_hub_ratio', type=float, default=0.15,
                        help='preferred global hub-node budget ratio for ours augmentation')
-    parser.add_argument('--feature_sim_virtual_edges_per_node', type=int, default=4,
-                       help='max bidirectional virtual edges per feature-sim node for window augmentation')
     
     # distributed args
     parser.add_argument('--rank', type=int, default=None,

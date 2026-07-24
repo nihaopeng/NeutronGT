@@ -7,7 +7,7 @@ import torch
 from typing import Any
 
 _PREPROCESS_CACHE_VERSION = 1
-_WINDOW_AUG_IMPL_VERSION = 5
+_WINDOW_AUG_IMPL_VERSION = 6
 _PREPROCESS_CACHE_KEY_FIELDS = (
     'dataset',
     'ppr_backend',
@@ -28,9 +28,7 @@ _WINDOW_AUG_CACHE_KEY_FIELDS = (
     'window_aug_strategy',
     'window_extra_node_ratio',
     'window_related_ratio',
-    'window_feature_ratio',
     'window_hub_ratio',
-    'feature_sim_virtual_edges_per_node',
 )
 
 

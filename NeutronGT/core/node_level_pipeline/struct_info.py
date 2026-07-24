@@ -169,9 +169,7 @@ def _print_preprocess_timing(args, timing: dict, wm_timing_stats: dict):
     stage1_metis_time = parent_partition_time + child_partition_time
     stage1_time = stage1_base_time + stage1_metis_time
     stage2_time = (
-        wm_timing_stats.get('centroid_build_time', 0.0)
-        + wm_timing_stats.get('related_nodes_merge_time', 0.0)
-        + wm_timing_stats.get('feature_sim_merge_time', 0.0)
+        wm_timing_stats.get('related_nodes_merge_time', 0.0)
         + wm_timing_stats.get('hub_node_merge_time', 0.0)
         + wm_timing_stats.get('random_fill_time', 0.0)
         + wm_timing_stats.get('expanded_edge_concat_time', 0.0)
@@ -202,9 +200,7 @@ def _print_preprocess_timing(args, timing: dict, wm_timing_stats: dict):
     )
     print(
         f"[PreprocessTiming] stage2_window "
-        f"centroid={wm_timing_stats.get('centroid_build_time', 0.0):.3f} "
         f"related={wm_timing_stats.get('related_nodes_merge_time', 0.0):.3f} "
-        f"feature={wm_timing_stats.get('feature_sim_merge_time', 0.0):.3f} "
         f"hub={wm_timing_stats.get('hub_node_merge_time', 0.0):.3f} "
         f"filler={wm_timing_stats.get('random_fill_time', 0.0):.3f} "
         f"expanded_edge={wm_timing_stats.get('expanded_edge_concat_time', 0.0):.3f} "
@@ -215,7 +211,6 @@ def _print_preprocess_timing(args, timing: dict, wm_timing_stats: dict):
 
     target_extra_nodes = int(wm_timing_stats.get('augmentation_target_extra_nodes', 0))
     related_nodes = int(wm_timing_stats.get('augmentation_related_nodes', 0))
-    feature_nodes = int(wm_timing_stats.get('augmentation_feature_nodes', 0))
     hub_nodes = int(wm_timing_stats.get('augmentation_hub_nodes', 0))
     filler_nodes = int(wm_timing_stats.get('augmentation_filler_nodes', 0))
     filler_ratio = (filler_nodes / target_extra_nodes) if target_extra_nodes > 0 else 0.0
@@ -223,7 +218,6 @@ def _print_preprocess_timing(args, timing: dict, wm_timing_stats: dict):
         f"[PreprocessTiming] window_aug={getattr(args, 'window_aug_strategy', 'ours')} "
         f"target_extra_nodes={target_extra_nodes} "
         f"related_nodes={related_nodes} "
-        f"feature_nodes={feature_nodes} "
         f"hub_nodes={hub_nodes} "
         f"filler_nodes={filler_nodes} "
         f"filler_ratio={filler_ratio:.6f}"
@@ -398,17 +392,14 @@ def build_graph_struct_info(args, N, edge_index, feature, world_size, device, to
         csr_adjacency=csr_adjacency,
         eweights=eweights,
         n_parts=n_parts,
-        feature=feature,
         edge_index=graph_edge_index,
         edge_csr_data=edge_csr_data,
         attn_type=args.attn_type,
         sorted_ppr_matrix=sorted_ppr_matrix,
         window_aug_strategy=getattr(args, 'window_aug_strategy', 'ours'),
         window_extra_node_ratio=getattr(args, 'window_extra_node_ratio', 0.30),
-        window_related_ratio=getattr(args, 'window_related_ratio', 0.12),
-        window_feature_ratio=getattr(args, 'window_feature_ratio', 0.06),
-        window_hub_ratio=getattr(args, 'window_hub_ratio', 0.12),
-        feature_sim_virtual_edges_per_node=getattr(args, 'feature_sim_virtual_edges_per_node', 4),
+        window_related_ratio=getattr(args, 'window_related_ratio', 0.15),
+        window_hub_ratio=getattr(args, 'window_hub_ratio', 0.15),
         seed=getattr(args, 'seed', 42),
     )
     partition_build_time = time.time() - partition_build_start
