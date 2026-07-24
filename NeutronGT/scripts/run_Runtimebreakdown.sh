@@ -75,25 +75,25 @@ USE_CACHE=1
 EPOCHS=500
 
 if [ "$dataset" = "AmazonProducts" ]; then
-    NPARTS=1024
-    WINDOW_EXTRA_RATIO=0.15
-    WINDOW_RELATED_RATIO=0.075
-    WINDOW_HUB_RATIO=0.075
+    NPARTS=800
+    WINDOW_EXTRA_RATIO=0.10
+    WINDOW_RELATED_RATIO=0.05
+    WINDOW_HUB_RATIO=0.05
 elif [ "$dataset" = "ogbn-arxiv" ]; then
     NPARTS=32
     WINDOW_EXTRA_RATIO=0.30
     WINDOW_RELATED_RATIO=0.15
     WINDOW_HUB_RATIO=0.15
 elif [ "$dataset" = "ogbn-products" ]; then
-    NPARTS=2048
+    NPARTS=1024
+    WINDOW_EXTRA_RATIO=0.10
+    WINDOW_RELATED_RATIO=0.05
+    WINDOW_HUB_RATIO=0.05
+elif [ "$dataset" = "reddit" ]; then
+    NPARTS=96
     WINDOW_EXTRA_RATIO=0.15
     WINDOW_RELATED_RATIO=0.075
     WINDOW_HUB_RATIO=0.075
-elif [ "$dataset" = "reddit" ]; then
-    NPARTS=128
-    WINDOW_EXTRA_RATIO=0.20
-    WINDOW_RELATED_RATIO=0.10
-    WINDOW_HUB_RATIO=0.10
 else
     echo "Error: unsupported dataset: $dataset" >&2
     exit 1
